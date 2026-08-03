@@ -48,12 +48,36 @@ tmp=$(mktemp -d)
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
 
+extract_required_file() {
+  file=$1
+  archive_path=".${file}"
+  if tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" "$archive_path" 2>/dev/null; then
+    return 0
+  fi
+  # Debian bookworm uses usrmerge, so /lib is represented as /usr/lib in tar archives.
+  case "$file" in
+    /lib/*)
+      tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" "./usr${file}"
+      ;;
+    *)
+      echo "missing rootfs archive entry: $file" >&2
+      return 1
+      ;;
+  esac
+}
+
 if [ -n "$LY_ROUTE_ROOTFS_REQUIRED_PACKAGES" ]; then
   tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" ./var/lib/dpkg/status
 fi
 for file in $LY_ROUTE_ROOTFS_REQUIRED_FILES; do
-  tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" ".${file}"
-  if [ ! -e "$tmp$file" ] && [ ! -L "$tmp$file" ]; then
+  extract_required_file "$file"
+  check_path="$tmp$file"
+  if [ ! -e "$check_path" ] && [ ! -L "$check_path" ]; then
+    case "$file" in
+      /lib/*) check_path="$tmp/usr${file}" ;;
+    esac
+  fi
+  if [ ! -e "$check_path" ] && [ ! -L "$check_path" ]; then
     echo "missing rootfs file: $file" >&2
     exit 1
   fi
