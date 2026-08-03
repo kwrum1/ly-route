@@ -12,7 +12,7 @@ if [ ! -f "$artifact" ]; then
 fi
 
 if [ "${LY_ROUTE_ROOTFS_REQUIRED_PACKAGES+x}" != x ]; then
-  LY_ROUTE_ROOTFS_REQUIRED_PACKAGES="libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns ly-route-dns-vpp-proxy xray openssh-server sudo"
+  LY_ROUTE_ROOTFS_REQUIRED_PACKAGES="libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns ly-route-dns-vpp-proxy xray openssh-server sudo ipset"
 fi
 required_files_defaulted=false
 if [ "${LY_ROUTE_ROOTFS_REQUIRED_FILES+x}" != x ]; then

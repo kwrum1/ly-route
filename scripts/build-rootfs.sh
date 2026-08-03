@@ -292,7 +292,7 @@ if [ "${LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY:-0}" = 1 ]; then
 elif command -v mmdebstrap >/dev/null 2>&1; then
   include='apt,systemd-sysv,dbus,nginx-light,openssh-server,sudo,openssl,ca-certificates,curl,gpgv,iproute2,iputils-ping,netbase,python3,python3-minimal,libunwind8,libnl-3-200,libnl-route-3-200,libpcap0.8,libnuma1,libelf1,zlib1g'
   if [ "$product" = gateway ]; then
-    include="$include,kea-dhcp4-server,isc-dhcp-client"
+    include="$include,kea-dhcp4-server,isc-dhcp-client,ipset"
   fi
   [ -z "$extra_packages" ] || include="$include,$extra_packages"
   mmdebstrap --architectures="$arch" --variant=minbase --components=main --include="$include" "$suite" "$rootfs" "$mirror"
