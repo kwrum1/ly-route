@@ -16,6 +16,9 @@ Ly Route 是面向 x86-64 与 ARM64 路由设备的 VPP 出口网关。当前公
 
 所有产物带独立 `.sha256`，Release 另附统一 `SHA256SUMS` 和 GitHub 构建来源证明。
 
+前端展示截图与英文发布说明见 [`docs/en/`](docs/en/README.md) 和
+[`docs/screenshots/`](docs/screenshots/README.md)。
+
 ## x86 安装
 
 IMG 适合烧录：

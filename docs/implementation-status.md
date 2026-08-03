@@ -1,8 +1,13 @@
 # LY-Route Current Implementation Inventory
 
-Updated: 2026-08-01
-Audited branch: `codex/handoff-20260730`
-Current commit: `cfbd694` plus the uncommitted integration work listed by `git status`
+Updated: 2026-08-04
+Audited branch: `main`
+Current commit: `29e95b1` (GitHub production pipeline and current Gateway source)
+
+The public repository now has a newly designed release workflow. Source and
+product verification is a required gate before x86 or ARM artifacts start.
+The latest artifact run is still building; this document must not be read as
+hardware certification or as a claim that a physical appliance has passed.
 
 ## Release position
 

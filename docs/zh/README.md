@@ -2,6 +2,8 @@
 
 ## 权威文档
 
+- [English release and CI guide](../en/release-and-ci.md)
+- [English UI showcase](../en/ui-showcase.md)
 - [网关与流量编排器产品实现现状报告](product-manager-status-report.md)：面向产品经理的已实现、部分实现、未实现和待确认边界盘点
 - [实现状态盘点](implementation-status.md)：当前代码、功能和证据基线
 - [后续工作计划](work-plan.md)：唯一有效的实施计划、依赖和验收顺序
@@ -19,5 +21,6 @@
 - [测试固件安装](test-firmware-install.md)
 - [研究门禁](research-gates.md)
 - [白皮书](whitepaper.md)
+- [前端展示截图](../screenshots/README.md)
 
 历史调查和已被取代的修复清单保留在[归档](../archive/README.md)，不再代表当前计划。
