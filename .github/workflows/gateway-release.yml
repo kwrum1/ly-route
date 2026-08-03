@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version-file: backend/go.mod
+          go-version: '1.26.x'
           cache-dependency-path: backend/go.sum
       - name: Reclaim runner disk space
         run: |
@@ -124,7 +124,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version-file: backend/go.mod
+          go-version: '1.26.x'
           cache-dependency-path: backend/go.sum
       - name: Reclaim runner disk space
         run: |
