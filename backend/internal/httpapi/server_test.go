@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1664,7 +1665,20 @@ func TestInterfaceTelemetryUsesSharedRuntimeSnapshot(t *testing.T) {
 	}
 	cookie := login.Result().Cookies()[0]
 	interfaces := request(t, server, http.MethodGet, "/api/v1/interfaces")
-	stats := request(t, server, http.MethodGet, "/api/v1/interfaces/ens33/stats")
+	if interfaces.Code != http.StatusOK {
+		t.Fatalf("interfaces status = %d body=%s", interfaces.Code, interfaces.Body.String())
+	}
+	var interfaceList struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(interfaces.Body.Bytes(), &interfaceList); err != nil || len(interfaceList.Items) == 0 {
+		t.Fatalf("decode interfaces: %v body=%s", err, interfaces.Body.String())
+	}
+	interfaceID := stringField(interfaceList.Items[0], "id")
+	if interfaceID == "" {
+		interfaceID = stringField(interfaceList.Items[0], "name")
+	}
+	stats := request(t, server, http.MethodGet, "/api/v1/interfaces/"+url.PathEscape(interfaceID)+"/stats")
 	telemetry := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/telemetry/interfaces", "", cookie)
 	for label, res := range map[string]*httptest.ResponseRecorder{"interfaces": interfaces, "stats": stats, "telemetry": telemetry} {
 		if res.Code != http.StatusOK {
