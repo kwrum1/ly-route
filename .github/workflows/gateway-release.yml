@@ -1,9 +1,5 @@
 name: Gateway production artifacts
 
-concurrency:
-  group: gateway-release-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 on:
   pull_request:
   push:
@@ -17,8 +13,8 @@ on:
         type: string
 
 concurrency:
-  group: gateway-release-${{ github.ref }}
-  cancel-in-progress: false
+  group: gateway-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
