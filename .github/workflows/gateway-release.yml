@@ -71,7 +71,8 @@ jobs:
             live-build xorriso isolinux syslinux-common
       - name: Build pinned x86 runtime packages
         run: |
-          ./scripts/build-runtime-debs.sh smartdns
+          sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR ./scripts/build-runtime-debs.sh smartdns
+          sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
           ./scripts/build-runtime-debs.sh vpp-apply
@@ -138,9 +139,11 @@ jobs:
         run: |
           git init vpp-master
           git -C vpp-master remote add origin https://github.com/FDio/vpp.git
-          git -C vpp-master fetch --depth 1 origin "$LY_ROUTE_VPP_COMMIT"
-          git -C vpp-master checkout --detach FETCH_HEAD
+          git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" \
+            '+refs/tags/v25.10:refs/tags/v25.10'
+          git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
           test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
+          git -C vpp-master describe --long --match 'v*' "$LY_ROUTE_VPP_COMMIT"
       - name: Build native ARM64 VPP and gateway runtime packages
         run: |
           sudo --preserve-env=LY_ROUTE_VPP_COMMIT env \
@@ -151,7 +154,9 @@ jobs:
           sudo chown -R "$USER:$USER" runtime-debs vpp-master
           export LY_ROUTE_RUNTIME_DEB_ARCH=arm64
           export LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs"
-          ./scripts/build-runtime-debs.sh smartdns
+          sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR \
+            ./scripts/build-runtime-debs.sh smartdns
+          sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
           ./scripts/build-runtime-debs.sh vpp-apply
