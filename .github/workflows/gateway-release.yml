@@ -32,12 +32,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - name: Install verification tools
@@ -53,8 +53,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
@@ -99,7 +99,7 @@ jobs:
           sudo chown -R "$USER:$USER" dist/x86
           rm -f dist/x86/*.img dist/x86/*.img.sha256
       - name: Upload x86 artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ly-route-gateway-x86-64
           retention-days: 14
@@ -120,8 +120,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
@@ -168,7 +168,7 @@ jobs:
             --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-arm64.tar.zst \
             --runtime-debs runtime-debs --out dist/armbian
       - name: Upload ARM64 artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ly-route-gateway-armbian-arm64
           retention-days: 14
@@ -189,7 +189,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: ly-route-gateway-*
           path: release
@@ -199,7 +199,7 @@ jobs:
           cd release
           find . -maxdepth 1 -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
       - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: 'release/*'
       - name: Publish release
