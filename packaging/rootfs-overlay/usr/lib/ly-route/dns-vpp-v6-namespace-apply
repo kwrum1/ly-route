@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+: "${LY_ROUTE_VPPCTL:=vppctl}"
+: "${LY_ROUTE_DNS_V6_TABLE:=101}"
+: "${LY_ROUTE_DNS_V6_NAMESPACE:=dns-v6}"
+: "${LY_ROUTE_DNS_V6_NAMESPACE_SECRET:=4242}"
+
+run_idempotent() {
+  output=$("$LY_ROUTE_VPPCTL" "$1" 2>&1) || {
+    case "$output" in
+      *already*exist*|*already*configured*) return 0 ;;
+      *) printf '%s\n' "$output" >&2; return 1 ;;
+    esac
+  }
+}
+
+run_idempotent "ip6 table add $LY_ROUTE_DNS_V6_TABLE"
+run_idempotent "ip route add table $LY_ROUTE_DNS_V6_TABLE ::/0 via local"
+run_idempotent "app ns add id $LY_ROUTE_DNS_V6_NAMESPACE secret $LY_ROUTE_DNS_V6_NAMESPACE_SECRET ip4-fib-id 0 ip6-fib-id $LY_ROUTE_DNS_V6_TABLE"
+"$LY_ROUTE_VPPCTL" "show ip fib table $LY_ROUTE_DNS_V6_TABLE" >/dev/null
+"$LY_ROUTE_VPPCTL" show app ns | grep -F "$LY_ROUTE_DNS_V6_NAMESPACE" >/dev/null
+printf '%s\n' "VPP IPv6 DNS namespace ready (namespace=$LY_ROUTE_DNS_V6_NAMESPACE table=$LY_ROUTE_DNS_V6_TABLE)"

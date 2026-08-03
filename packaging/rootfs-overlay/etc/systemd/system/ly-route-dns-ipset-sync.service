@@ -1,0 +1,8 @@
+[Unit]
+Description=Ly Route SmartDNS IP set to VPP policy synchronization
+After=smartdns.service ly-route-control-api.service
+Wants=smartdns.service ly-route-control-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/ly-route/dns-ipset-sync.py

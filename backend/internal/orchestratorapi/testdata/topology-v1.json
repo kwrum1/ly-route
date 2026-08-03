@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "management_interface": "eth0",
+  "interfaces": [
+    {
+      "name": "lan",
+      "role": "lan",
+      "bond": {
+        "name": "bond-lan",
+        "members": ["eth1", "eth2"]
+      }
+    },
+    {
+      "name": "wan",
+      "role": "wan",
+      "port": "eth3"
+    }
+  ],
+  "orchestration_groups": [
+    {
+      "name": "inline-east",
+      "ports": [
+        {"interface": "eth4", "direction": "lan_facing"},
+        {"interface": "eth5", "direction": "wan_facing"}
+      ]
+    },
+    {
+      "name": "inline-west",
+      "ports": [
+        {"interface": "eth6", "direction": "lan_facing"},
+        {"interface": "eth7", "direction": "wan_facing"}
+      ]
+    }
+  ]
+}

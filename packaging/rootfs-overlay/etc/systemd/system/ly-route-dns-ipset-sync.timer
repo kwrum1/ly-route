@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically synchronize Ly Route DNS IP sets
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=2s
+AccuracySec=1s
+Unit=ly-route-dns-ipset-sync.service
+
+[Install]
+WantedBy=timers.target

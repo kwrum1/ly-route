@@ -1,0 +1,14 @@
+[Unit]
+Description=Ly Route VPP operation apply
+After=vpp.service
+Requires=vpp.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+EnvironmentFile=-/etc/ly-route/control-api.env
+ExecStart=/usr/lib/ly-route/vpp-apply-default
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

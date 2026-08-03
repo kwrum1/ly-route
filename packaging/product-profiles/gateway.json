@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "product": "gateway",
+  "services": [
+    "control-api",
+    "vpp",
+    "smartdns",
+    "dns-vpp-proxy",
+    "kea",
+    "xray",
+    "pppoe"
+  ],
+  "resources": [
+    "product",
+    "health",
+    "auth",
+    "management",
+    "interfaces",
+    "gateway_mode",
+    "object_groups",
+    "gateway_wan",
+    "gateway_pppoe",
+    "gateway_routing",
+    "gateway_nat",
+    "proxy",
+    "dns",
+    "dhcp",
+    "security",
+    "traffic_control",
+    "runtime",
+    "config",
+    "firmware",
+    "dashboard",
+    "telemetry",
+    "top_domains"
+  ]
+}

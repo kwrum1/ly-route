@@ -1,0 +1,14 @@
+[Unit]
+Description=Ly Route hardware-aware VPP tuning
+DefaultDependencies=no
+After=local-fs.target systemd-sysctl.service
+Before=vpp.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/appliance.env
+ExecStart=/usr/lib/ly-route/tune-vpp.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

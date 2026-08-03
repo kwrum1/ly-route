@@ -1,0 +1,8 @@
+services:
+  ly-route-admin:
+    build: .
+    image: ly-route-admin:latest
+    container_name: ly-route-admin
+    ports:
+      - "4174:80"
+    restart: unless-stopped

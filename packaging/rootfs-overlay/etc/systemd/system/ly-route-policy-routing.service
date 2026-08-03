@@ -1,0 +1,12 @@
+[Unit]
+Description=Ly Route legacy Linux policy routing apply (disabled for VPP-native production path)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/ly-route/policy-routing-apply-default
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

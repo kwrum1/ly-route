@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+# Docker veth cannot transmit through VPP AF_XDP on this test host. Translate
+# only the container fixture's interface create/delete operations to AF_PACKET;
+# production capability selection and generated VPP commands remain unchanged.
+if [ "${1:-}" = create ] && [ "${2:-}" = interface ] && [ "${3:-}" = af_xdp ]; then
+  host_if=''
+  vpp_if=''
+  shift 3
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      host-if) host_if=${2:-}; shift 2 ;;
+      name) vpp_if=${2:-}; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$host_if" ] && [ -n "$vpp_if" ]
+  /usr/bin/vppctl -s /run/vpp/cli.sock create host-interface name "$host_if" >/dev/null
+  exec /usr/bin/vppctl -s /run/vpp/cli.sock set interface name "host-$host_if" "$vpp_if"
+fi
+
+if [ "${1:-}" = delete ] && [ "${2:-}" = interface ] && [ "${3:-}" = af_xdp ]; then
+  exec /usr/bin/vppctl -s /run/vpp/cli.sock delete host-interface name "${4:-}"
+fi
+
+exec /usr/bin/vppctl -s /run/vpp/cli.sock "$@"

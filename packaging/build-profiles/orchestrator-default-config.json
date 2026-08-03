@@ -1,0 +1,34 @@
+{
+  "config_version": 2,
+  "device_name": "ly-route-orchestrator",
+  "initialized": false,
+  "switchable": false,
+  "admin_port": 80,
+  "preserve_admin_account": true,
+  "preserve_management_port": true,
+  "management_fallback": true,
+  "management_fallback_cidr": "192.168.88.1/24",
+  "dataplane": {
+    "preferred_path": "vpp_native_proven",
+    "active_path": "dataplane_locked",
+    "degraded": true,
+    "degraded_reason": "explicit data assignments must pass fresh VPP-native runtime capability proof"
+  },
+  "interfaces": [],
+  "security": {},
+  "traffic_control": {},
+  "telemetry": {
+    "local_only": true,
+    "collectors_enabled": true,
+    "degraded_reason": "collectors report degraded until runtime daemons pass readiness checks"
+  },
+  "maintenance": {
+    "rollback_required_before_apply": true,
+    "export_excludes": ["rendered_config", "runtime_state", "audit_logs", "secrets", "snapshots"],
+    "factory_reset_preserves": ["admin_account", "management_port"]
+  },
+  "runtime_services": {
+    "vpp": { "available": false, "state": "requires-runtime-check" },
+    "nftables": { "available": false, "state": "requires-runtime-check" }
+  }
+}

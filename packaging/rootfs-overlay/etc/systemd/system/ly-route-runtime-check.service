@@ -1,0 +1,15 @@
+[Unit]
+Description=Ly Route commercial runtime readiness check
+After=network.target ly-route-firstboot.service vpp.service
+Wants=ly-route-firstboot.service vpp.service
+Before=ly-route-control-api.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+EnvironmentFile=-/etc/ly-route/control-api.env
+ExecStart=/usr/lib/ly-route/runtime-check.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

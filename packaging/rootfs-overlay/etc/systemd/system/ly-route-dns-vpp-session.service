@@ -1,0 +1,11 @@
+[Unit]
+Description=LY-Route VPP native DNS session rules
+Requires=vpp.service smartdns.service ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service
+After=vpp.service smartdns.service ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service
+Before=ly-route-dns-ipset-sync.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+ExecStart=/usr/lib/ly-route/dns-vpp-session-apply
+RemainAfterExit=yes

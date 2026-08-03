@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "product": "orchestrator",
+  "services": [
+    "control-api",
+    "vpp"
+  ],
+  "resources": [
+    "product",
+    "health",
+    "auth",
+    "management",
+    "interfaces",
+    "object_groups",
+    "security",
+    "traffic_control",
+    "runtime",
+    "config",
+    "dashboard",
+    "telemetry"
+  ]
+}

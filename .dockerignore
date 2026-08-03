@@ -1,0 +1,14 @@
+PanabitOEM_TANGr7p8_20260414_Linux3.tar.gz
+*.pdf
+.git
+.gitignore
+node_modules
+dist
+tmp
+*.log
+.DS_Store
+build
+runtime
+runtime-debs
+runtime-downloads
+.sisyphus

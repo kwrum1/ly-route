@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "product": "orchestrator",
+  "control_profile": "packaging/product-profiles/orchestrator.json",
+  "frontend_product": "orchestrator",
+  "default_config": "packaging/build-profiles/orchestrator-default-config.json",
+  "database_path": "/var/lib/ly-route/orchestrator/ly-route.db",
+  "config_path": "/var/lib/ly-route/orchestrator/config.json",
+  "services": [
+    "control-api",
+    "vpp"
+  ],
+  "systemd_units": [
+    "systemd-networkd.service",
+    "systemd-resolved.service",
+    "ly-route-runtime-check.service",
+    "ly-route-vpp-apply.service",
+    "ly-route-control-api.service",
+    "ly-route-recovery.service",
+    "ly-route-vpp-tune.service",
+    "vpp.service",
+    "ssh.service",
+    "nginx.service",
+    "ly-route-firstboot.service"
+  ],
+  "required_packages": [
+    "libvppinfra",
+    "vpp",
+    "vpp-plugin-core",
+    "vpp-plugin-dpdk",
+    "ly-route-vpp-apply",
+    "ly-route-vpp-orchestrator"
+  ],
+  "required_commands": [
+    "vpp",
+    "vppctl",
+    "/usr/lib/ly-route/vpp-apply"
+  ],
+  "required_units": [
+    "vpp.service"
+  ]
+}

@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+umask 077
+
+: "${LY_ROUTE_VPPCTL:=vppctl}"
+: "${LY_ROUTE_SMARTDNS_V4_APP_PATTERN:=${LY_ROUTE_SMARTDNS_APP_PATTERN:-dns-vpp-proxy-ldp}}"
+: "${LY_ROUTE_SMARTDNS_V6_APP_PATTERN:=dns-vpp-proxy-v6-ldp}"
+: "${LY_ROUTE_DNS_ENABLE_IPV6:=true}"
+
+tags="lyroute-smartdns-tcp4 lyroute-smartdns-udp4 lyroute-smartdns-tcp6 lyroute-smartdns-udp6"
+cleanup() {
+  for tag in $tags; do
+    "$LY_ROUTE_VPPCTL" "session rule del tag $tag" >/dev/null 2>&1 || true
+    "$LY_ROUTE_VPPCTL" "session rule del appns dns-v6 tag $tag" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup INT TERM
+
+app_indexes() {
+  "$LY_ROUTE_VPPCTL" show app | awk -v pattern="$1" '$2 ~ pattern { print $1 }'
+}
+v4_indexes=$(app_indexes "$LY_ROUTE_SMARTDNS_V4_APP_PATTERN")
+v6_indexes=""
+if [ "$LY_ROUTE_DNS_ENABLE_IPV6" = true ]; then
+  v6_indexes=$(app_indexes "$LY_ROUTE_SMARTDNS_V6_APP_PATTERN")
+fi
+v4_first=$(printf '%s\n' "$v4_indexes" | sed -n 1p)
+v4_second=$(printf '%s\n' "$v4_indexes" | sed -n 2p)
+v6_first=$(printf '%s\n' "$v6_indexes" | sed -n 1p)
+v6_second=$(printf '%s\n' "$v6_indexes" | sed -n 2p)
+tcp4_index=${LY_ROUTE_SMARTDNS_TCP4_APP_INDEX:-$v4_first}
+udp4_index=${LY_ROUTE_SMARTDNS_UDP4_APP_INDEX:-${v4_second:-$v4_first}}
+tcp6_index=${LY_ROUTE_SMARTDNS_TCP6_APP_INDEX:-${v6_first:-0}}
+udp6_index=${LY_ROUTE_SMARTDNS_UDP6_APP_INDEX:-${v6_second:-${v6_first:-0}}}
+case "$tcp4_index:$udp4_index" in
+  ""|*:|:*|*[!0-9:]* )
+    echo "VPP DNS adapter application indexes are unavailable" >&2
+    exit 1
+    ;;
+esac
+if [ "$LY_ROUTE_DNS_ENABLE_IPV6" = true ]; then
+  case "$tcp6_index:$udp6_index" in
+    ""|*:|:*|*[!0-9:]*|0:*|*:0 )
+      echo "VPP IPv6 DNS adapter application indexes are unavailable" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+cleanup
+apply_rule() {
+  output=$("$LY_ROUTE_VPPCTL" "$1" 2>&1) || { cleanup; printf '%s\n' "$output" >&2; exit 1; }
+  [ -z "$output" ] || { cleanup; printf '%s\n' "$output" >&2; exit 1; }
+}
+apply_rule "session rule add scope global proto tcp 0.0.0.0/0 53 0.0.0.0/0 0 action $tcp4_index tag lyroute-smartdns-tcp4"
+apply_rule "session rule add scope global proto udp 0.0.0.0/0 53 0.0.0.0/0 0 action $udp4_index tag lyroute-smartdns-udp4"
+if [ "$LY_ROUTE_DNS_ENABLE_IPV6" = true ]; then
+  apply_rule "session rule add appns dns-v6 scope global proto tcp ::/0 53 ::/0 0 action $tcp6_index tag lyroute-smartdns-tcp6"
+  apply_rule "session rule add appns dns-v6 scope global proto udp ::/0 53 ::/0 0 action $udp6_index tag lyroute-smartdns-udp6"
+fi
+trap - INT TERM
+printf '%s\n' "VPP DNS adapter session rules installed (tcp4=$tcp4_index udp4=$udp4_index tcp6=$tcp6_index udp6=$udp6_index)"

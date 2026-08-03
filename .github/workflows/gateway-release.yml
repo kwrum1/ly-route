@@ -1,0 +1,218 @@
+name: Gateway production artifacts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional release tag to publish (for example v1.0.0-rc1)
+        required: false
+        type: string
+
+concurrency:
+  group: gateway-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  LY_ROUTE_MIRROR: https://deb.debian.org/debian
+  LY_ROUTE_SECURITY_MIRROR: https://security.debian.org/debian-security
+  LY_ROUTE_SMARTDNS_REF: Release48.3
+  LY_ROUTE_XRAY_REF: v26.3.27
+  LY_ROUTE_VPP_COMMIT: 744d3c7159ae130fb57f669a826ff1e45ed51836
+
+jobs:
+  verify:
+    name: Source and product verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd dpkg-dev python3
+      - name: Run release verification
+        run: ./scripts/ci-release-verify.sh
+
+  x86:
+    name: x86-64 IMG, automatic ISO and upgrade
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
+            build-essential cmake dpkg-dev git curl gdisk parted dosfstools rsync \
+            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux \
+            live-build xorriso isolinux syslinux-common
+      - name: Build pinned x86 runtime packages
+        run: |
+          ./scripts/build-runtime-debs.sh smartdns
+          ./scripts/build-runtime-debs.sh dns-vpp-proxy
+          ./scripts/build-runtime-debs.sh xray
+          ./scripts/build-runtime-debs.sh vpp-apply
+          ./scripts/build-runtime-debs.sh vpp-fdio
+          ./scripts/build-runtime-debs.sh vpp-smart-qos
+          ./scripts/build-runtime-debs.sh vpp-security-guard
+          ./scripts/build-runtime-debs.sh vpp-pppoe-client
+      - name: Build gateway rootfs and upgrade
+        run: |
+          sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
+            ./scripts/build-rootfs.sh --product gateway --arch amd64 --out dist/rootfs
+          LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
+            ./scripts/build-upgrade-package.sh --product gateway --arch amd64 --out dist/upgrade
+          ./scripts/rootfs-runtime-smoke.sh dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst
+      - name: Build burnable image
+        run: |
+          sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR \
+            ./scripts/build-disk-image.sh --product gateway \
+              --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst \
+              --out dist/x86 --size 4G
+      - name: Build fully automatic installer ISO
+        run: |
+          image=$(find dist/x86 -maxdepth 1 -name '*.img.zst' -print -quit)
+          sudo ./scripts/build-auto-install-iso.sh --product gateway --image "$image" --out dist/x86
+          sudo chown -R "$USER:$USER" dist/x86
+          rm -f dist/x86/*.img dist/x86/*.img.sha256
+      - name: Upload x86 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ly-route-gateway-x86-64
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/x86/*.img.zst
+            dist/x86/*.img.zst.sha256
+            dist/x86/*.manifest.json
+            dist/x86/*.manifest.json.sha256
+            dist/x86/*.iso
+            dist/x86/*.iso.sha256
+            dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
+            dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
+
+  arm64:
+    name: Armbian arm64 installer and upgrade
+    needs: verify
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - name: Install native ARM build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
+            build-essential cmake dpkg-dev git curl rsync python3
+      - name: Fetch pinned VPP source
+        run: |
+          git init vpp-master
+          git -C vpp-master remote add origin https://github.com/FDio/vpp.git
+          git -C vpp-master fetch --depth 1 origin "$LY_ROUTE_VPP_COMMIT"
+          git -C vpp-master checkout --detach FETCH_HEAD
+          test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
+      - name: Build native ARM64 VPP and gateway runtime packages
+        run: |
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT env \
+            LY_ROUTE_RUNTIME_DEB_ARCH=arm64 \
+            LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
+            LY_ROUTE_VPP_INSTALL_DEPS=1 \
+            ./scripts/build-runtime-debs.sh vpp
+          sudo chown -R "$USER:$USER" runtime-debs vpp-master
+          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64
+          export LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs"
+          ./scripts/build-runtime-debs.sh smartdns
+          ./scripts/build-runtime-debs.sh dns-vpp-proxy
+          ./scripts/build-runtime-debs.sh xray
+          ./scripts/build-runtime-debs.sh vpp-apply
+          ./scripts/build-runtime-debs.sh vpp-smart-qos
+          ./scripts/build-runtime-debs.sh vpp-security-guard
+          ./scripts/build-runtime-debs.sh vpp-pppoe-client
+      - name: Build ARM64 gateway rootfs, installer and upgrade
+        run: |
+          sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
+            ./scripts/build-rootfs.sh --product gateway --arch arm64 --out dist/rootfs
+          LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
+            ./scripts/build-upgrade-package.sh --product gateway --arch arm64 --out dist/upgrade
+          ./scripts/build-armbian-installer.sh --product gateway \
+            --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-arm64.tar.zst \
+            --runtime-debs runtime-debs --out dist/armbian
+      - name: Upload ARM64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ly-route-gateway-armbian-arm64
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst
+            dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst.sha256
+            dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst
+            dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256
+
+  release:
+    name: Publish GitHub release
+    needs: [x86, arm64]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ly-route-gateway-*
+          path: release
+          merge-multiple: true
+      - name: Build unified checksum manifest
+        run: |
+          cd release
+          find . -maxdepth 1 -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: 'release/*'
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_TAG: ${{ inputs.release_tag }}
+        run: |
+          tag=${GITHUB_REF_NAME}
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then tag=$DISPATCH_TAG; fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            gh release create "$tag" release/* --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "Ly Route Gateway $tag" --generate-notes
+          else
+            gh release create "$tag" release/* --repo "$GITHUB_REPOSITORY" \
+              --title "Ly Route Gateway $tag" --generate-notes --verify-tag
+          fi

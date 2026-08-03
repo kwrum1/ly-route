@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ly Route 编排器</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ffffff'/%3E%3Cpath d='M7 21V10h4v7h10v4H7Zm11-6 6-5v11l-6-6Z' fill='%232f7de1'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css?v=monitor-tables-20260803">
+  <link rel="stylesheet" href="./product.css">
+</head>
+<body>
+  <section class="login-screen login-screen-orchestrator" id="loginScreen" aria-label="登录">
+    <form class="login-box" id="loginForm">
+      <div class="login-brand">
+        <span class="login-product-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="8" height="8" x="3" y="3" rx="2"></rect>
+            <path d="M7 11v4a2 2 0 0 0 2 2h4"></path>
+            <rect width="8" height="8" x="13" y="13" rx="2"></rect>
+          </svg>
+        </span>
+      </div>
+      <h1>流量编排控制台</h1>
+      <label><span>用户名</span><input id="username" autocomplete="username"></label>
+      <label><span>密码</span><input id="password" type="password" autocomplete="current-password"></label>
+      <button type="submit">登录</button>
+      <small id="loginHint">使用授权账号登录管理控制台。</small>
+    </form>
+  </section>
+
+  <section class="app-shell is-hidden" id="appShell" aria-label="管理后台">
+    <header class="paui-header">
+      <button id="mobileMenuToggle" class="mobile-menu-toggle" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="sideMenu" title="打开菜单">&#9776;</button>
+      <div class="brand"><span class="brand-mark">LR</span><strong>Ly Route</strong><em>编排器</em></div>
+      <nav class="header-tools" aria-label="顶部工具">
+        <button id="logoutButton" type="button">退出</button>
+      </nav>
+    </header>
+
+    <aside class="paui-sidebar">
+      <label class="menu-search"><span>菜单搜索</span><input id="menuSearch" type="search"></label>
+      <nav id="sideMenu" class="side-menu" aria-label="左侧功能菜单"></nav>
+    </aside>
+
+    <main class="paui-body">
+      <section class="workspace" id="workspace" aria-live="polite"></section>
+    </main>
+  </section>
+
+  <div class="modal-backdrop is-hidden" id="modalBackdrop" role="presentation"></div>
+  <section class="modal is-hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <header><h2 id="modalTitle">编辑</h2><button id="modalClose" type="button" aria-label="关闭">×</button></header>
+    <div id="modalBody" class="modal-body"></div>
+    <footer><button id="modalCancel" type="button">取消</button><button id="modalOk" type="button">确定</button></footer>
+  </section>
+  <div class="toast is-hidden" id="toast"></div>
+  <script src="./shell.js?v=dual-product-20260722"></script>
+  <script src="./app.js?v=orchestrator-ui-20260803"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+[Unit]
+Description=Ly Route native VPP PPPoE peer %i
+After=network-online.target vpp.service
+Wants=network-online.target
+Requires=vpp.service
+PartOf=ly-route-pppoe.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/ly-route/ly-route-pppoe-client -config /etc/ly-route/pppoe/%i.json
+Restart=on-failure
+RestartSec=3s
+RuntimeDirectory=ly-route/pppoe
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/run/ly-route/pppoe
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=ly-route-pppoe.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Ly Route first boot management defaults
+After=network-pre.target
+Before=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/appliance.env
+ExecStart=/usr/lib/ly-route/firstboot.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

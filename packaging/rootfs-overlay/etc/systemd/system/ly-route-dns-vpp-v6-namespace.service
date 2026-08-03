@@ -1,0 +1,14 @@
+[Unit]
+Description=LY-Route VPP IPv6 DNS namespace
+Requires=vpp.service
+After=vpp.service ly-route-vpp-apply.service
+Before=ly-route-dns-vpp-proxy-v6.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+ExecStart=/usr/lib/ly-route/dns-vpp-v6-namespace-apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+{
+  "operations": {
+    "vpp.security-acl": [
+      "?set acl-plugin acl index 78363 deny src 0.0.0.0/0 dst 0.0.0.0/0 proto any sport 0-65535 dport 0-65535 tag ly-route-sec_acl_default_deny_wan",
+      "?set interface input acl intfc lyroute-$LY_ROUTE_LAN_INTERFACE ip4-table 78363",
+      "show acl-plugin acl index 78363",
+      "show interface lyroute-$LY_ROUTE_LAN_INTERFACE"
+    ]
+  }
+}

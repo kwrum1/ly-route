@@ -1,0 +1,68 @@
+services:
+  ly-route-gateway-vpp:
+    build:
+      context: ../..
+      dockerfile: deploy/gateway-demo/VPP.Dockerfile
+    image: ly-route-gateway-vpp-demo:latest
+    container_name: ly-route-gateway-vpp-demo
+    privileged: true
+    shm_size: 256m
+    environment:
+      LY_ROUTE_CONTROL_BINARY: /usr/local/bin/ly-route-control
+      LY_ROUTE_PRODUCT_PROFILE: /etc/ly-route/product-manifest.json
+      LY_ROUTE_API_HOST: 0.0.0.0
+      LY_ROUTE_API_PORT: 8080
+      LY_ROUTE_DATA_DIR: /var/lib/ly-route/gateway
+      LY_ROUTE_DB_PATH: /var/lib/ly-route/gateway/ly-route.db
+      LY_ROUTE_CONFIG_PATH: /var/lib/ly-route/gateway/config.json
+      LY_ROUTE_ADMIN_USERNAME: admin
+      LY_ROUTE_ADMIN_PASSWORD: password
+      LY_ROUTE_FORCE_PASSWORD_CHANGE: "true"
+      LY_ROUTE_SESSION_COOKIE_SECURE: "true"
+      LY_ROUTE_MANAGEMENT_INTERFACE: eth0
+      LY_ROUTE_LAN_INTERFACE: eth1
+      LY_ROUTE_INCLUDE_VIRTUAL_INTERFACES: "true"
+      LY_ROUTE_ENABLE_VPP_INTERFACE_TELEMETRY: "true"
+      LY_ROUTE_ENABLE_SERVICE_RUNTIME: "false"
+      LY_ROUTE_VPPCTL: /usr/local/bin/ly-route-vppctl
+      LY_ROUTE_VPP_CAPABILITY_PROOF: /var/lib/ly-route/gateway/vpp-native-capabilities.json
+      LY_ROUTE_DATAPLANE_STATE_DIR: /var/lib/ly-route/gateway/dataplane
+    volumes:
+      - ly-route-gateway-demo-data:/var/lib/ly-route/gateway
+    networks:
+      mgmt: { ipv4_address: 172.30.0.2, interface_name: eth0 }
+      lan: { ipv4_address: 172.31.0.2, interface_name: eth1 }
+      wan: { ipv4_address: 172.32.0.2, interface_name: eth2 }
+      chain1-lan: { ipv4_address: 172.33.0.2, interface_name: eth3 }
+      chain1-wan: { ipv4_address: 172.34.0.2, interface_name: eth4 }
+      chain2-lan: { ipv4_address: 172.35.0.2, interface_name: eth5 }
+      chain2-wan: { ipv4_address: 172.36.0.2, interface_name: eth6 }
+    restart: unless-stopped
+
+  ly-route-gateway-demo:
+    image: ly-route-gateway-demo:latest
+    container_name: ly-route-gateway-demo
+    depends_on:
+      - ly-route-gateway-vpp
+    ports:
+      - "8443:443"
+    environment:
+      LY_ROUTE_EXTERNAL_CONTROL: "true"
+      LY_ROUTE_SESSION_COOKIE_SECURE: "true"
+    volumes:
+      - ./nginx-vpp.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      mgmt: { ipv4_address: 172.30.0.3, interface_name: eth0 }
+    restart: unless-stopped
+
+volumes:
+  ly-route-gateway-demo-data:
+
+networks:
+  mgmt: { driver: bridge, ipam: { config: [{ subnet: 172.30.0.0/24 }] } }
+  lan: { driver: bridge, ipam: { config: [{ subnet: 172.31.0.0/24 }] } }
+  wan: { driver: bridge, ipam: { config: [{ subnet: 172.32.0.0/24 }] } }
+  chain1-lan: { driver: bridge, ipam: { config: [{ subnet: 172.33.0.0/24 }] } }
+  chain1-wan: { driver: bridge, ipam: { config: [{ subnet: 172.34.0.0/24 }] } }
+  chain2-lan: { driver: bridge, ipam: { config: [{ subnet: 172.35.0.0/24 }] } }
+  chain2-wan: { driver: bridge, ipam: { config: [{ subnet: 172.36.0.0/24 }] } }

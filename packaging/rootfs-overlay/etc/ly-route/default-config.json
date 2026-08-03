@@ -1,0 +1,88 @@
+{
+  "config_version": 2,
+  "device_name": "ly-route",
+  "device_mode": "gateway",
+  "initialized": false,
+  "switchable": false,
+  "admin_port": 80,
+  "preserve_admin_account": true,
+  "preserve_management_port": true,
+  "dhcp_client": false,
+  "management_fallback": true,
+  "management_fallback_cidr": "192.168.88.1/24",
+  "dataplane": {
+    "preferred_path": "vpp_native_proven",
+    "active_path": "dataplane_locked",
+    "degraded": true,
+    "degraded_reason": "explicit data assignments must pass fresh VPP-native runtime capability proof"
+  },
+  "interfaces": [],
+  "gateway": {
+    "wan_links": [],
+    "wan_groups": [],
+    "route_policies": [],
+    "nat": {
+      "mode": "nat44-ed",
+      "static_mappings": [],
+      "port_maps": []
+    }
+  },
+  "dns": {
+    "engine": "smartdns",
+    "miss": "reject",
+    "upstreams": [
+      {
+        "id": "dns-direct-default",
+        "servers": ["1.1.1.1", "8.8.8.8"]
+      }
+    ],
+    "policies": []
+  },
+  "dhcp": {
+    "engine": "kea",
+    "servers": [],
+    "static_bindings": []
+  },
+  "proxy": {
+    "egresses": [
+      {
+        "id": "proxy-egress-default",
+        "semantic_type": "proxy_egress",
+        "display_list": "wan",
+        "runtime": "xray",
+        "capture_path": "vpp_service_interface",
+        "handoff": "vpp_to_service",
+        "enabled": false
+      }
+    ],
+    "groups": [
+      {
+        "id": "proxy-group-default",
+        "members": ["proxy-egress-default"]
+      }
+    ]
+  },
+  "qos": {
+    "intent": "vpp_intent_class_qos",
+    "connection_limit_visible": false,
+    "default_class": "best-effort"
+  },
+  "telemetry": {
+    "local_only": true,
+    "collectors_enabled": true,
+    "degraded_reason": "collectors report degraded until runtime daemons pass readiness checks"
+  },
+  "maintenance": {
+    "rollback_required_before_apply": true,
+    "export_excludes": ["rendered_config", "runtime_state", "audit_logs", "secrets", "snapshots"],
+    "factory_reset_preserves": ["admin_account", "management_port"]
+  },
+  "runtime_services": {
+    "vpp": { "available": false, "state": "requires-runtime-check" },
+    "smartdns": { "available": false, "state": "requires-runtime-check" },
+    "kea": { "available": false, "state": "requires-runtime-check" },
+    "xray": { "available": false, "state": "requires-runtime-check" },
+    "pppoe": { "available": false, "state": "requires-runtime-check" },
+    "nftables": { "available": false, "state": "requires-runtime-check" }
+  }
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Ly Route single-device recovery reconcile
+After=ly-route-control-api.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+ExecStart=/usr/lib/ly-route/recover-runtime.sh
+
+[Install]
+WantedBy=multi-user.target

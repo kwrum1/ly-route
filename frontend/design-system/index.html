@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ly Route Design System Shell</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='10' fill='%2307111f'/%3E%3Cpath d='M7 20V12h5l2 3.5L16 12h5v8h-3v-4l-2.4 4h-1.2L12 16v4H7Z' fill='%23eef4ff'/%3E%3Ccircle cx='25' cy='9' r='3' fill='%2339d0d8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./shell.css">
+</head>
+<body>
+  <div class="ds-shell" data-shell data-persona="gateway">
+    <aside class="ds-nav" aria-label="Primary navigation">
+      <div class="ds-brand">
+        <div class="ds-brand-mark" aria-hidden="true">LR</div>
+        <div>
+          <span class="ds-brand-title">Ly Route</span>
+          <span class="ds-brand-subtitle">Controller OS</span>
+        </div>
+      </div>
+
+      <section class="ds-mode-card" aria-label="Global appliance state">
+        <div class="ds-status-row">
+          <span class="ds-badge" data-tone="success">Gateway Mode</span>
+          <span class="ds-meta">init-fixed</span>
+        </div>
+        <div class="ds-health-row">
+          <span class="ds-health-light" data-tone="warning" aria-hidden="true"></span>
+          <span>Dataplane AF_XDP</span>
+          <span class="ds-badge" data-tone="warning">Degraded NIC 04</span>
+        </div>
+        <p class="ds-caption">Mode changes happen only through initialization flow, never hot switching.</p>
+      </section>
+
+      <nav>
+        <p class="ds-nav-section">Operate</p>
+        <ul class="ds-nav-list">
+          <li><button class="ds-nav-link is-active" type="button" data-page-target="dashboard"><span>Dashboard</span><span class="ds-nav-count">01</span></button></li>
+          <li><button class="ds-nav-link" type="button" data-page-target="network"><span>Network</span><span class="ds-nav-count">02</span></button></li>
+          <li><button class="ds-nav-link" type="button" data-page-target="policy"><span>Policy</span><span class="ds-nav-count">03</span></button></li>
+          <li><button class="ds-nav-link" type="button" data-page-target="system"><span>System</span><span class="ds-nav-count">04</span></button></li>
+          <li><button class="ds-nav-link" type="button" data-page-target="tokens"><span>Tokens</span><span class="ds-nav-count">05</span></button></li>
+        </ul>
+      </nav>
+    </aside>
+
+    <main class="ds-main">
+      <header class="ds-topbar">
+        <div>
+          <p class="ds-kicker">Modern Network Controller Shell</p>
+          <h1 class="ds-page-title" data-page-title>Operations Dashboard</h1>
+          <p class="ds-page-summary" data-page-summary></p>
+        </div>
+        <div class="ds-header-actions" aria-label="Header state badges">
+          <span class="ds-badge" data-tone="success">Config committed</span>
+          <span class="ds-badge" data-tone="warning">Health degraded</span>
+          <button class="ds-button ds-button-primary" type="button">Open Init Wizard</button>
+        </div>
+      </header>
+
+      <section class="ds-workspace">
+        <section class="ds-page is-active" data-page="dashboard" aria-label="Dashboard page">
+          <div class="ds-grid">
+            <article class="ds-card ds-card-feature ds-span-7">
+              <div class="ds-card-header">
+                <div>
+                  <p class="ds-kicker">Dataplane throughput</p>
+                  <h2>Controller health at a glance</h2>
+                </div>
+                <span class="ds-badge" data-tone="success">VPP primary</span>
+              </div>
+              <span class="ds-metric">8.7 Gbps</span>
+              <p>Traffic, active path, and degraded capability are promoted to the shell instead of buried in legacy status tables.</p>
+              <svg class="ds-sparkline" viewBox="0 0 480 120" role="img" aria-label="Throughput trend">
+                <polyline class="ds-chart-cyan" stroke-width="8" points="0,92 52,74 104,84 156,44 208,52 260,28 312,36 364,22 416,48 480,30" />
+                <polyline class="ds-chart-gold" stroke-width="5" points="0,104 52,98 104,76 156,80 208,68 260,76 312,54 364,72 416,62 480,70" />
+              </svg>
+            </article>
+
+            <article class="ds-card ds-span-5">
+              <p class="ds-kicker">Status colors</p>
+              <h2>Health language</h2>
+              <div class="ds-stat-row"><span class="ds-badge" data-tone="success">Healthy</span><span>All config transactions committed</span></div>
+              <div class="ds-stat-row"><span class="ds-badge" data-tone="warning">Degraded</span><span>AF_PACKET fallback on one interface</span></div>
+              <div class="ds-stat-row"><span class="ds-badge" data-tone="danger">Blocked</span><span>Mode guard rejected Bridge role in Gateway</span></div>
+            </article>
+
+            <article class="ds-topology ds-span-12" aria-label="Topology canvas primitive">
+              <div class="ds-topology-link ds-line-wan"></div>
+              <div class="ds-topology-link ds-line-proxy" data-state="degraded"></div>
+              <div class="ds-topology-link ds-line-lan"></div>
+              <div class="ds-topology-link ds-line-service"></div>
+              <div class="ds-topology-node ds-pos-core" data-kind="controller"><strong>Controller</strong><small>mode guard</small></div>
+              <div class="ds-topology-node ds-pos-wan"><strong>WAN Group</strong><small>2 links</small></div>
+              <div class="ds-topology-node ds-pos-proxy"><strong>Proxy Egress</strong><small>semantic</small></div>
+              <div class="ds-topology-node ds-pos-lan"><strong>LAN Fabric</strong><small>18 clients</small></div>
+              <div class="ds-topology-node ds-pos-service"><strong>Service Chain</strong><small>VPP path</small></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="ds-page" data-page="network" aria-label="Network page">
+          <div class="ds-page-tabs" role="tablist" aria-label="Persona examples">
+            <button class="ds-page-tab is-active" type="button" data-persona-tab="gateway">Gateway persona</button>
+            <button class="ds-page-tab" type="button" data-persona-tab="bridge">Bridge persona</button>
+          </div>
+
+          <article class="ds-panel" data-persona-panel="gateway">
+            <div class="ds-card-header">
+              <div><p class="ds-kicker">Gateway interface roles</p><h2>WAN, LAN, service, and proxy egress</h2></div>
+              <span class="ds-badge" data-tone="success">proxy_egress semantic</span>
+            </div>
+            <div class="ds-table-wrap">
+              <table class="ds-table">
+                <thead><tr><th>Interface</th><th>Role</th><th>Datapath</th><th>Status</th><th>Policy surface</th></tr></thead>
+                <tbody>
+                  <tr><td>eth0</td><td>wan</td><td>AF_XDP</td><td><span class="ds-badge" data-tone="success">healthy</span></td><td>multi-WAN NAT</td></tr>
+                  <tr><td>egress-proxy-01</td><td>proxy_egress</td><td>userspace</td><td><span class="ds-badge" data-tone="warning">logical</span></td><td>WAN list participant</td></tr>
+                  <tr><td>eth2</td><td>lan</td><td>AF_PACKET</td><td><span class="ds-badge" data-tone="warning">degraded</span></td><td>DHCP SmartDNS</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+
+          <article class="ds-panel" data-persona-panel="bridge" hidden>
+            <div class="ds-card-header">
+              <div><p class="ds-kicker">Bridge interface roles</p><h2>Uplink, downlink, service, bypass, and monitor</h2></div>
+              <span class="ds-badge" data-tone="success">transparent L2</span>
+            </div>
+            <div class="ds-table-wrap">
+              <table class="ds-table">
+                <thead><tr><th>Port</th><th>Role</th><th>Loop guard</th><th>Status</th><th>Policy surface</th></tr></thead>
+                <tbody>
+                  <tr><td>eth0</td><td>uplink</td><td>armed</td><td><span class="ds-badge" data-tone="success">forwarding</span></td><td>policy forwarding</td></tr>
+                  <tr><td>eth1</td><td>downlink</td><td>armed</td><td><span class="ds-badge" data-tone="success">forwarding</span></td><td>traffic control</td></tr>
+                  <tr><td>eth3</td><td>monitor</td><td>observe</td><td><span class="ds-badge" data-tone="warning">mirror only</span></td><td>telemetry</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section class="ds-page" data-page="policy" aria-label="Policy page">
+          <div class="ds-grid">
+            <article class="ds-card ds-span-7">
+              <div class="ds-card-header"><div><p class="ds-kicker">Tables</p><h2>Policy priority order</h2></div><button class="ds-button" type="button">Add rule</button></div>
+              <div class="ds-table-wrap">
+                <table class="ds-table">
+                  <thead><tr><th>Order</th><th>Namespace</th><th>Scope</th><th>Action</th><th>State</th></tr></thead>
+                  <tbody>
+                    <tr><td>001</td><td>mode_guard</td><td>device_mode</td><td>reject mismatch</td><td><span class="ds-badge" data-tone="success">first</span></td></tr>
+                    <tr><td>100</td><td>egress</td><td>WAN group</td><td>route</td><td><span class="ds-badge" data-tone="success">active</span></td></tr>
+                    <tr><td>200</td><td>service_chain</td><td>app group</td><td>forward</td><td><span class="ds-badge" data-tone="warning">review</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+            <article class="ds-card ds-span-5">
+              <p class="ds-kicker">Forms</p>
+              <h2>Rule editor primitive</h2>
+              <form class="ds-form-grid">
+                <label class="ds-field"><span>Policy name</span><input value="Bridge service-chain steering"></label>
+                <label class="ds-field"><span>Action</span><select><option>Forward to service</option><option>Permit</option><option>Deny</option></select></label>
+                <label class="ds-field"><span>Priority</span><input value="200"></label>
+                <label class="ds-field"><span>Status</span><select><option>Enabled</option><option>Disabled</option></select></label>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section class="ds-page" data-page="system" aria-label="System page">
+          <div class="ds-grid">
+            <article class="ds-empty ds-span-6">
+              <div>
+                <div class="ds-empty-orb"></div>
+                <p class="ds-kicker">Empty states</p>
+                <h2>No pending rollback snapshots</h2>
+                <p>Empty surfaces stay calm and explanatory instead of showing blank tables or Panabit-style message rows.</p>
+              </div>
+            </article>
+            <article class="ds-panel ds-span-6">
+              <div class="ds-modal-backdrop">
+                <div class="ds-modal" role="dialog" aria-modal="false" aria-label="Apply configuration modal example">
+                  <p class="ds-kicker">Modal</p>
+                  <h2>Apply compiled config?</h2>
+                  <p>The lifecycle remains validate, compile, snapshot, apply, health-check, then commit or rollback.</p>
+                  <div class="ds-modal-actions"><button class="ds-button" type="button">Cancel</button><button class="ds-button ds-button-primary" type="button">Apply safely</button></div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="ds-page" data-page="tokens" aria-label="Tokens page">
+          <article class="ds-panel">
+            <p class="ds-kicker">Token inventory</p>
+            <h2>Project-owned visual system</h2>
+            <p>Tokens cover color, type, spacing, radius, elevation, density, status, charts, cards, tables, forms, navigation, modals, and topology primitives.</p>
+            <div class="ds-token-grid">
+              <div><div class="ds-token-swatch ds-swatch-primary"></div><p class="ds-token-label">Primary cyan</p></div>
+              <div><div class="ds-token-swatch ds-swatch-accent"></div><p class="ds-token-label">Attention amber</p></div>
+              <div><div class="ds-token-swatch ds-swatch-success"></div><p class="ds-token-label">Healthy green</p></div>
+              <div><div class="ds-token-swatch ds-swatch-warning"></div><p class="ds-token-label">Degraded gold</p></div>
+              <div><div class="ds-token-swatch ds-swatch-danger"></div><p class="ds-token-label">Blocked coral</p></div>
+              <div><div class="ds-token-swatch ds-swatch-glass"></div><p class="ds-token-label">Controller glass</p></div>
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="./shell.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "stages": [
+    {"kind": "traffic_control", "reference": "limit-office"},
+    {"kind": "orchestration", "reference": "inline-east", "policy_group": "safety", "rule_id": "safety-east", "sequence": 10, "action": "via"},
+    {"kind": "orchestration", "reference": "inline-west", "policy_group": "default", "rule_id": "default-east", "sequence": 10, "action": "via"},
+    {"kind": "default", "action": "direct"}
+  ],
+  "decisions": [
+    {"policy_group": "safety", "rule_id": "safety-east", "sequence": 10, "action": "via", "orchestration_group": "inline-east"},
+    {"policy_group": "default", "rule_id": "default-east", "sequence": 10, "action": "via", "orchestration_group": "inline-west"}
+  ],
+  "traversal": ["inline-east", "inline-west"],
+  "exit": "lan"
+}

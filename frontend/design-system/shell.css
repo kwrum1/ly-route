@@ -1,0 +1,665 @@
+@import url("./tokens.css");
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: var(--color-backdrop);
+}
+
+body {
+  min-height: 100%;
+  margin: var(--space-0);
+  color: var(--color-ink-100);
+  font-family: var(--font-body);
+  font-size: var(--type-body);
+  line-height: var(--leading-body);
+  background:
+    radial-gradient(circle at 18% 12%, var(--color-backdrop-radial-a), transparent var(--space-128)),
+    radial-gradient(circle at 86% 8%, var(--color-backdrop-radial-b), transparent var(--space-112)),
+    radial-gradient(circle at 68% 84%, var(--color-backdrop-radial-c), transparent calc(var(--space-128) + var(--space-2))),
+    linear-gradient(135deg, var(--color-ink-950), var(--color-ink-900));
+}
+
+body::before {
+  position: fixed;
+  inset: var(--space-0);
+  pointer-events: none;
+  content: "";
+  background-image:
+    linear-gradient(var(--color-line) var(--line-hair), transparent var(--line-hair)),
+    linear-gradient(90deg, var(--color-line) var(--line-hair), transparent var(--line-hair));
+  background-size: var(--space-16) var(--space-16);
+  mask-image: linear-gradient(to bottom, black, transparent 78%);
+}
+
+a,
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+  cursor: pointer;
+}
+
+.ds-shell {
+  display: grid;
+  grid-template-columns: var(--shell-nav-width) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.ds-nav {
+  position: sticky;
+  top: var(--space-0);
+  z-index: var(--z-nav);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  height: 100vh;
+  padding: var(--space-6);
+  border-right: var(--line-hair) solid var(--color-line);
+  background: linear-gradient(180deg, var(--color-glass-strong), var(--color-ink-950));
+  box-shadow: var(--shadow-panel);
+}
+
+.ds-brand {
+  display: grid;
+  grid-template-columns: var(--icon-brand) 1fr;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.ds-brand-mark {
+  display: grid;
+  width: var(--icon-brand);
+  aspect-ratio: 1;
+  place-items: center;
+  border: var(--line-hair) solid var(--color-line-strong);
+  border-radius: var(--radius-lg);
+  color: var(--color-primary-300);
+  background:
+    radial-gradient(circle at 34% 28%, var(--color-primary-500), transparent 42%),
+    var(--color-glass-soft);
+  box-shadow: var(--shadow-glow-primary);
+}
+
+.ds-brand-title {
+  display: block;
+  color: var(--color-paper);
+  font-family: var(--font-display);
+  font-size: var(--type-h3);
+  font-weight: 700;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.ds-brand-subtitle,
+.ds-kicker,
+.ds-meta,
+.ds-caption,
+.ds-nav-section,
+.ds-table th,
+.ds-field span,
+.ds-token-label {
+  color: var(--color-ink-300);
+  font-size: var(--type-caption);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+}
+
+.ds-mode-card,
+.ds-panel,
+.ds-card,
+.ds-modal,
+.ds-empty,
+.ds-topology,
+.ds-page-tab {
+  border: var(--line-hair) solid var(--color-line);
+  background: linear-gradient(145deg, var(--color-glass), var(--color-glass-soft));
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(1.25rem);
+}
+
+.ds-mode-card {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-radius: var(--radius-xl);
+}
+
+.ds-status-row,
+.ds-health-row,
+.ds-toolbar,
+.ds-page-tabs,
+.ds-card-header,
+.ds-persona-row,
+.ds-table-tools,
+.ds-modal-actions,
+.ds-header-actions,
+.ds-stat-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.ds-status-row,
+.ds-health-row,
+.ds-card-header,
+.ds-table-tools,
+.ds-header-actions {
+  justify-content: space-between;
+}
+
+.ds-badge {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  width: fit-content;
+  min-height: calc(var(--space-8) * var(--density-compact));
+  padding: var(--space-1) var(--space-3);
+  border: var(--line-hair) solid var(--color-line-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-ink-100);
+  background: var(--color-glass-soft);
+  font-size: var(--type-small);
+  font-weight: 700;
+}
+
+.ds-badge::before,
+.ds-nav-link::before,
+.ds-topology-node::before,
+.ds-health-light,
+.ds-port-dot {
+  width: var(--space-2);
+  aspect-ratio: 1;
+  border-radius: var(--radius-pill);
+  background: var(--color-primary-500);
+  box-shadow: var(--shadow-glow-primary);
+  content: "";
+}
+
+.ds-badge[data-tone="success"]::before,
+.ds-health-light[data-tone="success"],
+.ds-port-dot[data-tone="success"] {
+  background: var(--color-success-500);
+}
+
+.ds-badge[data-tone="warning"]::before,
+.ds-health-light[data-tone="warning"],
+.ds-port-dot[data-tone="warning"] {
+  background: var(--color-warning-500);
+  box-shadow: var(--shadow-glow-warning);
+}
+
+.ds-badge[data-tone="danger"]::before,
+.ds-health-light[data-tone="danger"],
+.ds-port-dot[data-tone="danger"] {
+  background: var(--color-danger-500);
+}
+
+.ds-nav-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-0);
+  padding: var(--space-0);
+  list-style: none;
+}
+
+.ds-nav-link {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--space-3);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--color-ink-200);
+  background: transparent;
+  text-align: left;
+  transition: background var(--duration-base) var(--ease-standard), transform var(--duration-base) var(--ease-standard), color var(--duration-base) var(--ease-standard);
+}
+
+.ds-nav-link:hover,
+.ds-nav-link.is-active {
+  color: var(--color-paper);
+  background: var(--color-glass-soft);
+  transform: translateX(var(--space-1));
+}
+
+.ds-nav-link.is-active {
+  box-shadow: inset 0 0 0 var(--line-hair) var(--color-line-strong), var(--shadow-glow-primary);
+}
+
+.ds-nav-count {
+  color: var(--color-ink-300);
+  font-family: var(--font-mono);
+  font-size: var(--type-caption);
+}
+
+.ds-main {
+  min-width: 0;
+  padding: var(--space-6);
+}
+
+.ds-topbar {
+  position: sticky;
+  top: var(--space-0);
+  z-index: var(--z-header);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-6);
+  align-items: center;
+  max-width: var(--content-max);
+  min-height: var(--shell-header-height);
+  margin: 0 auto var(--space-6);
+  padding: var(--space-4) var(--space-2);
+  backdrop-filter: blur(1.125rem);
+}
+
+.ds-page-title {
+  margin: var(--space-0);
+  color: var(--color-paper);
+  font-family: var(--font-display);
+  font-size: var(--type-h1);
+  line-height: var(--leading-title);
+  letter-spacing: var(--tracking-display);
+}
+
+.ds-page-summary,
+.ds-card p,
+.ds-empty p,
+.ds-modal p {
+  max-width: 68ch;
+  margin: var(--space-2) var(--space-0) var(--space-0);
+  color: var(--color-ink-300);
+}
+
+.ds-workspace {
+  display: grid;
+  gap: var(--space-6);
+  max-width: var(--content-max);
+  margin: 0 auto;
+}
+
+.ds-page {
+  display: none;
+  gap: var(--space-6);
+}
+
+.ds-page.is-active {
+  display: grid;
+  animation: ds-rise var(--duration-slow) var(--ease-standard) both;
+}
+
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--space-5);
+}
+
+.ds-span-3 { grid-column: span 3; }
+.ds-span-4 { grid-column: span 4; }
+.ds-span-5 { grid-column: span 5; }
+.ds-span-6 { grid-column: span 6; }
+.ds-span-7 { grid-column: span 7; }
+.ds-span-8 { grid-column: span 8; }
+.ds-span-12 { grid-column: span 12; }
+
+.ds-card,
+.ds-panel,
+.ds-empty,
+.ds-modal,
+.ds-topology {
+  border-radius: var(--radius-xl);
+}
+
+.ds-card,
+.ds-panel,
+.ds-empty {
+  padding: var(--space-5);
+}
+
+.ds-card-feature {
+  min-height: 25rem;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 88% 16%, var(--color-primary-900), transparent var(--space-76)),
+    linear-gradient(145deg, var(--color-glass), var(--color-ink-850));
+}
+
+.ds-card h2,
+.ds-card h3,
+.ds-panel h2,
+.ds-modal h2,
+.ds-empty h2 {
+  margin: var(--space-0);
+  color: var(--color-paper);
+  font-family: var(--font-display);
+  line-height: var(--leading-title);
+  letter-spacing: var(--tracking-display);
+}
+
+.ds-metric {
+  display: block;
+  margin-top: var(--space-4);
+  color: var(--color-paper);
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 5vw, 5.5rem);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-display);
+}
+
+.ds-sparkline {
+  width: 100%;
+  height: 7rem;
+  margin-top: var(--space-6);
+}
+
+.ds-sparkline path,
+.ds-sparkline polyline {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ds-chart-cyan { stroke: var(--color-chart-cyan); }
+.ds-chart-gold { stroke: var(--color-chart-gold); }
+.ds-chart-teal { stroke: var(--color-chart-teal); }
+.ds-chart-coral { stroke: var(--color-chart-coral); }
+.ds-chart-blue { stroke: var(--color-chart-blue); }
+
+.ds-table-wrap {
+  overflow: auto;
+  border: var(--line-hair) solid var(--color-line);
+  border-radius: var(--radius-lg);
+}
+
+.ds-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 44rem;
+}
+
+.ds-table th,
+.ds-table td {
+  padding: var(--space-4);
+  border-bottom: var(--line-hair) solid var(--color-line);
+  text-align: left;
+}
+
+.ds-table th {
+  background: var(--color-glass-soft);
+}
+
+.ds-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.ds-button,
+.ds-page-tab {
+  min-height: calc(var(--space-10) * var(--density-default));
+  padding: var(--space-2) var(--space-4);
+  border: var(--line-hair) solid var(--color-line-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-paper);
+  background: var(--color-glass-soft);
+  font-weight: 700;
+  transition: transform var(--duration-base) var(--ease-standard), box-shadow var(--duration-base) var(--ease-standard), background var(--duration-base) var(--ease-standard);
+}
+
+.ds-button:hover,
+.ds-page-tab:hover,
+.ds-page-tab.is-active {
+  background: var(--color-primary-900);
+  box-shadow: var(--shadow-glow-primary);
+  transform: translateY(calc(var(--space-1) * -1));
+}
+
+.ds-button-primary {
+  border-color: transparent;
+  color: var(--color-ink-950);
+  background: linear-gradient(135deg, var(--color-primary-300), var(--color-primary-500));
+}
+
+.ds-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.ds-field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.ds-field input,
+.ds-field select {
+  width: 100%;
+  min-height: calc(var(--space-12) * var(--density-compact));
+  padding: var(--space-2) var(--space-3);
+  border: var(--line-hair) solid var(--color-line);
+  border-radius: var(--radius-md);
+  color: var(--color-paper);
+  background: var(--color-glass-soft);
+}
+
+.ds-empty {
+  display: grid;
+  min-height: var(--empty-min-height);
+  place-items: center;
+  text-align: center;
+}
+
+.ds-empty-orb {
+  width: 5rem;
+  aspect-ratio: 1;
+  margin: 0 auto var(--space-4);
+  border: var(--line-hair) solid var(--color-line-strong);
+  border-radius: var(--radius-pill);
+  background:
+    radial-gradient(circle at 35% 28%, var(--color-accent-400), transparent 28%),
+    radial-gradient(circle at 70% 70%, var(--color-primary-400), transparent 36%),
+    var(--color-glass-soft);
+  box-shadow: var(--shadow-lift);
+}
+
+.ds-modal-backdrop {
+  position: relative;
+  display: grid;
+  min-height: var(--space-76);
+  place-items: center;
+  padding: var(--space-6);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(135deg, var(--color-glass-soft), transparent);
+}
+
+.ds-modal {
+  max-width: 32rem;
+  padding: var(--space-6);
+}
+
+.ds-topology {
+  position: relative;
+  min-height: var(--topology-height);
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 48%, var(--color-primary-900), transparent var(--space-64)),
+    linear-gradient(145deg, var(--color-glass), var(--color-ink-950));
+}
+
+.ds-topology::before {
+  position: absolute;
+  inset: var(--space-0);
+  content: "";
+  background-image:
+    linear-gradient(var(--color-line) var(--line-hair), transparent var(--line-hair)),
+    linear-gradient(90deg, var(--color-line) var(--line-hair), transparent var(--line-hair));
+  background-size: var(--space-12) var(--space-12);
+  opacity: 0.7;
+}
+
+.ds-topology-link {
+  position: absolute;
+  height: var(--line-strong);
+  transform-origin: left center;
+  background: var(--color-topology-link);
+  box-shadow: var(--shadow-glow-primary);
+}
+
+.ds-topology-link[data-state="degraded"] {
+  background: var(--color-topology-link-degraded);
+  box-shadow: var(--shadow-glow-warning);
+}
+
+.ds-topology-node {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  gap: var(--space-2);
+  width: var(--topology-node-width);
+  min-height: var(--topology-node-min-height);
+  place-items: center;
+  padding: var(--space-3);
+  border: var(--line-hair) solid var(--color-line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-topology-node);
+  box-shadow: var(--shadow-panel);
+  text-align: center;
+}
+
+.ds-topology-node strong {
+  color: var(--color-paper);
+}
+
+.ds-topology-node small {
+  color: var(--color-ink-300);
+  font-family: var(--font-mono);
+}
+
+.ds-topology-node[data-kind="controller"] {
+  border-color: var(--color-primary-500);
+  box-shadow: var(--shadow-glow-primary), var(--shadow-panel);
+}
+
+.ds-pos-core { left: var(--topology-core-x); top: var(--topology-core-y); }
+.ds-pos-wan { left: var(--topology-wan-x); top: var(--topology-wan-y); }
+.ds-pos-proxy { left: var(--topology-proxy-x); top: var(--topology-proxy-y); }
+.ds-pos-lan { left: var(--topology-lan-x); top: var(--topology-lan-y); }
+.ds-pos-service { left: var(--topology-service-x); top: var(--topology-service-y); }
+.ds-line-wan { left: var(--topology-line-wan-x); top: var(--topology-line-wan-y); width: var(--topology-line-long); transform: rotate(var(--topology-angle-medium)); }
+.ds-line-proxy { left: var(--topology-line-proxy-x); top: var(--topology-line-proxy-y); width: var(--topology-line-long); transform: rotate(calc(var(--topology-angle-wide) * -1)); }
+.ds-line-lan { left: var(--topology-line-right-x); top: var(--topology-line-lan-y); width: var(--topology-line-short); transform: rotate(calc(var(--topology-angle-soft) * -1)); }
+.ds-line-service { left: var(--topology-line-right-x); top: var(--topology-line-service-y); width: var(--topology-line-short); transform: rotate(var(--topology-angle-service)); }
+
+.ds-persona-card {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: var(--line-hair) solid var(--color-line);
+  border-radius: var(--radius-xl);
+  background: var(--color-glass-soft);
+}
+
+.ds-token-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--space-4);
+}
+
+.ds-token-swatch {
+  min-height: 6rem;
+  border: var(--line-hair) solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--swatch-color, var(--color-glass-soft));
+}
+
+.ds-swatch-primary { --swatch-color: var(--color-primary-500); }
+.ds-swatch-accent { --swatch-color: var(--color-accent-500); }
+.ds-swatch-success { --swatch-color: var(--color-success-500); }
+.ds-swatch-warning { --swatch-color: var(--color-warning-500); }
+.ds-swatch-danger { --swatch-color: var(--color-danger-500); }
+.ds-swatch-glass { --swatch-color: var(--color-glass); }
+
+@keyframes ds-rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-4));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(var(--space-0));
+  }
+}
+
+@media (max-width: 64rem) {
+  .ds-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .ds-nav {
+    position: relative;
+    height: auto;
+  }
+
+  .ds-nav-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ds-topbar {
+    grid-template-columns: 1fr;
+  }
+
+  .ds-span-3,
+  .ds-span-4,
+  .ds-span-5,
+  .ds-span-6,
+  .ds-span-7,
+  .ds-span-8 {
+    grid-column: span 6;
+  }
+}
+
+@media (max-width: 48rem) {
+  .ds-main,
+  .ds-nav {
+    padding: var(--space-4);
+  }
+
+  .ds-nav-list,
+  .ds-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ds-span-3,
+  .ds-span-4,
+  .ds-span-5,
+  .ds-span-6,
+  .ds-span-7,
+  .ds-span-8,
+  .ds-span-12 {
+    grid-column: span 12;
+  }
+
+  .ds-topology {
+    min-height: var(--topology-height-mobile);
+  }
+
+  .ds-topology-link {
+    display: none;
+  }
+
+  .ds-topology-node {
+    position: relative;
+    left: auto;
+    top: auto;
+    width: calc(100% - var(--space-8));
+    margin: var(--space-4);
+  }
+}

@@ -1,0 +1,65 @@
+#!/bin/sh
+set -eu
+
+state_dir=/run/ly-route-e2e
+mkdir -p "$state_dir"
+unit=''
+for arg in "$@"; do unit=$arg; done
+
+case "${1:-}" in
+  reload-or-restart|restart)
+    case "$unit" in
+	  ly-route-pppoe@*.service)
+		peer=${unit#ly-route-pppoe@}
+		peer=${peer%.service}
+        log="$state_dir/$peer.log"
+        pidfile="$state_dir/$peer.pid"
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+          kill "$(cat "$pidfile")" 2>/dev/null || true
+          i=0
+          while kill -0 "$(cat "$pidfile")" 2>/dev/null && [ "$i" -lt 50 ]; do
+            sleep 0.1
+            i=$((i + 1))
+          done
+	  # Let the access concentrator retire the PADT session before redial.
+	  sleep 2
+        fi
+		ly-route-pppoe-client -config "/etc/ly-route/pppoe/$peer.json" >>"$log" 2>&1 &
+        echo $! >"$pidfile"
+        ;;
+    esac
+    ;;
+  stop)
+    case "$unit" in
+	  ly-route-pppoe@*.service)
+		peer=${unit#ly-route-pppoe@}
+        peer=${peer%.service}
+        pidfile="$state_dir/$peer.pid"
+        if [ -f "$pidfile" ]; then
+          kill "$(cat "$pidfile")" 2>/dev/null || true
+          i=0
+          while kill -0 "$(cat "$pidfile")" 2>/dev/null && [ "$i" -lt 50 ]; do
+            sleep 0.1
+            i=$((i + 1))
+          done
+          rm -f "$pidfile"
+        fi
+        ;;
+    esac
+    ;;
+  is-active)
+	case "$unit" in
+	  ly-route-pppoe@*.service)
+		peer=${unit#ly-route-pppoe@}; peer=${peer%.service}
+		pidfile="$state_dir/$peer.pid"
+		[ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null && exit 0
+		;;
+	esac
+    ;;
+  show)
+    printf '1\n'
+    ;;
+  status)
+    printf 'ly-route e2e service shim: %s\n' "$unit"
+    ;;
+esac

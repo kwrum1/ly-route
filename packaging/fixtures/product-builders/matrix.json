@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "suite": "bookworm",
+  "source_commit": "fixture-commit",
+  "rootfs": [
+    {
+      "product": "gateway",
+      "arch": "amd64",
+      "artifact_name": "ly-route-rootfs-gateway-bookworm-amd64.tar"
+    },
+    {
+      "product": "gateway",
+      "arch": "arm64",
+      "artifact_name": "ly-route-rootfs-gateway-bookworm-arm64.tar"
+    },
+    {
+      "product": "orchestrator",
+      "arch": "amd64",
+      "artifact_name": "ly-route-rootfs-orchestrator-bookworm-amd64.tar"
+    },
+    {
+      "product": "orchestrator",
+      "arch": "arm64",
+      "artifact_name": "ly-route-rootfs-orchestrator-bookworm-arm64.tar"
+    }
+  ],
+  "upgrade": [
+    {
+      "product": "gateway",
+      "arch": "amd64",
+      "artifact_name": "ly-route-upgrade-gateway-bookworm-amd64.tar"
+    },
+    {
+      "product": "gateway",
+      "arch": "arm64",
+      "artifact_name": "ly-route-upgrade-gateway-bookworm-arm64.tar"
+    },
+    {
+      "product": "orchestrator",
+      "arch": "amd64",
+      "artifact_name": "ly-route-upgrade-orchestrator-bookworm-amd64.tar"
+    },
+    {
+      "product": "orchestrator",
+      "arch": "arm64",
+      "artifact_name": "ly-route-upgrade-orchestrator-bookworm-arm64.tar"
+    }
+  ]
+}

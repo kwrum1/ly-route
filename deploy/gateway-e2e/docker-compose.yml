@@ -1,0 +1,80 @@
+services:
+  gateway-e2e-vpp:
+    build:
+      context: ../..
+      dockerfile: deploy/gateway-e2e/VPP.Dockerfile
+    image: ly-route-gateway-e2e-vpp:latest
+    container_name: ly-route-gateway-e2e-vpp
+    privileged: true
+    shm_size: 256m
+    environment:
+      LY_ROUTE_CONTROL_BINARY: /usr/local/bin/ly-route-control
+      LY_ROUTE_PRODUCT_PROFILE: /etc/ly-route/product-manifest.json
+      LY_ROUTE_API_HOST: 0.0.0.0
+      LY_ROUTE_API_PORT: 8080
+      LY_ROUTE_DATA_DIR: /var/lib/ly-route/gateway
+      LY_ROUTE_DB_PATH: /var/lib/ly-route/gateway/ly-route.db
+      LY_ROUTE_CONFIG_PATH: /var/lib/ly-route/gateway/config.json
+      LY_ROUTE_ADMIN_USERNAME: admin
+      LY_ROUTE_ADMIN_PASSWORD: LyRouteDemo2026!
+      LY_ROUTE_FORCE_PASSWORD_CHANGE: "false"
+      LY_ROUTE_SESSION_COOKIE_SECURE: "true"
+      LY_ROUTE_MANAGEMENT_INTERFACE: eth0
+      LY_ROUTE_LAN_INTERFACE: eth1
+      LY_ROUTE_INCLUDE_VIRTUAL_INTERFACES: "false"
+      LY_ROUTE_ENABLE_VPP_INTERFACE_TELEMETRY: "true"
+      LY_ROUTE_ENABLE_SERVICE_RUNTIME: "true"
+      LY_ROUTE_SERVICE_ROOT: ""
+      LY_ROUTE_VPPCTL: /usr/local/bin/ly-route-vppctl
+      LY_ROUTE_DATAPLANE_STATE_DIR: /var/lib/ly-route/gateway/dataplane
+    volumes:
+      - gateway-e2e-data:/var/lib/ly-route/gateway
+    networks:
+      mgmt: { ipv4_address: 172.50.0.2, interface_name: eth0 }
+      lan: { ipv4_address: 172.51.0.2, interface_name: eth1 }
+      wan: { ipv4_address: 172.52.0.2, interface_name: eth2 }
+      wan2: { ipv4_address: 172.53.0.2, interface_name: eth3 }
+    restart: unless-stopped
+
+  gateway-e2e-ui:
+    image: ly-route-gateway-demo:latest
+    container_name: ly-route-gateway-e2e-ui
+    depends_on:
+      - gateway-e2e-vpp
+    ports:
+      - "8445:443"
+    environment:
+      LY_ROUTE_EXTERNAL_CONTROL: "true"
+      LY_ROUTE_SESSION_COOKIE_SECURE: "true"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      mgmt: { ipv4_address: 172.50.0.3, interface_name: eth0 }
+    restart: unless-stopped
+
+  pppoe-server:
+    build:
+      context: ../..
+      dockerfile: deploy/gateway-e2e/pppoe-server.Dockerfile
+    image: ly-route-gateway-e2e-pppoe:latest
+    container_name: ly-route-gateway-e2e-pppoe
+    privileged: true
+    networks:
+      wan: { ipv4_address: 172.52.0.10, interface_name: eth0 }
+
+  lan-client:
+    image: ly-route-gateway-e2e-pppoe:latest
+    container_name: ly-route-gateway-e2e-lan-client
+    privileged: true
+    entrypoint: ["sleep", "infinity"]
+    networks:
+      lan: { ipv4_address: 172.51.0.10, interface_name: eth0 }
+
+volumes:
+  gateway-e2e-data:
+
+networks:
+  mgmt: { driver: bridge, ipam: { config: [{ subnet: 172.50.0.0/24 }] } }
+  lan: { driver: bridge, ipam: { config: [{ subnet: 172.51.0.0/24 }] } }
+  wan: { driver: bridge, ipam: { config: [{ subnet: 172.52.0.0/24 }] } }
+  wan2: { driver: bridge, ipam: { config: [{ subnet: 172.53.0.0/24 }] } }

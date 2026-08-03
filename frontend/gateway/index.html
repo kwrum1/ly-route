@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ly Route 出口网关</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ffffff'/%3E%3Cpath d='M7 21V10h4v7h10v4H7Zm11-6 6-5v11l-6-6Z' fill='%232f7de1'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css?v=monitor-tables-20260803">
+</head>
+<body>
+  <section class="login-screen login-screen-gateway" id="loginScreen" aria-label="登录">
+    <form class="login-box" id="loginForm">
+      <div class="login-brand">
+        <span class="login-product-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="20" height="8" x="2" y="14" rx="2"></rect>
+            <path d="M6.01 18H6"></path>
+            <path d="M10.01 18H10"></path>
+            <path d="M15 10v4"></path>
+            <path d="M17.84 7.17a4 4 0 0 0-5.66 0"></path>
+            <path d="M20.66 4.34a8 8 0 0 0-11.31 0"></path>
+          </svg>
+        </span>
+      </div>
+      <h1>出口网关控制台</h1>
+      <label><span>用户名</span><input id="username" autocomplete="username"></label>
+      <label><span>密码</span><input id="password" type="password" autocomplete="current-password"></label>
+      <button type="submit">登录</button>
+      <small id="loginHint">使用授权账号登录管理控制台。</small>
+    </form>
+  </section>
+
+  <section class="app-shell is-hidden" id="appShell" aria-label="管理后台">
+    <header class="paui-header">
+      <button id="mobileMenuToggle" class="mobile-menu-toggle" type="button" aria-label="打开菜单" aria-expanded="false" aria-controls="sideMenu" title="打开菜单">&#9776;</button>
+      <div class="brand"><span class="brand-mark">LR</span><strong>Ly Route</strong><em>出口网关</em></div>
+      <nav class="header-tools" aria-label="顶部工具">
+        <button id="logoutButton" type="button">退出</button>
+      </nav>
+    </header>
+
+    <aside class="paui-sidebar">
+      <label class="menu-search"><span>菜单搜索</span><input id="menuSearch" type="search"></label>
+      <nav id="sideMenu" class="side-menu" aria-label="左侧功能菜单"></nav>
+    </aside>
+
+    <main class="paui-body">
+      <section class="workspace" id="workspace" aria-live="polite"></section>
+    </main>
+  </section>
+
+  <div class="modal-backdrop is-hidden" id="modalBackdrop" role="presentation"></div>
+  <section class="modal is-hidden" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <header><h2 id="modalTitle">编辑</h2><button id="modalClose" type="button" aria-label="关闭">×</button></header>
+    <div id="modalBody" class="modal-body"></div>
+    <footer><button id="modalCancel" type="button">取消</button><button id="modalOk" type="button">确定</button></footer>
+  </section>
+  <div class="toast is-hidden" id="toast"></div>
+  <script src="./shell.js?v=dual-product-20260722"></script>
+  <script src="./gateway-modal.js?v=modal-fix-20260803"></script>
+  <script src="./gateway-routing.js?v=login-fix-20260803"></script>
+  <script src="./gateway-overview.js?v=login-fix-20260803"></script>
+  <script src="./app.js?v=object-display-20260803"></script>
+</body>
+</html>
