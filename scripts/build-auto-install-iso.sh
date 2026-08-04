@@ -172,7 +172,7 @@ EOF
 bootloader_dir=/usr/share/live/build/bootloaders/isolinux
 [ -d "$bootloader_dir" ] || { echo "live-build ISOLINUX assets are missing: $bootloader_dir" >&2; exit 1; }
 mkdir -p "$work/config/includes.chroot/root/isolinux"
-cp -a "$bootloader_dir/." "$work/config/includes.chroot/root/isolinux/"
+cp -aL "$bootloader_dir/." "$work/config/includes.chroot/root/isolinux/"
 [ -s "$work/config/includes.chroot/root/isolinux/isolinux.bin" ] || { echo "isolinux.bin is missing from live-build assets" >&2; exit 1; }
 [ -s "$work/config/includes.chroot/root/isolinux/vesamenu.c32" ] || { echo "vesamenu.c32 is missing from live-build assets" >&2; exit 1; }
 
