@@ -167,12 +167,16 @@ ca-certificates
 EOF
 
 # The Debian live-build version on CI resolves its ISOLINUX source from
-# /root/isolinux inside the build chroot. Keep the complete bundled set there
-# so the ISO build does not depend on a host-only path.
-bootloader_dir=/usr/share/live/build/bootloaders/isolinux
-[ -d "$bootloader_dir" ] || { echo "live-build ISOLINUX assets are missing: $bootloader_dir" >&2; exit 1; }
+# /root/isolinux inside the build chroot. Populate that directory from the
+# real Debian package files rather than live-build's legacy symlinks.
+isolinux_bin=$(dpkg -L isolinux | awk '/\/isolinux\.bin$/ {print; exit}')
+vesamenu=$(dpkg -L syslinux-common | awk '/\/vesamenu\.c32$/ {print; exit}')
+[ -f "$isolinux_bin" ] || { echo "isolinux.bin package file is missing" >&2; exit 1; }
+[ -f "$vesamenu" ] || { echo "vesamenu.c32 package file is missing" >&2; exit 1; }
+syslinux_bios_dir=$(dirname "$vesamenu")
 mkdir -p "$work/config/includes.chroot/root/isolinux"
-cp -aL "$bootloader_dir/." "$work/config/includes.chroot/root/isolinux/"
+cp -aL "$syslinux_bios_dir/." "$work/config/includes.chroot/root/isolinux/"
+cp -L "$isolinux_bin" "$work/config/includes.chroot/root/isolinux/isolinux.bin"
 [ -s "$work/config/includes.chroot/root/isolinux/isolinux.bin" ] || { echo "isolinux.bin is missing from live-build assets" >&2; exit 1; }
 [ -s "$work/config/includes.chroot/root/isolinux/vesamenu.c32" ] || { echo "vesamenu.c32 is missing from live-build assets" >&2; exit 1; }
 
