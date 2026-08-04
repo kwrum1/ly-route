@@ -232,6 +232,9 @@ else
   done
 
   rm -f "$root_tree/etc/apt/sources.list"
+  # Package installation inside the extracted rootfs requires writable temp dirs.
+  mkdir -p "$root_tree/tmp" "$root_tree/var/tmp"
+  chmod 1777 "$root_tree/tmp" "$root_tree/var/tmp"
   cat >"$root_tree/etc/apt/sources.list" <<EOF
 deb ${LY_ROUTE_MIRROR:-http://deb.debian.org/debian} $suite main
 deb ${LY_ROUTE_MIRROR:-http://deb.debian.org/debian} ${suite}-updates main
