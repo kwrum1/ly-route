@@ -48,7 +48,7 @@ jobs:
         run: ./scripts/ci-release-verify.sh
 
   x86:
-    name: x86-64 IMG, automatic ISO and upgrade
+    name: x86-64 IMG and upgrade
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -67,16 +67,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
             build-essential cmake dpkg-dev git curl gdisk parted dosfstools rsync \
-            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux \
-            live-build xorriso isolinux syslinux-common
-          isolinux_bin=$(dpkg -L isolinux | awk '/\/isolinux\.bin$/ {print; exit}')
-          vesamenu=$(dpkg -L syslinux-common | awk '/\/vesamenu\.c32$/ {print; exit}')
-          test -n "$isolinux_bin" && test -f "$isolinux_bin"
-          test -n "$vesamenu" && test -f "$vesamenu"
-          sudo install -D -m 0644 "$isolinux_bin" /root/isolinux/isolinux.bin
-          sudo install -D -m 0644 "$vesamenu" /root/isolinux/vesamenu.c32
-          sudo test -s /root/isolinux/isolinux.bin
-          sudo test -s /root/isolinux/vesamenu.c32
+            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux
       - name: Build pinned x86 runtime packages
         run: |
           sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR ./scripts/build-runtime-debs.sh smartdns
@@ -102,12 +93,6 @@ jobs:
             ./scripts/build-disk-image.sh --product gateway \
               --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst \
               --out dist/x86 --size 4G
-      - name: Build fully automatic installer ISO
-        run: |
-          image=$(find dist/x86 -maxdepth 1 -name '*.img.zst' -print -quit)
-          sudo ./scripts/build-auto-install-iso.sh --product gateway --image "$image" --out dist/x86
-          sudo chown -R "$USER:$USER" dist/x86
-          rm -f dist/x86/*.img dist/x86/*.img.sha256
       - name: Upload x86 artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -119,8 +104,6 @@ jobs:
             dist/x86/*.img.zst.sha256
             dist/x86/*.manifest.json
             dist/x86/*.manifest.json.sha256
-            dist/x86/*.iso
-            dist/x86/*.iso.sha256
             dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
             dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
 

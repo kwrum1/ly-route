@@ -10,7 +10,6 @@ Gitea workflow.
 On pull requests and `main`, the workflow verifies the source and uploads:
 
 - x86-64 4 GiB BIOS/UEFI burn image (`.img.zst`);
-- x86-64 automatic installer ISO;
 - x86-64 Gateway upgrade package;
 - ARM64 Armbian Bookworm one-click installer;
 - ARM64 Gateway upgrade package.

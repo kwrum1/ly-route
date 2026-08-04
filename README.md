@@ -9,7 +9,6 @@ Ly Route 是面向 x86-64 与 ARM64 路由设备的 VPP 出口网关。当前公
 | 平台 | 产物 | 用途 |
 | --- | --- | --- |
 | x86-64 | `ly-route-gateway-*-amd64-4g.img.zst` | 解压后写入 SSD、NVMe、SATA DOM 或 U 盘 |
-| x86-64 | `ly-route-gateway-x86_64-autoinstall.iso` | BIOS/UEFI 全自动安装介质 |
 | x86-64 | `ly-route-upgrade-gateway-bookworm-amd64.tar.zst` | Web 控制台升级包 |
 | ARM64 | `ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst` | 已安装 Armbian Bookworm 的一键安装包 |
 | ARM64 | `ly-route-upgrade-gateway-bookworm-arm64.tar.zst` | ARM64 Web 控制台升级包 |
@@ -26,8 +25,6 @@ IMG 适合烧录：
 ```bash
 zstd -dc ly-route-gateway-*-amd64-4g.img.zst | sudo dd of=/dev/sdX bs=16M conv=fsync status=progress
 ```
-
-ISO 启动后，在只检测到一个合格目标磁盘时自动安装。多磁盘设备必须在启动参数中指定 `lyroute.target=/dev/nvme0n1`，否则安装器停止，不猜测目标盘。安装过程会在写入前校验内置 IMG，写入后再次校验目标盘。
 
 ## Armbian 一键安装
 
@@ -63,7 +60,7 @@ sudo ./install.sh
 工作流位于 [`.github/workflows/gateway-release.yml`](.github/workflows/gateway-release.yml)：
 
 1. 每个 PR 和 `main` 提交执行 Go、产品隔离、前端打包、rootfs/升级包构建器和敏感信息门禁。
-2. x86 runner 构建完整 VPP 网关 rootfs、IMG、自动安装 ISO 和升级包。
+2. x86 runner 构建完整 VPP 网关 rootfs、可烧录 IMG 和升级包。
 3. GitHub ARM64 原生 runner 从固定 VPP 源码提交构建 ARM64 运行时，再生成 Armbian 安装包和升级包。
 4. `v*` 标签或手动指定发布标签时，汇总校验并发布同一个 GitHub Release。
 

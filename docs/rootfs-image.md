@@ -6,12 +6,7 @@ Gateway artifacts only; Orchestrator packaging remains paused.
 ## x86-64
 
 - A 4 GiB GPT disk image with BIOS and removable UEFI GRUB boot support.
-- A Debian Live hybrid ISO containing the compressed disk image and an automatic installer.
 - An `amd64` online upgrade package accepted by the Gateway firmware API.
-
-The ISO installs automatically only when exactly one eligible target disk exists.
-Use `lyroute.target=/dev/DEVICE` on multi-disk appliances. The embedded image and
-the written target range are both SHA-256 verified.
 
 ## ARM64 / Armbian
 
@@ -33,8 +28,6 @@ the administrator assigns LAN and WAN interfaces.
 sudo ./scripts/build-disk-image.sh --product gateway \
   --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst \
   --out dist/x86 --size 4G
-sudo ./scripts/build-auto-install-iso.sh --product gateway \
-  --image dist/x86/ly-route-gateway-bookworm-amd64-4g.img.zst --out dist/x86
 ./scripts/build-upgrade-package.sh --product gateway --arch amd64 --out dist/upgrade
 ```
 

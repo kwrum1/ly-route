@@ -5,10 +5,7 @@
 ## x86-64
 
 - 4 GiB GPT IMG，支持 BIOS 和可移动 UEFI GRUB 启动；
-- 内置 IMG 的 Debian Live 混合 ISO 全自动安装盘；
 - Web 控制台使用的 `amd64` 升级包。
-
-ISO 只在恰好检测到一个合格目标磁盘时自动写入；多磁盘设备必须使用启动参数 `lyroute.target=/dev/设备`。安装前校验内置 IMG，安装后校验目标磁盘写入内容。
 
 ## ARM64 / Armbian
 
