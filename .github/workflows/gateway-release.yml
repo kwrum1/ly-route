@@ -203,11 +203,12 @@ jobs:
       - name: Build unified checksum manifest
         run: |
           cd release
-          find . -maxdepth 1 -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          find . -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: 'release/*'
+          subject-path: 'release/**/*'
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -215,10 +216,13 @@ jobs:
         run: |
           tag=${GITHUB_REF_NAME}
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then tag=$DISPATCH_TAG; fi
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            gh release create "$tag" release/* --repo "$GITHUB_REPOSITORY" \
+          mapfile -d '' assets < <(find release -type f -print0 | sort -z)
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Ly Route Gateway $tag" --generate-notes
           else
-            gh release create "$tag" release/* --repo "$GITHUB_REPOSITORY" \
+            gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
               --title "Ly Route Gateway $tag" --generate-notes --verify-tag
           fi
