@@ -48,6 +48,16 @@ tmp=$(mktemp -d)
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
 
+require_match() {
+  pattern=$1
+  path=$2
+  label=$3
+  if ! grep -q "$pattern" "$path"; then
+    echo "rootfs validation failed: $label ($path)" >&2
+    exit 1
+  fi
+}
+
 extract_required_file() {
   file=$1
   archive_path=".${file}"
@@ -91,13 +101,16 @@ for package in $LY_ROUTE_ROOTFS_REQUIRED_PACKAGES; do
 done
 
 if printf '%s' " $LY_ROUTE_ROOTFS_REQUIRED_FILES " | grep -q ' /usr/lib/ly-route/vpp-apply '; then
-  test -x "$tmp/usr/lib/ly-route/vpp-apply"
+  if [ ! -x "$tmp/usr/lib/ly-route/vpp-apply" ]; then
+    echo "rootfs validation failed: vpp-apply is not executable" >&2
+    exit 1
+  fi
 fi
 if [ -f "$tmp/etc/ly-route/runtime.env" ]; then
-  grep -q 'LY_ROUTE_ENABLE_SERVICE_RUNTIME=true' "$tmp/etc/ly-route/runtime.env"
+  require_match 'LY_ROUTE_ENABLE_SERVICE_RUNTIME=true' "$tmp/etc/ly-route/runtime.env" 'service runtime is disabled'
 fi
 if [ -f "$tmp/etc/ly-route/vpp-command-map.json" ]; then
-  grep -q '"operations"' "$tmp/etc/ly-route/vpp-command-map.json"
+  require_match '"operations"' "$tmp/etc/ly-route/vpp-command-map.json" 'VPP command map is incomplete'
 fi
 if grep -Eiq 'dpdk|af_packet|no-zero-copy|native-driver-auto|generic[-_]?xdp|generic[-_]?skb' \
   "$tmp/etc/ly-route/runtime.env" \
@@ -107,14 +120,14 @@ if grep -Eiq 'dpdk|af_packet|no-zero-copy|native-driver-auto|generic[-_]?xdp|gen
   exit 1
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-control-api.service" ]; then
-  grep -q '/usr/lib/ly-route/ly-route-control' "$tmp/etc/systemd/system/ly-route-control-api.service"
-  grep -q 'After=network.target ly-route-firstboot.service ly-route-runtime-check.service' "$tmp/etc/systemd/system/ly-route-control-api.service"
+  require_match '/usr/lib/ly-route/ly-route-control' "$tmp/etc/systemd/system/ly-route-control-api.service" 'control service binary'
+  require_match 'After=network.target ly-route-firstboot.service ly-route-runtime-check.service' "$tmp/etc/systemd/system/ly-route-control-api.service" 'control service ordering'
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-policy-routing.service" ]; then
-  grep -q '/usr/lib/ly-route/policy-routing-apply-default' "$tmp/usr/lib/ly-route/policy-routing-apply-default"
+  require_match '/var/lib/ly-route/policy-routing/apply.sh' "$tmp/usr/lib/ly-route/policy-routing-apply-default" 'policy routing apply path'
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-vpp-apply.service" ]; then
-  grep -q '/usr/lib/ly-route/vpp-apply-default' "$tmp/etc/systemd/system/ly-route-vpp-apply.service"
+  require_match '/usr/lib/ly-route/vpp-apply-default' "$tmp/etc/systemd/system/ly-route-vpp-apply.service" 'VPP apply service command'
 fi
 if [ -f "$tmp/etc/nginx/conf.d/ly-route-admin.conf" ]; then
   grep -q 'root /opt/ly-route/admin' "$tmp/etc/nginx/conf.d/ly-route-admin.conf"

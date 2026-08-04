@@ -118,7 +118,7 @@ jobs:
 
   arm64:
     name: Armbian arm64 installer and upgrade
-    needs: verify
+    needs: x86
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
