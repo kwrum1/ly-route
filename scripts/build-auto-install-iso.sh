@@ -178,7 +178,7 @@ else
     cd "$work"
     lb config --mode debian --distribution "$suite" --architectures amd64 \
       --binary-images iso-hybrid --archive-areas main --apt-recommends false \
-      --security false --linux-flavours amd64 \
+      --security false --linux-packages linux-image-amd64 --linux-flavours amd64 \
       --bootappend-live 'boot=live components quiet lyroute.autoinstall=1' \
       --iso-volume 'LY_ROUTE_INSTALL' --memtest none
     lb build
