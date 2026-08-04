@@ -109,7 +109,7 @@ jobs:
 
   arm64:
     name: Armbian arm64 installer and upgrade
-    needs: x86
+    needs: verify
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
@@ -180,7 +180,10 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [x86, arm64]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    if: >-
+      always() && (needs.x86.result == 'success' || needs.arm64.result == 'success') &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -189,9 +192,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: ly-route-gateway-*
+          name: ly-route-gateway-x86-64
           path: release
-          merge-multiple: true
+        if: needs.x86.result == 'success'
+      - uses: actions/download-artifact@v8
+        with:
+          name: ly-route-gateway-armbian-arm64
+          path: release
+        if: needs.arm64.result == 'success'
       - name: Build unified checksum manifest
         run: |
           cd release

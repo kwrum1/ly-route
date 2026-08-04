@@ -41,10 +41,11 @@ bundle="$work/bundle"
 overlay="$bundle/overlay"
 mkdir -p "$extracted" "$overlay" "$bundle/packages"
 
+tar_extract_options=(--no-same-owner --no-same-permissions --exclude='./dev/*')
 case "$rootfs" in
-  *.tar.zst) tar --use-compress-program=unzstd -xf "$rootfs" -C "$extracted" ;;
-  *.tar.gz) tar -xzf "$rootfs" -C "$extracted" ;;
-  *.tar) tar -xf "$rootfs" -C "$extracted" ;;
+  *.tar.zst) tar "${tar_extract_options[@]}" --use-compress-program=unzstd -xf "$rootfs" -C "$extracted" ;;
+  *.tar.gz) tar "${tar_extract_options[@]}" -xzf "$rootfs" -C "$extracted" ;;
+  *.tar) tar "${tar_extract_options[@]}" -xf "$rootfs" -C "$extracted" ;;
   *) echo "unsupported rootfs format: $rootfs" >&2; exit 2 ;;
 esac
 
