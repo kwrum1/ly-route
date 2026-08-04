@@ -100,12 +100,16 @@ if ! rootfs_tar_list | awk '
   {
     path = $0
     sub(/^\.\//, "", path)
-    if (path ~ /^\// || path == ".." || path ~ /^\.\.\// || path ~ /\/\.\.\//) exit 1
+    if (path ~ /^\// || path == ".." || path ~ /^\.\.\// || path ~ /\/\.\.\//) invalid = 1
   }
+  END { exit invalid ? 1 : 0 }
 '; then
   product_build_fail "Rootfs archive contains an unsafe member path"
 fi
-if ! rootfs_tar_verbose_list | awk 'substr($0, 1, 1) !~ /^[-dlh]$/ { exit 1 }'; then
+if ! rootfs_tar_verbose_list | awk '
+  substr($0, 1, 1) !~ /^[-dlh]$/ { invalid = 1 }
+  END { exit invalid ? 1 : 0 }
+'; then
   product_build_fail "Rootfs archive contains unsafe member types"
 fi
 
