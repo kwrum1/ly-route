@@ -198,6 +198,12 @@ else
       --security false --linux-packages none \
       --bootappend-live 'boot=live components quiet lyroute.autoinstall=1' \
       --iso-volume 'LY_ROUTE_INSTALL' --memtest none
+    # lb config may recreate the build user's home; stage assets after it.
+    mkdir -p /root/isolinux
+    cp -aL "$syslinux_bios_dir/." /root/isolinux/
+    cp -L "$isolinux_bin" /root/isolinux/isolinux.bin
+    test -s /root/isolinux/isolinux.bin
+    test -s /root/isolinux/vesamenu.c32
     lb build
   )
   built=$(find "$work" -maxdepth 1 -type f -name '*.hybrid.iso' -print -quit)
