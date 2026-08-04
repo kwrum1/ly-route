@@ -107,7 +107,8 @@ if ! rootfs_tar_list | awk '
   product_build_fail "Rootfs archive contains an unsafe member path"
 fi
 if ! rootfs_tar_verbose_list | awk '
-  substr($0, 1, 1) !~ /^[-dlh]$/ { invalid = 1 }
+  # Debian base rootfs archives may contain standard device nodes and FIFOs.
+  substr($0, 1, 1) !~ /^[-dlhpcb]$/ { invalid = 1 }
   END { exit invalid ? 1 : 0 }
 '; then
   product_build_fail "Rootfs archive contains unsafe member types"
