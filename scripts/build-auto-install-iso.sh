@@ -166,6 +166,16 @@ e2fsprogs
 ca-certificates
 EOF
 
+# The Debian live-build version on CI resolves its ISOLINUX source from
+# /root/isolinux inside the build chroot. Keep the complete bundled set there
+# so the ISO build does not depend on a host-only path.
+bootloader_dir=/usr/share/live/build/bootloaders/isolinux
+[ -d "$bootloader_dir" ] || { echo "live-build ISOLINUX assets are missing: $bootloader_dir" >&2; exit 1; }
+mkdir -p "$work/config/includes.chroot/root/isolinux"
+cp -a "$bootloader_dir/." "$work/config/includes.chroot/root/isolinux/"
+[ -s "$work/config/includes.chroot/root/isolinux/isolinux.bin" ] || { echo "isolinux.bin is missing from live-build assets" >&2; exit 1; }
+[ -s "$work/config/includes.chroot/root/isolinux/vesamenu.c32" ] || { echo "vesamenu.c32 is missing from live-build assets" >&2; exit 1; }
+
 cat > "$work/config/hooks/live/0100-installer-permissions.hook.chroot" <<'EOF'
 #!/bin/sh
 set -e
