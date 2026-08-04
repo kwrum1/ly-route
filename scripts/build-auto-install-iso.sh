@@ -177,8 +177,13 @@ syslinux_bios_dir=$(dirname "$vesamenu")
 mkdir -p "$work/config/includes.chroot/root/isolinux"
 cp -aL "$syslinux_bios_dir/." "$work/config/includes.chroot/root/isolinux/"
 cp -L "$isolinux_bin" "$work/config/includes.chroot/root/isolinux/isolinux.bin"
+mkdir -p "$work/config/bootloaders/isolinux"
+cp -aL "$syslinux_bios_dir/." "$work/config/bootloaders/isolinux/"
+cp -L "$isolinux_bin" "$work/config/bootloaders/isolinux/isolinux.bin"
 [ -s "$work/config/includes.chroot/root/isolinux/isolinux.bin" ] || { echo "isolinux.bin is missing from live-build assets" >&2; exit 1; }
 [ -s "$work/config/includes.chroot/root/isolinux/vesamenu.c32" ] || { echo "vesamenu.c32 is missing from live-build assets" >&2; exit 1; }
+[ -s "$work/config/bootloaders/isolinux/isolinux.bin" ] || { echo "isolinux.bin is missing from live-build config assets" >&2; exit 1; }
+[ -s "$work/config/bootloaders/isolinux/vesamenu.c32" ] || { echo "vesamenu.c32 is missing from live-build config assets" >&2; exit 1; }
 
 cat > "$work/config/hooks/live/0100-installer-permissions.hook.chroot" <<'EOF'
 #!/bin/sh
