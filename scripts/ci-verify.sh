@@ -14,6 +14,7 @@ mkdir -p "$PYTHONPYCACHEPREFIX"
 cd "$repo_root"
 
 run sh -n "$repo_root/scripts/build-rootfs.sh"
+run bash -n "$repo_root/scripts/build-vpp-bookworm-debs.sh"
 run sh -n "$repo_root/scripts/build-controller-shell.sh"
 run sh -n "$repo_root/scripts/build-upgrade-package.sh"
 run sh -n "$repo_root/scripts/rootfs-runtime-smoke.sh"

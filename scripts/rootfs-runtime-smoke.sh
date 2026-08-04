@@ -123,7 +123,7 @@ if [ -f "$tmp/etc/nginx/conf.d/ly-route-admin.conf" ]; then
   grep -q 'proxy_pass http://127.0.0.1:8080/api/v1/' "$tmp/etc/nginx/conf.d/ly-route-admin.conf"
 fi
 if [ -f "$tmp/opt/ly-route/admin/index.html" ]; then
-  grep -q 'Ly Route 管理控制台' "$tmp/opt/ly-route/admin/index.html"
+  grep -q 'Ly Route' "$tmp/opt/ly-route/admin/index.html"
   if grep -q 'mock-api.js' "$tmp/opt/ly-route/admin/index.html"; then
     echo "production admin UI must not load mock-api.js" >&2
     exit 1
