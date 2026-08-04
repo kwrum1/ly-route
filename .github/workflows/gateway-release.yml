@@ -69,6 +69,14 @@ jobs:
             build-essential cmake dpkg-dev git curl gdisk parted dosfstools rsync \
             grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux \
             live-build xorriso isolinux syslinux-common
+          isolinux_bin=$(dpkg -L isolinux | awk '/\/isolinux\.bin$/ {print; exit}')
+          vesamenu=$(dpkg -L syslinux-common | awk '/\/vesamenu\.c32$/ {print; exit}')
+          test -n "$isolinux_bin" && test -f "$isolinux_bin"
+          test -n "$vesamenu" && test -f "$vesamenu"
+          sudo install -D -m 0644 "$isolinux_bin" /root/isolinux/isolinux.bin
+          sudo install -D -m 0644 "$vesamenu" /root/isolinux/vesamenu.c32
+          sudo test -s /root/isolinux/isolinux.bin
+          sudo test -s /root/isolinux/vesamenu.c32
       - name: Build pinned x86 runtime packages
         run: |
           sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR ./scripts/build-runtime-debs.sh smartdns
