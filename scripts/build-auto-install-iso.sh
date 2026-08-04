@@ -153,6 +153,8 @@ cat > "$work/config/package-lists/installer.list.chroot" <<'EOF'
 live-boot
 live-config
 linux-image-amd64
+isolinux
+syslinux-common
 systemd-sysv
 busybox
 zstd
