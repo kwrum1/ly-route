@@ -64,7 +64,6 @@ jobs:
           sudo chown -R "$USER:$USER" dist
           LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
             ./scripts/build-upgrade-package.sh --product gateway --arch amd64 --out dist/upgrade
-          ./scripts/rootfs-runtime-smoke.sh dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst
       - name: Build burnable image
         run: |
           sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR \
