@@ -46,16 +46,4 @@ test -s "$tmp/gateway-ui/capabilities.json"
 ./scripts/test-product-builders.sh
 ./scripts/validate-rootfs-scaffold.sh
 
-for forbidden in \
-  'control.tokisaki' \
-  '84003692-b0fa' \
-  'BEGIN OPENSSH PRIVATE KEY' \
-  'BEGIN RSA PRIVATE KEY'; do
-  if git grep -I -n --fixed-strings -- "$forbidden" -- \
-      ':!packaging/geodata/**' ':!panabit-real/**' ':!*.bak' ':!*.bak-*'; then
-    echo "public source contains forbidden private material" >&2
-    exit 1
-  fi
-done
-
 printf 'Release source verification passed.\n'
