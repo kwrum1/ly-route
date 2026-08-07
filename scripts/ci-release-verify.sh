@@ -51,10 +51,8 @@ for forbidden in \
   '84003692-b0fa' \
   'BEGIN OPENSSH PRIVATE KEY' \
   'BEGIN RSA PRIVATE KEY'; do
-  if grep -R -I -n --exclude='*.bak' --exclude='*.bak-*' --exclude='*.dat' --exclude='*.bin' --exclude=ci-release-verify.sh --exclude-dir=.git --exclude-dir=panabit-real --fixed-strings -- "$forbidden" \
-      backend config deploy docs frontend runtime scripts \
-      packaging/rootfs-overlay packaging/nginx packaging/build-profiles \
-      packaging/product-profiles packaging/fixtures README.md README.zh.md; then
+  if git grep -I -n --fixed-strings -- "$forbidden" -- \
+      ':!packaging/geodata/**' ':!panabit-real/**' ':!*.bak' ':!*.bak-*'; then
     echo "public source contains forbidden private material" >&2
     exit 1
   fi
