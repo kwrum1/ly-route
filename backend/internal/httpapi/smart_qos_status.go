@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"ly-route/backend/internal/runtime/vpp"
 )
@@ -33,6 +34,20 @@ func (server *Server) handleSmartQoSStatus(w http.ResponseWriter, r *http.Reques
 	)
 	request.RequireSmartQoS = true
 	path, selectionErr := vpp.SelectNativePath(request)
+	// Runtime proofs are intentionally short-lived and gate configuration
+	// changes. For read-only status, an expired proof may identify the applied
+	// path only when live VPP readback is available to verify it.
+	if selectionErr != nil && server.smartQoSObserver != nil {
+		observationRequest := request
+		if observedAt := latestCapabilityObservation(request); !observedAt.IsZero() {
+			observationRequest.Now = observedAt
+			if observedPath, err := vpp.SelectNativePath(observationRequest); err == nil {
+				path = observedPath
+				selectionErr = nil
+				request = observationRequest
+			}
+		}
+	}
 
 	state := "locked"
 	reason := "no device-wide production VPP smart-QoS path is qualified"
@@ -78,4 +93,20 @@ func (server *Server) handleSmartQoSStatus(w http.ResponseWriter, r *http.Reques
 		},
 		"request_id": requestID(r),
 	})
+}
+
+func latestCapabilityObservation(request vpp.NativePathRequest) time.Time {
+	var latest time.Time
+	for _, assignment := range request.Assignments {
+		proofs := assignment.Candidates
+		if len(proofs) == 0 {
+			proofs = []vpp.CapabilityProof{assignment.Proof}
+		}
+		for _, proof := range proofs {
+			if proof.ObservedAt.After(latest) {
+				latest = proof.ObservedAt
+			}
+		}
+	}
+	return latest
 }

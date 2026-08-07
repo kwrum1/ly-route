@@ -209,11 +209,12 @@ func verifyACLQoSDeletes(snapshot Snapshot, plan ACLQoSPlan) error {
 
 func deleteACLCommands(acl trafficpolicy.SecurityACL) []string {
 	aclID := stableID("security-acl:"+acl.ID, 50000, 49999)
-	direction := "input"
-	if acl.Match.Direction == "output" {
-		direction = "output"
+	commands := make([]string, 0, 3+len(securityDirections(acl.Match.Direction)))
+	for _, direction := range securityDirections(acl.Match.Direction) {
+		commands = append(commands, fmt.Sprintf("?set interface %s acl intfc lyroute-$LY_ROUTE_LAN_INTERFACE ip4-table %d del", direction, aclID))
 	}
-	return []string{fmt.Sprintf("?set interface %s acl intfc lyroute-$LY_ROUTE_LAN_INTERFACE ip4-table %d del", direction, aclID), fmt.Sprintf("?delete acl-plugin acl index %d", aclID), "show interface lyroute-$LY_ROUTE_LAN_INTERFACE", fmt.Sprintf("show acl-plugin acl index %d", aclID)}
+	commands = append(commands, fmt.Sprintf("?delete acl-plugin acl index %d", aclID), "show interface lyroute-$LY_ROUTE_LAN_INTERFACE", fmt.Sprintf("show acl-plugin acl index %d", aclID))
+	return commands
 }
 
 func deleteQoSCommands(id string) []string {

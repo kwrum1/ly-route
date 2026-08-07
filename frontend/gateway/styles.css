@@ -305,7 +305,7 @@ label { color: var(--ui-muted); }
   .list-content > .data-table tbody tr.empty-row td, .list-content > .data-table tbody tr.placeholder-row td { height: 32px; min-height: 32px; max-height: none; }
 }
 
-/* Dense router configuration dialogs. */
+/* Panabit-style dense configuration dialogs. */
 .modal-route-policy { width: min(880px, calc(100vw - 28px)); }
 .modal header { min-height: 42px; padding: 7px 12px; background: #edf4fa; }
 .modal footer { position: sticky; bottom: 0; z-index: 2; min-height: 48px; padding: 8px 12px; background: #f8fafc; }
@@ -460,7 +460,7 @@ label { color: var(--ui-muted); }
   }
 }
 
-/* Router traffic overview. */
+/* Panabit-style traffic overview. */
 .traffic-pa-page { display: grid; gap: 10px; }
 .traffic-pa-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .traffic-pa-kpis article { display: grid; gap: 5px; min-height: 68px; padding: 11px 14px; border: 1px solid #d9e3ec; border-top: 2px solid #5b9de0; background: #fff; }

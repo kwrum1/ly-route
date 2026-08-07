@@ -9,6 +9,34 @@ import (
 	controlapi "ly-route/backend/internal/api"
 )
 
+func (server *Server) gatewayDashboardCounters() (int, float64) {
+	server.runtimeMu.Lock()
+	defer server.runtimeMu.Unlock()
+	cutoff := server.now().UTC().Add(-gatewayTelemetryRetention)
+	connections := map[string]struct{}{}
+	for _, connection := range server.gatewayState.connections {
+		if connection.ObservedAt.Before(cutoff) {
+			continue
+		}
+		key := fmt.Sprintf("%s|%s|%s|%d|%d", connection.SourceIP, connection.DestinationIP, connection.Protocol, connection.SourcePort, connection.DestinationPort)
+		connections[key] = struct{}{}
+	}
+	throughput := float64(0)
+	for _, history := range server.gatewayState.series {
+		if len(history.samples) == 0 {
+			continue
+		}
+		latest := history.samples[len(history.samples)-1]
+		if latest.DownloadBPS != nil {
+			throughput += *latest.DownloadBPS
+		}
+		if latest.UploadBPS != nil {
+			throughput += *latest.UploadBPS
+		}
+	}
+	return len(connections), throughput
+}
+
 func (server *Server) gatewayTopConnections(ctx context.Context) ([]map[string]any, string, string) {
 	err := server.collectGatewayTelemetry(ctx)
 	server.runtimeMu.Lock()
@@ -34,7 +62,8 @@ func (server *Server) gatewayTopConnections(ctx context.Context) ([]map[string]a
 	items := make([]map[string]any, 0, len(connections))
 	for _, connection := range connections {
 		items = append(items, map[string]any{
-			"src_ip": connection.SourceIP, "dst_ip": connection.DestinationIP,
+			"src_ip": connection.SourceIP, "source_ip": connection.SourceIP,
+			"dst_ip": connection.DestinationIP, "destination_ip": connection.DestinationIP,
 			"protocol": connection.Protocol, "src_port": connection.SourcePort,
 			"dst_port": connection.DestinationPort, "bytes": connection.Bytes,
 			"observed_at": connection.ObservedAt,
@@ -78,14 +107,20 @@ func normalizeOnlineUsersWithNeighbors(input onlineUserTelemetryInput) ([]map[st
 		byMAC[neighbor.MAC] = neighbor
 	}
 	users, capability := normalizeOnlineUsers(input.leases, input.runtimeState, input.leaseDegraded)
+	matchedIPs := map[string]struct{}{}
+	matchedMACs := map[string]struct{}{}
 	for _, user := range users {
-		neighbor, found := byIP[firstStringField(user, "ip_address", "ip")]
+		ip := firstStringField(user, "ip_address", "ip")
+		mac := firstStringField(user, "mac", "hw_address")
+		neighbor, found := byIP[ip]
 		if !found {
-			neighbor, found = byMAC[firstStringField(user, "mac", "hw_address")]
+			neighbor, found = byMAC[mac]
 		}
 		if !found {
 			continue
 		}
+		matchedIPs[neighbor.IP] = struct{}{}
+		matchedMACs[neighbor.MAC] = struct{}{}
 		user["last_traffic_time"] = neighbor.LastSeen.Format(time.RFC3339)
 		user["rx_bytes"] = neighbor.DownloadBytes
 		user["tx_bytes"] = neighbor.UploadBytes
@@ -95,6 +130,28 @@ func normalizeOnlineUsersWithNeighbors(input onlineUserTelemetryInput) ([]map[st
 		}
 		user["traffic_activity_state"] = input.neighborState
 	}
+	for _, neighbor := range input.neighbors {
+		if _, found := matchedIPs[neighbor.IP]; found {
+			continue
+		}
+		if _, found := matchedMACs[neighbor.MAC]; found {
+			continue
+		}
+		neighborState := "reachable"
+		if input.neighborState == "stale" {
+			neighborState = "stale"
+		}
+		users = append(users, map[string]any{
+			"ip": neighbor.IP, "ip_address": neighbor.IP, "mac": neighbor.MAC,
+			"online_status": "online", "last_traffic_time": neighbor.LastSeen.Format(time.RFC3339),
+			"rx_bps": 0, "tx_bps": 0, "rx_bytes": neighbor.DownloadBytes, "tx_bytes": neighbor.UploadBytes,
+			"neighbor_state": neighborState, "traffic_activity_state": input.neighborState,
+			"runtime_state": input.runtimeState,
+		})
+	}
+	sort.SliceStable(users, func(left, right int) bool {
+		return firstStringField(users[left], "ip_address", "ip") < firstStringField(users[right], "ip_address", "ip")
+	})
 	if len(input.neighbors) > 0 {
 		capability = controlapi.CapabilityState{Name: "gateway_neighbor_traffic", Available: input.neighborState == "available", State: controlapi.CapabilityAvailable}
 		if input.neighborState != "available" {

@@ -4,16 +4,9 @@ runtime-debs/
 tmp/
 vpp-master/
 *.log
-*.tar.zst
-*.bak
-*.bak-*
 
 # Local/browser verification artifacts
 .playwright-mcp/
-.sisyphus/
-.omo/
-.codex-tmp*/
-deploy/*/artifacts/
 
 # Python/runtime caches
 __pycache__/
@@ -22,17 +15,9 @@ __pycache__/
 # Heavy upstream/reference blobs kept locally only
 *.pdf
 PanabitOEM_TANGr7p8_20260414_Linux3.tar.gz
-PanabitOEM_*.tar.gz
-panabit-real/
 
 # Dependencies and OS/editor noise
 node_modules/
 .DS_Store
 
 panabit-real/admin/.htpasswd
-
-# Legacy/internal hosting and pre-split frontend snapshots
-.gitea/
-/app.js
-/index.html
-/styles.css

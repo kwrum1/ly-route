@@ -82,13 +82,15 @@ ly_sq_enable_disable (u32 sw_if_index, u64 rate_kbps,
                       ly_sq_host_isolation_t host_isolation, int enable)
 {
   ly_sq_main_t *sqm = &ly_sq_main;
-  vnet_hw_interface_t *hw;
   vnet_sw_interface_t *sw;
+  vlib_node_t *arc_end;
   u32 thread_index;
   u32 output_next_index;
   u32 thread_count = vlib_get_n_threads ();
   u8 any_enabled = 0;
   u8 previously_enabled = 0;
+  u8 was_enabled;
+  int feature_rv = 0;
 
   if (pool_is_free_index (sqm->vnet_main->interface_main.sw_interfaces,
                           sw_if_index))
@@ -99,9 +101,12 @@ ly_sq_enable_disable (u32 sw_if_index, u64 rate_kbps,
   if (enable && (rate_kbps < 64 || rate_kbps > 400000000))
     return VNET_API_ERROR_INVALID_VALUE;
 
-  hw = vnet_get_hw_interface (sqm->vnet_main, sw_if_index);
+  arc_end = vlib_get_node_by_name (sqm->vlib_main,
+                                   (u8 *) "interface-output-arc-end");
+  if (!arc_end)
+    return VNET_API_ERROR_UNSUPPORTED;
   output_next_index = vlib_node_add_next (
-    sqm->vlib_main, ly_sq_scheduler_node.index, hw->output_node_index);
+    sqm->vlib_main, ly_sq_scheduler_node.index, arc_end->index);
 
   for (thread_index = 0;
        thread_index < vec_len (sqm->enabled_by_sw_if_index); thread_index++)
@@ -112,12 +117,13 @@ ly_sq_enable_disable (u32 sw_if_index, u64 rate_kbps,
   vlib_worker_thread_barrier_sync (sqm->vlib_main);
   vec_validate_init_empty (sqm->enabled_by_sw_if_index, sw_if_index, 0);
   vec_validate_init_empty (sqm->rate_by_sw_if_index, sw_if_index, 0);
+  was_enabled = sqm->enabled_by_sw_if_index[sw_if_index];
   vec_validate (sqm->schedulers_by_thread, thread_count - 1);
   for (thread_index = 0; thread_index < thread_count; thread_index++)
     {
       vlib_main_t *thread_vm = vlib_get_main_by_index (thread_index);
       vec_validate (sqm->schedulers_by_thread[thread_index], sw_if_index);
-      ly_sq_scheduler_t *scheduler =
+  ly_sq_scheduler_t *scheduler =
         &sqm->schedulers_by_thread[thread_index][sw_if_index];
       if (scheduler->enabled || scheduler->entries)
         ly_sq_scheduler_free (thread_vm, scheduler);
@@ -138,9 +144,27 @@ ly_sq_enable_disable (u32 sw_if_index, u64 rate_kbps,
         VLIB_NODE_STATE_DISABLED);
   vlib_worker_thread_barrier_release (sqm->vlib_main);
 
-  return vnet_feature_enable_disable (
-    "interface-output", "ly-route-smart-qos-output", sw_if_index, enable, 0,
-    0);
+  if (was_enabled && !enable)
+    {
+      ly_sq_feature_config_t feature_config = {
+        .sw_if_index = sw_if_index,
+        .magic = LY_SQ_FEATURE_CONFIG_MAGIC,
+      };
+    feature_rv = vnet_feature_enable_disable (
+      "interface-output", "ly-route-smart-qos-output", sw_if_index, 0,
+      &feature_config, sizeof (feature_config));
+    }
+  else if (!was_enabled && enable)
+    {
+      ly_sq_feature_config_t feature_config = {
+        .sw_if_index = sw_if_index,
+        .magic = LY_SQ_FEATURE_CONFIG_MAGIC,
+      };
+    feature_rv = vnet_feature_enable_disable (
+      "interface-output", "ly-route-smart-qos-output", sw_if_index, 1,
+      &feature_config, sizeof (feature_config));
+    }
+  return feature_rv;
 }
 
 static clib_error_t *

@@ -24,7 +24,7 @@ async function verifyDesktop(browser, errors) {
   page.on("pageerror", (error) => errors.push(error.message));
   await login(page);
   const labels = await page.locator("#sideMenu .menu-page").allTextContents();
-  const expected = ["流量概况", "系统概况", "在线用户", "Top连接", "网卡设置", "编排设置", "流量编排", "流量控制", "安全控制", "IP管理", "系统用户管理", "配置管理"];
+  const expected = ["系统概况", "流量概况", "在线用户", "Top连接", "网卡设置", "编排设置", "流量编排", "流量控制", "安全控制", "IP管理", "系统用户管理", "配置管理"];
   assert.deepEqual(labels.map((label) => label.trim()), expected, "live menu must preserve the Orchestrator product boundary");
   for (const forbidden of ["WAN群组", "路由/NAT", "端口映射", "DNS管控", "DHCP服务", "域名管理"]) {
     assert.equal(await page.getByRole("button", { name: forbidden, exact: true }).count(), 0, `${forbidden} must not be exposed`);

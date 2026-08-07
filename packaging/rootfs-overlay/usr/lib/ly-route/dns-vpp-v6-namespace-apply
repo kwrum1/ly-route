@@ -2,9 +2,31 @@
 set -eu
 
 : "${LY_ROUTE_VPPCTL:=vppctl}"
+: "${LY_ROUTE_DNS_V4_TABLE:=100}"
+: "${LY_ROUTE_DNS_V4_NAMESPACE:=dns-v4}"
+: "${LY_ROUTE_DNS_V4_NAMESPACE_SECRET:=4242}"
 : "${LY_ROUTE_DNS_V6_TABLE:=101}"
 : "${LY_ROUTE_DNS_V6_NAMESPACE:=dns-v6}"
 : "${LY_ROUTE_DNS_V6_NAMESPACE_SECRET:=4242}"
+: "${LY_ROUTE_VPP_READY_ATTEMPTS:=30}"
+: "${LY_ROUTE_VPP_READY_INTERVAL:=1}"
+
+case "$LY_ROUTE_VPP_READY_ATTEMPTS:$LY_ROUTE_VPP_READY_INTERVAL" in
+  *[!0-9:]*|0:*|*:0)
+    echo "VPP readiness retry settings must be positive integers" >&2
+    exit 1
+    ;;
+esac
+
+attempt=1
+while ! "$LY_ROUTE_VPPCTL" show version >/dev/null 2>&1; do
+  if [ "$attempt" -ge "$LY_ROUTE_VPP_READY_ATTEMPTS" ]; then
+    echo "VPP API did not become ready for DNS namespaces" >&2
+    exit 1
+  fi
+  sleep "$LY_ROUTE_VPP_READY_INTERVAL"
+  attempt=$((attempt + 1))
+done
 
 run_idempotent() {
   output=$("$LY_ROUTE_VPPCTL" "$1" 2>&1) || {
@@ -15,9 +37,14 @@ run_idempotent() {
   }
 }
 
+run_idempotent "ip table add $LY_ROUTE_DNS_V4_TABLE"
+run_idempotent "ip route add table $LY_ROUTE_DNS_V4_TABLE 0.0.0.0/0 via local"
+run_idempotent "app ns add id $LY_ROUTE_DNS_V4_NAMESPACE secret $LY_ROUTE_DNS_V4_NAMESPACE_SECRET ip4-fib-id $LY_ROUTE_DNS_V4_TABLE ip6-fib-id 0"
 run_idempotent "ip6 table add $LY_ROUTE_DNS_V6_TABLE"
 run_idempotent "ip route add table $LY_ROUTE_DNS_V6_TABLE ::/0 via local"
 run_idempotent "app ns add id $LY_ROUTE_DNS_V6_NAMESPACE secret $LY_ROUTE_DNS_V6_NAMESPACE_SECRET ip4-fib-id 0 ip6-fib-id $LY_ROUTE_DNS_V6_TABLE"
+"$LY_ROUTE_VPPCTL" "show ip fib table $LY_ROUTE_DNS_V4_TABLE" >/dev/null
 "$LY_ROUTE_VPPCTL" "show ip fib table $LY_ROUTE_DNS_V6_TABLE" >/dev/null
+"$LY_ROUTE_VPPCTL" show app ns | grep -F "$LY_ROUTE_DNS_V4_NAMESPACE" >/dev/null
 "$LY_ROUTE_VPPCTL" show app ns | grep -F "$LY_ROUTE_DNS_V6_NAMESPACE" >/dev/null
-printf '%s\n' "VPP IPv6 DNS namespace ready (namespace=$LY_ROUTE_DNS_V6_NAMESPACE table=$LY_ROUTE_DNS_V6_TABLE)"
+printf '%s\n' "VPP DNS namespaces ready (ipv4=$LY_ROUTE_DNS_V4_NAMESPACE/$LY_ROUTE_DNS_V4_TABLE ipv6=$LY_ROUTE_DNS_V6_NAMESPACE/$LY_ROUTE_DNS_V6_TABLE)"

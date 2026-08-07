@@ -11,6 +11,8 @@ type StaticMapping struct {
 	ExternalAddress string `json:"external_address"`
 	InternalAddress string `json:"internal_address"`
 	WANInterface    string `json:"wan_interface,omitempty"`
+	WANNextHop      string `json:"wan_next_hop,omitempty"`
+	ReturnPathGuard bool   `json:"return_path_guard,omitempty"`
 }
 
 type PortMapping struct {
@@ -21,7 +23,9 @@ type PortMapping struct {
 	InternalHost    string `json:"internal_host"`
 	InternalPort    int    `json:"internal_port"`
 	WANInterface    string `json:"wan_interface,omitempty"`
+	WANNextHop      string `json:"wan_next_hop,omitempty"`
 	Hairpin         bool   `json:"hairpin,omitempty"`
+	ReturnPathGuard bool   `json:"return_path_guard,omitempty"`
 }
 
 type CompiledConfig struct {
@@ -102,6 +106,7 @@ func compileStaticMapping(item map[string]any) (StaticMapping, error) {
 		ExternalAddress: stringValue(item, "external_address", "public_ip", "wan_ip", "external_ip"),
 		InternalAddress: stringValue(item, "internal_address", "internal_host", "private_ip", "inside_address"),
 		WANInterface:    stringValue(item, "wan_interface", "wan_link", "interface_id", "egress"),
+		ReturnPathGuard: true,
 	}
 	if err := requireID(id, "nat_static"); err != nil {
 		return StaticMapping{}, err
@@ -145,6 +150,7 @@ func compilePortMapping(item map[string]any, wanAddresses map[string]string) (Po
 		InternalPort:    internalPort,
 		WANInterface:    stringValue(item, "wan_interface", "wan_link", "interface_id", "egress"),
 		Hairpin:         boolValue(item, "hairpin", "internal_loopback", "loopback"),
+		ReturnPathGuard: true,
 	}
 	if mapping.Protocol == "" {
 		mapping.Protocol = "tcp"

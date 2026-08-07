@@ -13,6 +13,7 @@ const sections = [
     ['network/proxy_main', 'LAN/WAN', 'settings'],
     ['network/wangroup_manager', 'WAN群组', 'table'],
     ['route/route_policy_main', '策略路由', 'tabs'],
+    ['route/portmap_list', '端口映射', 'table'],
     ['route/dnspolicy_main', 'DNS策略', 'table'],
     ['network/dhcpsvr_main', 'DHCP服务', 'settings']
   ]},
@@ -32,6 +33,17 @@ const sections = [
 const pageMap = createPageMap(sections);
 const gatewayRouting = window.LyRouteGatewayRouting;
 const gatewayOverview = window.LyRouteGatewayOverview;
+
+const dnsBootstrapProfiles = Object.freeze({
+  domestic: Object.freeze({
+    label: '国内',
+    bootstrap: Object.freeze(['223.5.5.5', '223.6.6.6', '119.29.29.29', '182.254.116.116', '180.76.76.76'])
+  }),
+  foreign: Object.freeze({
+    label: '境外',
+    bootstrap: Object.freeze(['1.1.1.1', '1.0.0.1', '8.8.8.8', '8.8.4.4', '9.9.9.9'])
+  })
+});
 
 const state = { active: gatewayRouting.routeFromHash(pageMap, 'system/system_overview'), query: '', checkedRows: new Set(), batchOpen: false, collapsedSections: new Set(), activeTabs: { 'network/proxy_main': 0, 'route/route_policy_main': 0, 'object/urlgrp_list': 0, 'object/iptab_list': 0 }, selectedDomainGroup: '', selectedIpGroup: '', trafficWindow: '5m', hiddenEgresses: new Set(), trafficRenderOptions: null, controlPlane: { loading: false, error: '', health: null, mode: null, capabilities: null, telemetry: {}, resources: {}, audit: null, configExport: null, configApply: null, managementNetwork: null, smartQoS: null, runtimeStatus: null, runtimePreview: null, runtimeApply: null, firmwareStatus: null, proxyStatus: null, proxyLogs: null, pppoeStatus: null, endpointErrors: {}, runtimeBusy: '', firmwareBusy: '', trafficTrendLoading: false } };
 const el = {
@@ -97,7 +109,7 @@ const networkPages = {
   },
   'route/dnspolicy_main': {
     actions: ['新增管控', '编辑', '批量操作', '删除'],
-    columns: ['策略序号', '源IP', '访问域名', '解析线路', '解析地址', '动作'],
+    columns: ['策略序号', '源IP', '目的域名', '解析线路', '解析上游', '动作'],
     rows: [],
     form: [['策略序号', ''], ['源IP', ''], ['访问域名', ''], ['解析线路', '请选择线路'], ['解析地址', ''], ['动作', '解析']]
   },
@@ -903,8 +915,30 @@ function mapPortMapRow(item) {
 function mapDnsPolicyRow(item, index) {
   const rule = item.policy?.rules?.[0] || item.rules?.[0] || {};
   const outcome = rule.outcome || item.outcome || {};
-  const action = outcome.kind === 'reject' ? '拉黑' : outcome.kind === 'fixed_answer' ? '解析' : item.action || '放行';
-  return [displayValue(item.priority, index + 1), displayValue(item.source_ip, item.src_ip, rule.source_prefixes?.join('\n')), (item.domains || rule.domains || [item.name]).filter(Boolean).join('\n'), (item.upstreams || []).join('\n'), displayValue(item.resolve_address, item.redirect_to, outcome.fixed_answers?.join('\n')), action];
+  const upstream = dnsUpstreamByID(outcome.upstream_id);
+  const domainGroupID = rule.domain_set_ids?.[0] || '';
+  const action = outcome.kind === 'reject' ? '拉黑' : '解析';
+  const source = displayValue(item.source_ip, item.src_ip, rule.source_prefixes?.join('\n'), 'any');
+  const domain = domainGroupName(domainGroupID) || (item.domains || rule.domains || [item.name]).filter(Boolean).join('\n');
+  const wanID = upstream?.wan_egress_id || outcome.wan_egress_id || '';
+  const resolveLine = dnsWANLineLabel(wanID);
+  const resolver = displayValue(upstream?.servers?.[0], item.resolve_address, item.redirect_to, outcome.fixed_answers?.join('\n'));
+  return [displayValue(item.priority, index + 1), source, domain, resolveLine, resolver, action];
+}
+
+function dnsUpstreamByID(id) {
+  return envelopeItems(state.controlPlane.resources?.dnsUpstreams).find((item) => String(item?.id || '') === String(id || '')) || null;
+}
+
+function domainGroupName(id) {
+  const group = envelopeItems(state.controlPlane.resources?.objectGroups).find((item) => String(item?.id || '') === String(id || ''));
+  return group?.name || id || '';
+}
+
+function dnsWANLineLabel(id) {
+  if (!id) return '';
+  const row = wanLineRows({ includeProxy: false }).find((candidate) => wanLineID(candidate) === id);
+  return row ? wanLineLabel(row) : id;
 }
 function mapDhcpServerRow(item) {
   return ['服务列表', item.interface_id || item.name || item.id || '', displayValue(item.subnet, item.pool_start && item.pool_end ? `${item.pool_start}-${item.pool_end}` : ''), item.gateway || '', '默认 DNS 劫持', displayValue(item.lease_time_seconds), item.enabled === false ? '禁用' : '启用', item.name || item.id || ''];
@@ -913,7 +947,9 @@ function mapDhcpBindingRow(item) {
   return ['静态分配', item.name || item.id || '', item.ip || '', '', item.mac || '', displayValue(item.lease_time_seconds), item.enabled === false ? '禁用' : '启用', item.description || ''];
 }
 function mapObjectGroupRow(item) {
-  return [item.name || item.id || '', item.description || '', (item.members || []).length, (item.nested_groups || []).join(', '), displayValue(item.updated_at, item.modified_at), item.enabled === false ? '禁用' : '启用', (item.members || []).join('\n')];
+  const members = Array.isArray(item.members) ? item.members : (Array.isArray(item.entries) ? item.entries : []);
+  const memberCount = Number(item.source_entry_count || item.member_count || members.length || 0);
+  return [item.name || item.id || '', item.description || '', memberCount, (item.nested_groups || []).join(', '), displayValue(item.updated_at, item.modified_at), item.enabled === false ? '禁用' : '启用', members.join('\n')];
 }
 function mapTrafficControlRow(item, index) {
   const rule = item.rules?.[0] || item;
@@ -1155,7 +1191,9 @@ async function submitResourceModal(page, action = 'add', rowIndex = null) {
   const currentRow = Number.isInteger(rowIndex) ? networkRowsForPage(page.id)[rowIndex] : null;
   const payload = resourcePayloadForPage(page, rowIndex);
   const sideResources = Array.isArray(payload?._sideResources) ? payload._sideResources : [];
+  const objectGroupImport = payload?._objectGroupImport || null;
   if (payload && Object.prototype.hasOwnProperty.call(payload, '_sideResources')) delete payload._sideResources;
+  if (payload && Object.prototype.hasOwnProperty.call(payload, '_objectGroupImport')) delete payload._objectGroupImport;
   const resourceKey = resourceKeyForPayload(page, payload, currentRow);
   if (!resourceKey || !resourceEndpoints[resourceKey]) {
     closeModal(true);
@@ -1173,11 +1211,45 @@ async function submitResourceModal(page, action = 'add', rowIndex = null) {
       await apiJSON(cleanupEndpoint, { method: 'DELETE' });
       recordLocalLineEvent(cleanupEndpoint, 'delete');
     }
+    // DNS policies reference their resolver. Persist that prerequisite first so
+    // a successful policy save always has a concrete VPP-selected DNS path.
+    for (const side of sideResources.filter((candidate) => candidate?.beforeMain === true)) {
+      if (!side.resourceKey || !resourceEndpoints[side.resourceKey] || !side.payload) continue;
+      await apiJSON(resourceEndpoints[side.resourceKey], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(side.payload) });
+      recordLocalLineEvent(`${resourceEndpoints[side.resourceKey]}/${side.payload.id || ''}`, 'create');
+    }
     const mutation = await apiJSON(endpoint, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    for (const side of sideResources) {
+    if (objectGroupImport?.file && (resourceKey === 'objectGroups' || isObjectGroupPage(page))) {
+      const importEndpointID = payload.id || endpointID || mutation.item?.id;
+      if (!importEndpointID) throw new Error('对象组导入缺少目标组 ID');
+      const formData = new FormData();
+      formData.append('file', objectGroupImport.file, objectGroupImport.file.name || 'object-group.txt');
+      formData.append('kind', payload.kind || (page.id === 'object/urlgrp_list' ? 'domain' : 'ip'));
+      formData.append('format', objectGroupImport.format || 'text');
+      formData.append('category', objectGroupImport.category || 'CN');
+      formData.append('mode', objectGroupImport.mode || 'append');
+      const imported = await apiJSON(`${resourceEndpoints.objectGroups}/${encodeURIComponent(importEndpointID)}/import`, { method: 'POST', body: formData });
+      if (Array.isArray(imported.invalid_lines) && imported.invalid_lines.length > 0) {
+        throw new Error(`对象组导入存在 ${imported.invalid_lines.length} 条无效内容`);
+      }
+      // The import endpoint owns the final member list.  Do not compare a
+      // potentially very large GeoSite expansion in the normal JSON
+      // readback; the API response above already validated the import.
+      delete payload.members;
+      recordLocalLineEvent(`${resourceEndpoints.objectGroups}/${encodeURIComponent(importEndpointID)}/import`, 'import');
+    }
+    for (const side of sideResources.filter((candidate) => candidate?.beforeMain !== true)) {
       if (!side?.resourceKey || !resourceEndpoints[side.resourceKey] || !side.payload) continue;
       await apiJSON(resourceEndpoints[side.resourceKey], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(side.payload) });
       recordLocalLineEvent(`${resourceEndpoints[side.resourceKey]}/${side.payload.id || ''}`, 'create');
+      const bindField = side.bindField || (side.resourceKey === 'proxyNodes' ? 'node_id' : side.resourceKey === 'proxySubscriptions' ? 'subscription_id' : '');
+      if (resourceKey === 'proxyEgresses' && bindField && payload?.id) {
+        payload[bindField] = side.payload.id;
+        delete payload[bindField === 'node_id' ? 'subscription_id' : 'node_id'];
+        const bindingEndpoint = `${resourceEndpoints.proxyEgresses}/${encodeURIComponent(payload.id)}`;
+        await apiJSON(bindingEndpoint, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        recordLocalLineEvent(bindingEndpoint, 'update');
+      }
     }
     recordLocalLineEvent(`${resourceEndpoints[resourceKey]}/${payload.id || endpointID || ''}`, method === 'PATCH' ? 'update' : 'create');
     await confirmResourceReadback(resourceKey, mutation.item || mutation, payload, endpointID);
@@ -1379,7 +1451,10 @@ function routePolicyPayload(rowIndex = null) {
   const actionText = form?.querySelector('[data-route-action]')?.value || row?._resource?.action || row?.[1] || 'NAT';
   const action = actionText === '路由' || actionText === 'route' ? 'route' : 'nat';
   const target = form?.querySelector('[data-route-line]')?.value || row?._resource?.egress || row?.[6] || '';
-  const payload = { id: row?._resourceId || `route-${priority}`, name: form?.querySelector('[data-route-name]')?.value || row?._resource?.name || row?.[9] || `策略${priority}`, priority, enabled: true, action, match: { sources: addressConditionValues(form, 'src'), destinations: addressConditionValues(form, 'dst'), src_port: form?.querySelector('[data-route-src-port]')?.value || '', dst_port: form?.querySelector('[data-route-dst-port]')?.value || '' }, next_hop: form?.querySelector('[data-route-next-hop]')?.value || row?._resource?.next_hop || '' };
+  const domainGroup = form?.querySelector('[data-route-domain-group]')?.value || row?._resource?.match?.domain_group || '';
+  const match = { sources: addressConditionValues(form, 'src'), destinations: addressConditionValues(form, 'dst'), src_port: form?.querySelector('[data-route-src-port]')?.value || '', dst_port: form?.querySelector('[data-route-dst-port]')?.value || '' };
+  if (domainGroup) match.domain_group = domainGroup;
+  const payload = { id: row?._resourceId || `route-${priority}`, name: form?.querySelector('[data-route-name]')?.value || row?._resource?.name || row?.[9] || `策略${priority}`, priority, enabled: true, action, match, next_hop: form?.querySelector('[data-route-next-hop]')?.value || row?._resource?.next_hop || '' };
   if (target) payload.egress = target;
   if (form?.querySelector('[data-full-cone] input')?.checked) payload.full_cone = true;
   return payload;
@@ -1452,6 +1527,8 @@ function proxyInterfacePayload(rowIndex = null) {
       const payload = { id: `proxy-egress-${slugID(name)}`, kind: 'egress', name, enabled: true, semantic_type: 'proxy_egress', display_list: 'wan', proxy_profile_id: 'xray-tproxy-outbound', underlay_wan_id: underlay, low_copy: false, description };
       const sideResource = proxyBusinessSideResource(businessAddress, businessName);
       if (sideResource) payload._sideResources = [sideResource];
+      else if (row?._resource?.node_id) payload.node_id = row._resource.node_id;
+      else if (row?._resource?.subscription_id) payload.subscription_id = row._resource.subscription_id;
       return payload;
     }
     return payload;
@@ -1481,19 +1558,7 @@ function proxyBusinessSideResource(address, name) {
 }
 
 function proxyNodePayloadFromURL(value, name, id, fallbackProtocol) {
-  const payload = { id, kind: 'node', name, enabled: true, protocol: fallbackProtocol || 'url', address: value };
-  try {
-    const parsed = new URL(value);
-    payload.protocol = parsed.protocol.replace(':', '') || payload.protocol;
-    payload.address = parsed.hostname || value;
-    if (parsed.port) payload.port = Number(parsed.port);
-    if (parsed.username) payload.secret = decodeURIComponent(parsed.username);
-    const transport = parsed.searchParams.get('type') || parsed.searchParams.get('network');
-    if (transport) payload.transport = transport;
-  } catch (error) {
-    payload.address = value;
-  }
-  return payload;
+  return { id, kind: 'node', name, enabled: true, protocol: fallbackProtocol || 'url', uri: value };
 }
 
 function wanGroupPayload(rowIndex = null) {
@@ -1546,21 +1611,90 @@ function dnsPolicyPayload(rowIndex = null) {
   const form = el.modal.querySelector('[data-dns-policy-form]');
   const domainGroup = form?.querySelector('[data-dns-domain-group]')?.value || '';
   const sources = addressConditionValues(form, 'dns-src');
-  if (!domainGroup) throw new Error('请选择目的域名组');
-  const domainSetIDs = domainGroup ? [domainGroup] : [];
+  const anyDomain = !domainGroup || domainGroup === '__any__';
+  const domainSetIDs = anyDomain ? [] : [domainGroup];
+  const priority = Number(form?.querySelector('[data-dns-priority]')?.value || row?._resource?.priority || 1000);
+  if (!Number.isInteger(priority) || priority < 1 || priority > 65535) throw new Error('DNS 策略序号必须在 1-65535 之间');
   const actionText = form?.querySelector('[data-dns-action]')?.value || row?.[5] || '解析';
+  const bootstrapProfile = form?.querySelector('[data-dns-bootstrap-profile]')?.value || dnsBootstrapProfileForDomainGroup(domainGroup);
   const upstreamAddress = form?.querySelector('[data-dns-upstream]')?.value.trim() || '';
-  if (upstreamAddress && !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(upstreamAddress)) throw new Error('解析上游必须填写单个 IPv4 地址');
-  const outcome = actionText.includes('拒') || actionText.includes('拉黑') ? { kind: 'reject' } : upstreamAddress ? { kind: 'fixed_answer', fixed_answers: [upstreamAddress] } : { kind: 'direct' };
-  const id = row?._resourceId || slugID(form?.querySelector('[data-dns-name]')?.value || row?.[0] || `dns-${Date.now()}`);
-  return { id, kind: 'policy', name: form?.querySelector('[data-dns-name]')?.value.trim() || row?.[1] || id, enabled: true, policy: { engine: 'smartdns', miss: { kind: 'reject' }, rules: [{ id: `${id}-rule`, source_prefixes: sources, domains: [], domain_set_ids: domainSetIDs, outcome }] } };
+  const wanEgressID = form?.querySelector('[data-dns-line]')?.value || '';
+  const name = form?.querySelector('[data-dns-name]')?.value.trim() || row?._resource?.name || row?.[0] || `dns-${Date.now()}`;
+  const id = row?._resourceId || slugID(name);
+  const rejected = actionText.includes('拒') || actionText.includes('拉黑');
+  if (!rejected && !wanEgressID) throw new Error('请选择解析线路');
+  if (!rejected && !upstreamAddress) throw new Error('请填写解析上游');
+  if (upstreamAddress && !isDNSUpstreamAddress(upstreamAddress)) throw new Error('解析上游必须是单个 IP 或 HTTPS DoH 地址');
+  const upstreamID = `dns-policy-${id}-upstream`;
+  const outcome = rejected ? { kind: 'reject' } : { kind: 'direct', upstream_id: upstreamID, wan_egress_id: wanEgressID };
+  const policy = { engine: 'smartdns', miss: anyDomain ? outcome : { kind: 'reject' }, rules: anyDomain ? [] : [{ id: `${id}-rule`, source_prefixes: sources, domains: [], domain_set_ids: domainSetIDs, outcome }] };
+  const payload = { id, kind: 'policy', name, priority, enabled: true, policy };
+  if (!rejected) {
+    payload._sideResources = [{
+      beforeMain: true,
+      resourceKey: 'dnsUpstreams',
+      payload: {
+        id: outcome.upstream_id,
+        name: `${name} 解析上游`,
+        engine: 'smartdns',
+        enabled: true,
+        servers: [upstreamAddress],
+        bootstrap_profile: bootstrapProfile,
+        bootstrap_servers: /^(https|h3):\/\//i.test(upstreamAddress) ? [...bootstrapDefaults.bootstrap] : [],
+        wan_egress_id: wanEgressID,
+        cache_size: 32768,
+        ttl_min_seconds: 60,
+        ttl_max_seconds: 600,
+        prefetch: true
+      }
+    }];
+  }
+  return payload;
+}
+
+function dnsBootstrapProfileForDomainGroup(domainGroupID) {
+  if (!domainGroupID || domainGroupID === '__any__') return 'foreign';
+  const group = envelopeItems(state.controlPlane.resources?.objectGroups).find((item) => String(item?.id || '') === String(domainGroupID));
+  const format = String(group?.source?.format || '').trim().toLowerCase();
+  const groupID = String(group?.id || domainGroupID).trim().toLowerCase();
+  return format === 'geosite' || groupID.includes('geosite') ? 'domestic' : 'foreign';
+}
+
+function syncDNSBootstrapModal(profile) {
+  const profileSelect = el.modalBody.querySelector('[data-dns-bootstrap-profile]');
+  if (profileSelect) profileSelect.value = profile;
+}
+
+function isDNSUpstreamAddress(value) {
+  const text = String(value || '').trim();
+  return isIPv4Address(text) || /^(https|h3|tls):\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(text);
+}
+
+function isIPv4Address(value) {
+  const parts = String(value || '').trim().split('.');
+  return parts.length === 4 && parts.every((part) => /^\d+$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
 }
 
 function objectGroupPayload(page, rowIndex = null) {
-  const values = modalControls();
   const row = Number.isInteger(rowIndex) ? networkRowsForPage(page.id)[rowIndex] : null;
-  const name = values[0] || row?.[0] || 'object-group';
-  return { id: row?._resourceId || slugID(name), name, kind: page.id === 'object/urlgrp_list' ? 'domain' : 'ip', description: values[1] || row?.[1] || '', members: (values[2] || row?.[6] || '').split(/[\s,]+/).filter(Boolean), enabled: true };
+  const form = el.modal.querySelector('[data-object-group-form]');
+  const kind = page.id === 'object/urlgrp_list' ? 'domain' : 'ip';
+  const name = form?.querySelector('[data-object-group-name]')?.value.trim() || row?.[0] || 'object-group';
+  const description = form?.querySelector('[data-object-group-description]')?.value.trim() || row?.[1] || '';
+  const text = form?.querySelector('[data-object-group-members]')?.value || '';
+  const members = text.split(/[\s,]+/).filter(Boolean);
+  const payload = { id: row?._resourceId || slugID(name), name, kind, description, members, enabled: true };
+  const file = form?.querySelector('[data-object-group-file]')?.files?.[0];
+  if (!file && !members.length && row?._resource?.source) payload.source = row._resource.source;
+  if (file) {
+    payload._objectGroupImport = {
+      file,
+      format: form?.querySelector('[data-object-group-format]')?.value || 'text',
+      category: form?.querySelector('[data-object-group-category]')?.value.trim() || 'CN',
+      mode: form?.querySelector('[data-object-group-import-mode]')?.value || 'append'
+    };
+  }
+  return payload;
 }
 
 function trafficControlPayload(rowIndex = null) {
@@ -1581,7 +1715,7 @@ function slugID(value) {
 function dhcpServerPayload(rowIndex = null) {
   const row = Number.isInteger(rowIndex) ? networkRowsForPage('network/dhcpsvr_main')[rowIndex] : null;
   const form = el.modal.querySelector('[data-dhcp-form]');
-  const interfaceID = (form?.querySelector('[data-dhcp-interface]')?.value || row?.[1] || '').split(' ')[0];
+  const interfaceID = form?.querySelector('[data-dhcp-interface]')?.value || row?._resource?.interface_id || row?.[1] || '';
   if (!interfaceID || interfaceID === '请选择接口') throw new Error('没有可用的 LAN 接口，请先创建 LAN 接口');
   const pool = form?.querySelector('[data-dhcp-pool]')?.value.trim() || '';
   const prefix = form?.querySelector('[data-dhcp-prefix]')?.value.trim() || '24';
@@ -1708,6 +1842,20 @@ function wireConfigTimeSync(page) {
     toast(`时间同步已保存：${timeInput?.value.trim() || '未填写'}`);
   });
 }
+async function openRoutePolicyModal(page) {
+  const keys = ['wanLinks', 'wanGroups', 'proxyEgresses', 'objectGroups'];
+  try {
+    const payloads = await Promise.all(keys.map((key) => apiJSON(resourceEndpoints[key])));
+    state.controlPlane.resources = {
+      ...state.controlPlane.resources,
+      ...Object.fromEntries(keys.map((key, index) => [key, payloads[index]]))
+    };
+    openModal('添加策略', routePolicyFormHtml(), 'route-policy');
+    pendingModalSubmit = () => submitResourceModal(page, 'add');
+  } catch (error) {
+    toast(error.message || '策略资源加载失败');
+  }
+}
 function handleAction(action, page) {
   if (action.startsWith('runtime-')) { handleRuntimeAction(action); return; }
   if (action.startsWith('firmware-')) { handleFirmwareAction(action); return; }
@@ -1720,7 +1868,7 @@ function handleAction(action, page) {
   if (action === 'add' && page.id === 'monitor/interface_list') { openModal('创建静态链路聚合', interfaceBondFormHtml()); pendingModalSubmit = () => submitInterfaceBondModal(); return; }
   if (action === 'add' && page.id === 'network/dhcpsvr_main') { openModal(dhcpAddTitle(page), formHtml(page)); pendingModalSubmit = () => submitResourceModal(page, 'add'); return; }
   if (action === 'add-line' && page.id === 'network/wangroup_manager') { openModal('新增群组', wanGroupLineFormHtml()); pendingModalSubmit = () => submitResourceModal(page, 'add'); return; }
-  if (action === 'add' && isRoutePolicyContext(page)) { openModal('添加策略', routePolicyFormHtml(), 'route-policy'); pendingModalSubmit = () => submitResourceModal(page, 'add'); return; }
+  if (action === 'add' && isRoutePolicyContext(page)) { openRoutePolicyModal(page); return; }
   if (action === 'add' && page.id === 'route/portmap_list') { openModal('新增映射', portMapFormHtml(), 'route-policy'); pendingModalSubmit = () => submitResourceModal(page, 'add'); return; }
   if (action === 'add' && page.id === 'flowcontrol/flowct_main') { openModal('新增流量控制', flowControlFormHtml(), 'route-policy'); pendingModalSubmit = () => submitResourceModal(page, 'add'); return; }
   if (['add', 'edit', 'import'].includes(action)) { openModal(action === 'add' ? `新增${page.title}` : action === 'edit' ? `编辑${page.title}` : `导入${page.title}`, formHtml(page)); pendingModalSubmit = () => submitResourceModal(page, action); return; }
@@ -1745,13 +1893,14 @@ function routePolicyFormHtml(rowIndex) {
   const sourceAddress = resource.match?.sources || resource.match?.src_ip || row?.[2] || '';
   const sourcePort = row?.[3] || '';
   const destinationAddress = resource.match?.destinations || resource.match?.dst_ip || row?.[4] || '';
+  const destinationDomainGroup = resource.match?.domain_group || '';
   const destinationPort = routePolicyPortValue(row?.[5]);
   const actionValue = String(resource.action || row?.[1] || '').toLowerCase();
   const action = actionValue === 'route' || String(row?.[1] || '').includes('路由') ? '路由' : 'NAT';
   const line = resource.egress || row?.[6] || '';
   const nextHop = row?.[7] || '';
   const lineLabel = action === '路由' ? '路由线路' : 'NAT线路';
-  return `<div class="route-policy-form" data-route-policy-form><div class="route-policy-fields route-policy-top"><label data-required><span>策略序号</span><span class="route-policy-control"><input data-route-priority type="number" min="1" max="65535" value="${safeText(sequence)}"><small>序号从小往大匹配，范围1-65535</small></span></label><label><span>策略备注</span><input data-route-name value="${safeText(remark)}"></label></div><section class="route-policy-section"><h3>匹配条件</h3><div class="route-policy-fields"><label class="route-policy-split"><span>源 / 目的地址</span><span class="route-policy-pair route-address-summary-pair">${addressConditionSummaryHtml('src', '源地址', sourceAddress)}<em>/</em>${addressConditionSummaryHtml('dst', '目的地址', destinationAddress)}</span></label><label class="route-policy-split"><span>源 / 目的端口</span><span class="route-policy-pair"><input data-route-src-port value="${safeText(sourcePort)}" placeholder="0"><em>/</em><input data-route-dst-port value="${safeText(destinationPort)}" placeholder="0"></span></label></div></section><section class="route-policy-section"><h3>执行动作</h3><div class="route-policy-fields"><label><span>执行动作</span><span class="route-policy-action"><select data-route-action>${routePolicyOptions(['NAT', '路由'], action)}</select><span class="route-policy-check" data-full-cone><input type="checkbox">全锥型NAT</span></span></label><label><span data-route-line-label>${lineLabel}</span><select data-route-line>${lineSelectOptionsHtml(line)}</select></label><label><span>下一跳</span><input data-route-next-hop value="${safeText(nextHop)}"></label></div></section></div>`;
+  return `<div class="route-policy-form" data-route-policy-form><div class="route-policy-fields route-policy-top"><label data-required><span>策略序号</span><span class="route-policy-control"><input data-route-priority type="number" min="1" max="65535" value="${safeText(sequence)}"><small>序号从小往大匹配，范围1-65535</small></span></label><label><span>策略备注</span><input data-route-name value="${safeText(remark)}"></label></div><section class="route-policy-section"><h3>匹配条件</h3><div class="route-policy-fields"><label class="route-policy-split"><span>源 / 目的地址</span><span class="route-policy-pair route-address-summary-pair">${addressConditionSummaryHtml('src', '源地址', sourceAddress)}<em>/</em>${addressConditionSummaryHtml('dst', '目的地址', destinationAddress)}</span></label><label><span>目的域名组</span><select data-route-domain-group>${objectGroupOptionsHtml('domain', destinationDomainGroup)}</select></label><label class="route-policy-split"><span>源 / 目的端口</span><span class="route-policy-pair"><input data-route-src-port value="${safeText(sourcePort)}" placeholder="0"><em>/</em><input data-route-dst-port value="${safeText(destinationPort)}" placeholder="0"></span></label></div></section><section class="route-policy-section"><h3>执行动作</h3><div class="route-policy-fields"><label><span>执行动作</span><span class="route-policy-action"><select data-route-action>${routePolicyOptions(['NAT', '路由'], action)}</select><span class="route-policy-check" data-full-cone><input type="checkbox">全锥型NAT</span></span></label><label><span data-route-line-label>${lineLabel}</span><select data-route-line>${lineSelectOptionsHtml(line)}</select></label><label><span>下一跳</span><input data-route-next-hop value="${safeText(nextHop)}"></label></div></section></div>`;
 }
 
 function portMapFormHtml(rowIndex) {
@@ -1785,7 +1934,10 @@ function routePolicyOptionsWithValues(options, selected) {
 function addressConditionValues(form, name) {
   const summary = form?.querySelector(`[data-address-summary="${name}"]`);
   const values = JSON.parse(summary?.dataset.addressValues || '[]');
-  return values.length ? values : ['any'];
+  // Any is represented by an empty selector list in the API. Keep the
+  // human-facing placeholder, but never persist the display token "any" as
+  // an IP prefix (the backend treats an empty list as all sources).
+  return values.filter((value) => String(value).trim() && String(value).toLowerCase() !== 'any');
 }
 
 function objectGroupOptionsHtml(kind, selected = '') {
@@ -1827,10 +1979,15 @@ function lineOptionItems({ includeProxy = true, includeGroups = true } = {}) {
     ...(includeGroups ? networkRowsForPage('network/wangroup_manager').map((row) => ({ value: row._resourceId || row[0], label: `WAN组 · ${row[0]}` })) : [])
   ].filter((item) => item.value);
 }
-function interfaceSelectOptions(direction) {
+function interfaceSelectOptions(direction, selected = '') {
   const role = direction === 'WAN' ? 'WAN接口' : direction === 'LAN' ? 'LAN接口' : '';
-  const options = networkRowsForPage('monitor/interface_list').filter((row) => row[3] !== '管理口' && row[3] !== '聚合接口' && (!role || row[3] === role)).map((row) => row[0]).filter(Boolean);
-  return options.length ? options : ['请先在网卡设置中标记接口'];
+  const options = networkRowsForPage('monitor/interface_list')
+    .filter((row) => row[3] !== '管理口' && row[3] !== '聚合接口' && (!role || row[3] === role))
+    .map((row) => [row._systemId || row._resourceId || row[0], row[0]])
+    .filter(([value]) => value);
+  if (!options.length) return optionValueLabel('', '请先在网卡设置中标记接口', selected);
+  const selectedValue = selected || options[0][0];
+  return routePolicyOptionsWithValues(options, selectedValue);
 }
 function proxyEgressOptions(selected = '') {
   const rows = lineOptionItems({ includeProxy: false, includeGroups: false });
@@ -1840,7 +1997,9 @@ function proxyEgressOptions(selected = '') {
 }
 
 function wanLineRows({ includeProxy = true } = {}) {
-  return networkRowsForPage('network/proxy_main').filter((row) => row[1] === 'WAN线路' && row._resourceKey === 'wanLinks' && (includeProxy || row._wanType !== 'proxy'));
+  return networkRowsForPage('network/proxy_main').filter((row) => row[1] === 'WAN线路'
+    && (row._resourceKey === 'wanLinks' || (includeProxy && row._resourceKey === 'proxyEgresses'))
+    && (includeProxy || row._wanType !== 'proxy'));
 }
 
 function wanLineID(row) {
@@ -1899,8 +2058,11 @@ function networkFormHtml(page, row = 0) {
   const skipStatus = page.id === 'route/portmap_list';
   return `<div class="form-grid">${fields.map(([label, fallback]) => `<label>${safeText(label)}<input value="${safeText(fallback)}"></label>`).join('')}${hasStatus || skipStatus ? '' : '<label>状态<select><option>启用</option><option>禁用</option></select></label>'}</div>`;
 }
-function objectGroupAddFormHtml() {
-  return `<div class="lan-edit-form"><label data-required><span>群组名</span><input value=""></label><label><span>备注</span><input value=""></label></div>`;
+function objectGroupAddFormHtml(page) {
+  const kind = page?.id === 'object/urlgrp_list' ? 'domain' : 'ip';
+  const memberLabel = kind === 'domain' ? '域名内容' : 'IP内容';
+  const dataFormat = kind === 'domain' ? optionValueLabel('geosite', 'GeoSite .dat', 'text') : optionValueLabel('geoip', 'GeoIP .dat', 'text');
+  return `<div class="lan-edit-form object-group-form" data-object-group-form><label data-required><span>群组名</span><input data-object-group-name value=""></label><label><span>备注</span><input data-object-group-description value=""></label><label><span>${memberLabel}</span><textarea data-object-group-members rows="4" placeholder="一行一条，可填写单个地址、网段或地址范围"></textarea></label><section class="route-policy-section"><h3>文件导入（可选）</h3><div class="route-policy-fields"><label><span>文件</span><input data-object-group-file type="file"></label><label><span>格式</span><select data-object-group-format>${optionValueLabel('text', '文本', 'text')}${dataFormat}</select></label><label><span>分类</span><input data-object-group-category value="CN" placeholder="CN"></label><label><span>导入方式</span><select data-object-group-import-mode>${optionValueLabel('append', '追加', 'append')}${optionValueLabel('overwrite', '覆盖', 'append')}</select></label></div></section></div>`;
 }
 function objectGroupEditFormHtml(page, rowIndex) {
   const row = Number.isInteger(rowIndex) ? networkRowsForPage(page.id)[rowIndex] : null;
@@ -1909,7 +2071,8 @@ function objectGroupEditFormHtml(page, rowIndex) {
   const isDomain = page.id === 'object/urlgrp_list';
   const memberLabel = isDomain ? '域名' : '多个IP/掩码';
   const memberValue = isDomain ? domainGroupMembers(groupName) : ipGroupMembers(groupName);
-  return `<div class="route-policy-form"><section class="route-policy-section"><h3>群组信息</h3><div class="route-policy-fields"><label data-required><span>群组名</span><input value="${safeText(groupName)}"></label><label><span>备注</span><input value="${safeText(remark)}"></label></div></section><section class="route-policy-section"><h3>成员维护</h3><div class="route-policy-fields"><label><span>${memberLabel}</span><textarea>${safeText(memberValue)}</textarea></label><label><span>文件导入</span><input type="file"></label><label><span>导入方式</span><select>${routePolicyOptions(['追加', '覆盖'], '追加')}</select></label></div></section></div>`;
+  const dataFormat = isDomain ? optionValueLabel('geosite', 'GeoSite .dat', 'text') : optionValueLabel('geoip', 'GeoIP .dat', 'text');
+  return `<div class="route-policy-form object-group-form" data-object-group-form><section class="route-policy-section"><h3>群组信息</h3><div class="route-policy-fields"><label data-required><span>群组名</span><input data-object-group-name value="${safeText(groupName)}"></label><label><span>备注</span><input data-object-group-description value="${safeText(remark)}"></label></div></section><section class="route-policy-section"><h3>成员维护</h3><div class="route-policy-fields"><label><span>${memberLabel}</span><textarea data-object-group-members rows="8">${safeText(memberValue)}</textarea></label><label><span>文件导入</span><input data-object-group-file type="file"></label><label><span>格式</span><select data-object-group-format>${optionValueLabel('text', '文本', 'text')}${dataFormat}</select></label><label><span>分类</span><input data-object-group-category value="CN" placeholder="CN"></label><label><span>导入方式</span><select data-object-group-import-mode>${optionValueLabel('append', '追加', 'append')}${optionValueLabel('overwrite', '覆盖', 'append')}</select></label></div></section></div>`;
 }
 function domainGroupMembers(groupName) { return objectGroupMembers('object/urlgrp_list', groupName); }
 function ipGroupMembers(groupName) { return objectGroupMembers('object/iptab_list', groupName); }
@@ -1922,9 +2085,11 @@ function dhcpServiceFormHtml(row = 0) {
   const services = networkRowsForPage('network/dhcpsvr_main').filter((item) => item[0] === '服务列表');
   const rowData = services[row % services.length] || services[0] || [];
   const lanRows = networkRowsForPage('network/proxy_main').filter((item) => item[1] === 'LAN接口');
-  const lanOptions = lanRows.length ? lanRows.map((item) => `${item[0]} (${item[2]})`) : ['请选择接口'];
-  const selectedLanOption = rowData[1] ? `${rowData[1]} (${rowData[2] || ''})` : lanOptions[0];
-  return `<div class="lan-edit-form dhcp-service-form" data-dhcp-form><label data-required><span>LAN接口</span><select data-dhcp-interface>${routePolicyOptions(lanOptions, selectedLanOption)}</select></label><label data-required><span>IP分配范围</span><input data-dhcp-pool value="${safeText(rowData[2] || '')}" placeholder="192.168.88.100-192.168.88.199"></label><label data-required><span>线路掩码</span><input data-dhcp-prefix value="24" placeholder="24"></label><label><span>网关</span><input data-dhcp-gateway value="${safeText(rowData[3] || '')}"></label><label><span>租约时间</span><select data-dhcp-lease>${routePolicyOptions(['4小时', '8小时', '12小时', '24小时'], rowData[5] || '12小时')}</select></label></div>`;
+  const lanOptions = lanRows.length
+    ? lanRows.map((item) => [item._systemId || item._resourceId || item[0], `${item[0]} (${item[2]})`])
+    : [['', '请选择接口']];
+  const selectedLan = rowData._resource?.interface_id || rowData[1] || lanOptions[0][0];
+  return `<div class="lan-edit-form dhcp-service-form" data-dhcp-form><label data-required><span>LAN接口</span><select data-dhcp-interface>${routePolicyOptionsWithValues(lanOptions, selectedLan)}</select></label><label data-required><span>IP分配范围</span><input data-dhcp-pool value="${safeText(rowData[2] || '')}" placeholder="192.168.88.100-192.168.88.199"></label><label data-required><span>线路掩码</span><input data-dhcp-prefix value="24" placeholder="24"></label><label><span>网关</span><input data-dhcp-gateway value="${safeText(rowData[3] || '')}"></label><label><span>租约时间</span><select data-dhcp-lease>${routePolicyOptions(['4小时', '8小时', '12小时', '24小时'], rowData[5] || '12小时')}</select></label></div>`;
 }
 function dhcpStaticAllocationFormHtml(row = 0) {
   const allocations = networkRowsForPage('network/dhcpsvr_main').filter((item) => item[0] === '静态分配');
@@ -1937,8 +2102,19 @@ function dnsPolicyFormHtml(row = 0) {
   const resource = rowData._resource || {};
   const rule = resource.policy?.rules?.[0] || {};
   const outcome = rule.outcome || {};
-  const action = outcome.kind === 'reject' ? '拉黑' : outcome.kind === 'fixed_answer' ? '解析' : rowData[5] || '放行';
-  return `<div class="form-grid dns-policy-form" data-dns-policy-form><label><span>策略名称</span><input data-dns-name value="${safeText(resource.name || rowData[0] || '')}"></label><label><span>源IP / 网段</span><span class="route-address-summary-pair">${addressConditionSummaryHtml('dns-src', '源IP / 网段', rule.source_prefixes || rowData[1] || '')}</span></label><label data-required><span>目的域名组</span><select data-dns-domain-group>${objectGroupOptionsHtml('domain', rule.domain_set_ids?.[0] || '')}</select></label><label><span>解析上游</span><input data-dns-upstream value="${safeText((outcome.fixed_answers || []).join('') || rowData[4] || '')}" placeholder="例如 223.5.5.5" pattern="^\\d{1,3}(?:\\.\\d{1,3}){3}$"></label><label><span>动作</span><select data-dns-action>${routePolicyOptions(['放行', '解析', '拉黑'], action)}</select></label></div>`;
+  const upstream = dnsUpstreamByID(outcome.upstream_id);
+  const action = outcome.kind === 'reject' ? '拉黑' : '解析';
+  const selectedDomainGroup = rule.domain_set_ids?.[0] || (resource.policy?.rules?.length ? '' : '__any__');
+  const selectedWAN = upstream?.wan_egress_id || outcome.wan_egress_id || '';
+  const bootstrapProfile = upstream?.bootstrap_profile || dnsBootstrapProfileForDomainGroup(selectedDomainGroup);
+  const upstreamAddress = upstream?.servers?.[0] || (outcome.fixed_answers || [])[0] || rowData[4] || '';
+  const wanOptions = lineOptionItems({ includeProxy: false, includeGroups: false });
+  const hasSelectedWAN = wanOptions.some((item) => item.value === selectedWAN);
+  const wanSelect = wanOptions.length
+    ? `${optionValueLabel('', '请选择线路', selectedWAN)}${wanOptions.map((item) => optionValueLabel(item.value, item.label, selectedWAN)).join('')}${selectedWAN && !hasSelectedWAN ? optionValueLabel(selectedWAN, selectedWAN, selectedWAN) : ''}`
+    : optionValueLabel('', '请先创建 WAN 线路', selectedWAN);
+  const domainOptions = `${optionValueLabel('__any__', '所有域名', selectedDomainGroup)}${objectGroupOptionsHtml('domain', selectedDomainGroup)}`;
+  return `<div class="form-grid dns-policy-form" data-dns-policy-form><label data-required><span>策略序号</span><input data-dns-priority type="number" min="1" max="65535" value="${safeText(resource.priority || 1000)}"></label><label><span>策略名称</span><input data-dns-name value="${safeText(resource.name || rowData[0] || '')}"></label><label><span>源IP / 网段</span><span class="route-address-summary-pair">${addressConditionSummaryHtml('dns-src', '源IP / 网段', rule.source_prefixes || rowData[1] || '')}</span></label><label data-required><span>目的域名</span><select data-dns-domain-group>${domainOptions}</select></label><label data-required><span>解析线路</span><select data-dns-line>${wanSelect}</select></label><label data-required><span>Bootstrap DNS</span><select data-dns-bootstrap-profile>${optionValueLabel('domestic', '国内内置', bootstrapProfile)}${optionValueLabel('foreign', '境外内置', bootstrapProfile)}</select></label><label data-required><span>解析上游</span><input data-dns-upstream value="${safeText(upstreamAddress)}" placeholder="单个IP或自定义HTTPS DoH地址" autocomplete="off"></label><label><span>动作</span><select data-dns-action>${routePolicyOptions(['解析', '拉黑'], action)}</select></label></div>`;
 }
 function lanInterfaceFormHtml(row = 0) {
   const rows = networkRowsForPage('network/proxy_main');
@@ -1959,7 +2135,7 @@ function lanInterfaceFormHtml(row = 0) {
     ].map(([value, label]) => optionValueLabel(value, label, selectedType)).join('');
     return `<div class="lan-edit-form wan-edit-form" data-wan-form>
       <label data-required><span>名称</span><input data-wan-name value="${row ? safeText(rowData[0] || '') : ''}"></label>
-      <label data-required data-wan-field="pppoe static4 static6 dhcp4 dhcp6"><span>网卡</span><select data-wan-interface>${routePolicyOptions(interfaceSelectOptions('WAN'), row ? rowData[0] : interfaceSelectOptions('WAN')[0])}</select></label>
+      <label data-required data-wan-field="pppoe static4 static6 dhcp4 dhcp6"><span>网卡</span><select data-wan-interface>${interfaceSelectOptions('WAN', row ? rowData._systemId || resource.interface_id || '' : '')}</select></label>
       <label data-required><span>线路类型</span><select data-wan-type>${wanTypes}</select></label>
       <label data-wan-field="pppoe" data-required><span>账号</span><input data-wan-username></label>
       <label data-wan-field="pppoe" data-required><span>密码</span><input data-wan-password type="password"></label>
@@ -1983,7 +2159,7 @@ function lanInterfaceFormHtml(row = 0) {
   return `<div class="lan-edit-form lan-bridge-form" data-lan-form>
     <label data-required><span>名称</span><input data-lan-name value="${row ? safeText(rowData[0] || '') : ''}"></label>
     <label data-required><span>接口类型</span><select data-lan-kind><option value="lan_interface" ${isBridge ? '' : 'selected'}>LAN接口</option><option value="lan_bridge" ${isBridge ? 'selected' : ''}>LAN桥</option></select></label>
-    <label data-required data-lan-interface-field><span>网卡</span><select data-lan-interface>${routePolicyOptions(interfaceSelectOptions('LAN'), row && !isBridge ? rowData[0] : interfaceSelectOptions('LAN')[0])}</select></label>
+    <label data-required data-lan-interface-field><span>网卡</span><select data-lan-interface>${interfaceSelectOptions('LAN', row && !isBridge ? rowData._systemId || resource.interface_id || '' : '')}</select></label>
     <label data-required><span>IP</span><input data-lan-address value="${row ? safeText(String(rowData[2] || '').split('/')[0]) : ''}"></label>
     <label data-required><span>线路掩码</span><input data-lan-prefix value="${row && String(rowData[2] || '').includes('/') ? String(rowData[2]).split('/')[1] : '24'}"></label>
     <label><span>MTU</span><input data-lan-mtu value="${row ? safeText(rowData[6] || '') : '1500'}"></label>
@@ -2177,9 +2353,9 @@ function trafficTrendEndpoint(windowName) {
   return `/api/v1/telemetry/traffic-trend?window=${encodeURIComponent(windowName)}&points=${points}`;
 }
 const resourceEndpoints = {
-  interfaces: '/api/v1/interfaces', interfaceBonds: '/api/v1/interface-bonds', wanLinks: '/api/v1/gateway/wan-links', wanGroups: '/api/v1/gateway/wan-groups', proxyEgresses: '/api/v1/proxy/egresses', proxyNodes: '/api/v1/proxy/nodes', proxySubscriptions: '/api/v1/proxy/subscriptions', routePolicies: '/api/v1/gateway/policies/routes', portMaps: '/api/v1/gateway/nat/port-maps', dnsPolicies: '/api/v1/dns/policies', dhcpServers: '/api/v1/dhcp/servers', dhcpBindings: '/api/v1/dhcp/static-bindings', objectGroups: '/api/v1/objects/groups', trafficControl: '/api/v1/gateway/traffic-control', securityAcls: '/api/v1/security/acls', securityIpMac: '/api/v1/security/ip-mac-bindings', securityThreatIntel: '/api/v1/security/threat-intel', securityAttackRules: '/api/v1/security/attack-rules', authUsers: '/api/v1/auth/users'
+  interfaces: '/api/v1/interfaces', interfaceBonds: '/api/v1/interface-bonds', wanLinks: '/api/v1/gateway/wan-links', wanGroups: '/api/v1/gateway/wan-groups', proxyEgresses: '/api/v1/proxy/egresses', proxyNodes: '/api/v1/proxy/nodes', proxySubscriptions: '/api/v1/proxy/subscriptions', routePolicies: '/api/v1/gateway/policies/routes', portMaps: '/api/v1/gateway/nat/port-maps', dnsPolicies: '/api/v1/dns/policies', dnsUpstreams: '/api/v1/dns/upstreams', dhcpServers: '/api/v1/dhcp/servers', dhcpBindings: '/api/v1/dhcp/static-bindings', objectGroups: '/api/v1/objects/groups', trafficControl: '/api/v1/gateway/traffic-control', securityAcls: '/api/v1/security/acls', securityIpMac: '/api/v1/security/ip-mac-bindings', securityThreatIntel: '/api/v1/security/threat-intel', securityAttackRules: '/api/v1/security/attack-rules', authUsers: '/api/v1/auth/users'
 };
-const defaultLoginHint = '使用授权账号登录管理控制台。';
+const defaultLoginHint = '';
 
 function setLoginHint(message = defaultLoginHint) {
   const hint = document.getElementById('loginHint');
@@ -2274,8 +2450,8 @@ async function refreshControlPlane(options = {}) {
   state.controlPlane.error = '';
   if (!options.silent) render();
   try {
-    const [health, mode, capabilities, telemetryResult, audit, configExport, managementNetwork, smartQoS, runtimeStatus, firmwareStatus, proxyStatus, proxyLogs, pppoeStatus, resourceResult] = await Promise.all([
-      apiJSON(controlApi.health), apiJSON(controlApi.mode), apiJSON(controlApi.capabilities), fetchTelemetryEndpoints(previousTelemetry, previousErrors), safeApiJSON(controlApi.audit, state.controlPlane.audit), safeApiJSON(controlApi.configExport, state.controlPlane.configExport), safeApiJSON(controlApi.managementNetwork, state.controlPlane.managementNetwork), safeApiJSON(controlApi.smartQoS, state.controlPlane.smartQoS), fetchRuntimeStatus(), safeApiJSON(controlApi.firmwareStatus, state.controlPlane.firmwareStatus), safeApiJSON(controlApi.proxyStatus, state.controlPlane.proxyStatus), safeApiJSON(controlApi.proxyLogs, state.controlPlane.proxyLogs), safeApiJSON(controlApi.pppoeStatus, state.controlPlane.pppoeStatus), fetchResourceEndpoints(previousResources, previousErrors)
+    const [resourceResult, health, mode, capabilities, telemetryResult, audit, configExport, managementNetwork, smartQoS, runtimeStatus, firmwareStatus, proxyStatus, proxyLogs, pppoeStatus] = await Promise.all([
+      fetchResourceEndpoints(previousResources, previousErrors, !options.silent), apiJSON(controlApi.health), apiJSON(controlApi.mode), apiJSON(controlApi.capabilities), fetchTelemetryEndpoints(previousTelemetry, previousErrors), safeApiJSON(controlApi.audit, state.controlPlane.audit), safeApiJSON(controlApi.configExport, state.controlPlane.configExport), safeApiJSON(controlApi.managementNetwork, state.controlPlane.managementNetwork), safeApiJSON(controlApi.smartQoS, state.controlPlane.smartQoS), fetchRuntimeStatus(), safeApiJSON(controlApi.firmwareStatus, state.controlPlane.firmwareStatus), safeApiJSON(controlApi.proxyStatus, state.controlPlane.proxyStatus), safeApiJSON(controlApi.proxyLogs, state.controlPlane.proxyLogs), safeApiJSON(controlApi.pppoeStatus, state.controlPlane.pppoeStatus)
     ]);
     state.controlPlane = { loading: false, error: '', health, mode, capabilities, telemetry: telemetryResult.payloads, resources: resourceResult.payloads, audit, configExport, configApply, managementNetwork, smartQoS, runtimeStatus, runtimePreview, runtimeApply, firmwareStatus, proxyStatus, proxyLogs, pppoeStatus, endpointErrors: { ...telemetryResult.errors, ...resourceResult.errors }, runtimeBusy: '', firmwareBusy: '', trafficTrendLoading: false };
     if (options.settleInterfaces) await settleInterfaceReadback();
@@ -2365,7 +2541,26 @@ async function safeApiJSON(path, fallback = null) {
 async function fetchTelemetryEndpoints(previousTelemetry = {}, previousErrors = {}) {
   return fetchEndpointMap({ dashboard: controlApi.dashboard, dashboardSummary: controlApi.dashboardSummary, trafficTrend: controlApi.trafficTrend, interfaces: controlApi.interfaces, topSessions: controlApi.topSessions, topDomains: controlApi.topDomains, onlineUsers: controlApi.onlineUsers, policyHits: controlApi.policyHits }, previousTelemetry, previousErrors);
 }
-async function fetchResourceEndpoints(previousResources = {}, previousErrors = {}) {
+async function fetchResourceEndpoints(previousResources = {}, previousErrors = {}, progressive = false) {
+	if (progressive) {
+		const payloads = { ...previousResources };
+		const errors = { ...previousErrors };
+		await Promise.all(Object.entries(resourceEndpoints).map(async ([key, endpoint]) => {
+			try {
+				const payload = await apiJSON(endpoint);
+				payloads[key] = payload;
+				delete errors[key];
+				state.controlPlane.resources = { ...state.controlPlane.resources, [key]: payload };
+				const endpointErrors = { ...state.controlPlane.endpointErrors };
+				delete endpointErrors[key];
+				state.controlPlane.endpointErrors = endpointErrors;
+				renderWorkspace();
+			} catch (error) {
+				errors[key] = error.message || previousErrors[key] || '接口不可用';
+			}
+		}));
+		return { payloads, errors };
+	}
   return fetchEndpointMap(resourceEndpoints, previousResources, previousErrors);
 }
 async function fetchEndpointMap(endpoints, previousPayloads = {}, previousErrors = {}) {
@@ -2572,6 +2767,13 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && el.appShell.classList.contains('mobile-menu-open')) setMobileMenuOpen(false);
 });
 el.logoutButton.addEventListener('click', submitLogout);
+el.modalBody.addEventListener('change', (event) => {
+  if (event.target.matches('[data-dns-domain-group]')) {
+    syncDNSBootstrapModal(dnsBootstrapProfileForDomainGroup(event.target.value));
+  } else if (event.target.matches('[data-dns-bootstrap-profile]')) {
+    syncDNSBootstrapModal(event.target.value);
+  }
+});
 el.modalOk.addEventListener('click', async () => {
   if (modalSubmitting) return;
   if (!validateModalRequired()) return;

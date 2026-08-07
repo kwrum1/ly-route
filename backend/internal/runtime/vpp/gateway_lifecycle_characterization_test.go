@@ -61,6 +61,7 @@ func TestGatewayLifecycleCharacterization_compilers_emit_current_operation_seque
 	}
 	want := []identity{
 		{name: "vpp.dataplane.attach", resource: "eth1"},
+		{name: "vpp.lan-control-lcp", resource: "interface-lan"},
 		{name: "vpp.interface.address", resource: "interface-lan"},
 		{name: "vpp.management-lcp", resource: "management-network"},
 		{name: "vpp.qos.classify", resource: "vpp.qos.classify"},

@@ -41,7 +41,7 @@ func decodeVPPCTLInterfaces(request SnapshotRequest, results []VPPCTLCommandResu
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) != 2 || fields[0] != "L3" || current < 0 {
+		if len(fields) < 2 || fields[0] != "L3" || current < 0 || !validInterfaceAddressMetadata(fields[2:]) {
 			return InterfaceReadback{}, snapshotDecodeError("unknown interface address grammar %q", line)
 		}
 		prefix, parseErr := netip.ParsePrefix(fields[1])
@@ -53,17 +53,23 @@ func decodeVPPCTLInterfaces(request SnapshotRequest, results []VPPCTLCommandResu
 	if len(states) == 0 {
 		return InterfaceReadback{}, snapshotDecodeError("interface output contained no rows")
 	}
-	selected := make([]InterfaceState, 0, len(request.Interfaces))
-	for _, name := range request.Interfaces {
+	requested := append(append([]string(nil), request.Interfaces...), request.AbsentInterfaces...)
+	selected := make([]InterfaceState, 0, len(requested))
+	for _, name := range requested {
 		found := false
 		for _, state := range states {
 			if state.Name == strings.TrimSpace(name) {
-				selected = append(selected, state)
+				if _, duplicate := interfaceStateByName(selected, state.Name); !duplicate {
+					selected = append(selected, state)
+				}
 				found = true
 				break
 			}
 		}
 		if !found {
+			if request.AllowMissing {
+				continue
+			}
 			return InterfaceReadback{}, snapshotDecodeError("interface %q was not returned", name)
 		}
 	}
@@ -93,7 +99,7 @@ func requireInterfaceCandidates(request SnapshotRequest) error {
 		}
 		candidates[name] = struct{}{}
 	}
-	return requireCandidateNames(request.Interfaces, candidates, "interface")
+	return requireCandidateNames(append(append([]string(nil), request.Interfaces...), request.AbsentInterfaces...), candidates, "interface")
 }
 
 func decodeVPPCTLBonds(request SnapshotRequest, results []VPPCTLCommandResult) (BondReadback, error) {
@@ -110,12 +116,18 @@ func decodeVPPCTLBonds(request SnapshotRequest, results []VPPCTLCommandResult) (
 		}
 		candidateByID[id] = candidate.Name
 	}
-	if err := requireBondCandidateNames(request.Bonds, candidates); err != nil {
+	if err := requireBondCandidateNames(append(append([]string(nil), request.Bonds...), request.AbsentBonds...), candidates); err != nil {
 		return BondReadback{}, err
 	}
-	output, err := commandOutput(results, "show bond details")
+	output, err := commandOutputAllowEmpty(results, "show bond details")
 	if err != nil {
 		return BondReadback{}, err
+	}
+	if strings.TrimSpace(output) == "" {
+		if len(request.Bonds) > 0 {
+			return BondReadback{}, snapshotDecodeError("bond output contained no requested rows")
+		}
+		return BondReadback{}, nil
 	}
 	var bonds []BondState
 	expectedMembers := -1
@@ -190,6 +202,11 @@ func decodeVPPCTLBonds(request SnapshotRequest, results []VPPCTLCommandResult) (
 	}
 	if len(bonds) == 0 || bonds[len(bonds)-1].Mode == "" || expectedMembers < 0 || len(bonds[len(bonds)-1].Members) != expectedMembers {
 		return BondReadback{}, snapshotDecodeError("bond output is incomplete")
+	}
+	for _, name := range request.AbsentBonds {
+		if _, found := bondByName(bonds, strings.TrimSpace(name)); found {
+			return BondReadback{}, snapshotDecodeError("deleted bond %q is still present", name)
+		}
 	}
 	selected := make([]BondState, 0, len(request.Bonds))
 	for _, name := range request.Bonds {

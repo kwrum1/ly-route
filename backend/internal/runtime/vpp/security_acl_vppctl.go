@@ -11,13 +11,9 @@ import (
 )
 
 func (channel vppctlChannel) doSecurityACLLifecycle(ctx context.Context, operation Operation, acl trafficpolicy.SecurityACL, deleting bool) (Reply, error) {
-	direction := "input"
-	if acl.Match.Direction == "output" {
-		direction = "output"
-	}
 	interfaceName := "lyroute-$LY_ROUTE_LAN_INTERFACE"
 	tag := "ly-route-" + safeTag(acl.ID)
-	results, err := channel.removeSecurityACLState(ctx, operation, interfaceName, direction, tag)
+	results, err := channel.removeSecurityACLState(ctx, operation, interfaceName, acl.Match.Direction, tag)
 	if err != nil || deleting {
 		return routePolicyLifecycleReply(operation, results), err
 	}
@@ -41,11 +37,15 @@ func (channel vppctlChannel) doSecurityACLLifecycle(ctx context.Context, operati
 	if err != nil {
 		return Reply{}, err
 	}
-	applied, err := channel.runServiceChainCommands(ctx, operation,
-		fmt.Sprintf("set acl-plugin interface %s %s acl %d", interfaceName, direction, actualACLID),
+	attachCommands := []string{}
+	for _, direction := range securityDirections(acl.Match.Direction) {
+		attachCommands = append(attachCommands, fmt.Sprintf("set acl-plugin interface %s %s acl %d", interfaceName, direction, actualACLID))
+	}
+	attachCommands = append(attachCommands,
 		fmt.Sprintf("show acl-plugin acl index %d", actualACLID),
 		"show acl-plugin interface",
 		"show interface "+interfaceName)
+	applied, err := channel.runServiceChainCommands(ctx, operation, attachCommands...)
 	if err != nil {
 		return Reply{}, err
 	}
@@ -57,8 +57,10 @@ func (channel vppctlChannel) doSecurityACLLifecycle(ctx context.Context, operati
 	}
 	interfaceOutput := resultStdoutLast(results, "show acl-plugin interface")
 	identityOutput := resultStdoutLast(results, "show interface "+interfaceName)
-	if !securityACLInterfaceAttached(interfaceOutput, identityOutput, interfaceName, direction, actualACLID) {
-		return Reply{}, snapshotDecodeError("security ACL %q interface attachment is missing: %q", acl.ID, interfaceOutput)
+	for _, direction := range securityDirections(acl.Match.Direction) {
+		if !securityACLInterfaceAttached(interfaceOutput, identityOutput, interfaceName, direction, actualACLID) {
+			return Reply{}, snapshotDecodeError("security ACL %q %s interface attachment is missing: %q", acl.ID, direction, interfaceOutput)
+		}
 	}
 	return routePolicyLifecycleReply(operation, results), nil
 }
@@ -69,9 +71,12 @@ func (channel vppctlChannel) removeSecurityACLState(ctx context.Context, operati
 		return nil, err
 	}
 	for _, id := range taggedServiceChainACLIDs(resultStdout(results, "show acl-plugin acl"), tag) {
-		removed, removeErr := channel.runServiceChainCommands(ctx, operation,
-			fmt.Sprintf("set acl-plugin interface %s %s acl %d del", interfaceName, direction, id),
-			fmt.Sprintf("delete acl-plugin acl index %d", id))
+		removeCommands := make([]string, 0, len(securityDirections(direction))+1)
+		for _, attachDirection := range securityDirections(direction) {
+			removeCommands = append(removeCommands, fmt.Sprintf("set acl-plugin interface %s %s acl %d del", interfaceName, attachDirection, id))
+		}
+		removeCommands = append(removeCommands, fmt.Sprintf("delete acl-plugin acl index %d", id))
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation, removeCommands...)
 		if removeErr != nil {
 			return nil, removeErr
 		}

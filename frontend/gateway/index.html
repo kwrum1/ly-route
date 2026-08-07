@@ -26,7 +26,7 @@
       <label><span>用户名</span><input id="username" autocomplete="username"></label>
       <label><span>密码</span><input id="password" type="password" autocomplete="current-password"></label>
       <button type="submit">登录</button>
-      <small id="loginHint">使用授权账号登录管理控制台。</small>
+      <small id="loginHint"></small>
     </form>
   </section>
 
@@ -57,9 +57,11 @@
   </section>
   <div class="toast is-hidden" id="toast"></div>
   <script src="./shell.js?v=dual-product-20260722"></script>
+  <!-- gateway-modules:start -->
   <script src="./gateway-modal.js?v=modal-fix-20260803"></script>
   <script src="./gateway-routing.js?v=login-fix-20260803"></script>
   <script src="./gateway-overview.js?v=login-fix-20260803"></script>
+  <!-- gateway-modules:end -->
   <script src="./app.js?v=object-display-20260803"></script>
 </body>
 </html>

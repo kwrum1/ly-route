@@ -31,6 +31,7 @@ type productionVPPProof struct {
 	clock  apply.Clock
 	trace  string
 	state  string
+	lcp    string
 }
 
 func newProductionVPPProof(t *testing.T, seedPrior bool) *productionVPPProof {
@@ -57,11 +58,14 @@ func newProductionVPPProof(t *testing.T, seedPrior bool) *productionVPPProof {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof := &productionVPPProof{store: store, client: &http.Client{Timeout: 10 * time.Second}, clock: clock, trace: filepath.Join(directory, "vppctl.trace"), state: filepath.Join(directory, "interface.state")}
+	proof := &productionVPPProof{store: store, client: &http.Client{Timeout: 10 * time.Second}, clock: clock, trace: filepath.Join(directory, "vppctl.trace"), state: filepath.Join(directory, "interface.state"), lcp: filepath.Join(directory, "lcp.state")}
 	if seedPrior {
 		seedProductionProofPrior(t, store, compiler.proxyEgress, productionProofFlow(), plan.GatewayPlan)
 	}
 	if err := os.WriteFile(proof.state, []byte("prior\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proof.lcp, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	natState := filepath.Join(directory, "nat.state")
@@ -71,6 +75,7 @@ func newProductionVPPProof(t *testing.T, seedPrior bool) *productionVPPProof {
 	binaryPath := writeProductionVPPCTL(t, directory, plan.GatewayPlan)
 	t.Setenv("FAKE_VPPCTL_TRACE", proof.trace)
 	t.Setenv("FAKE_VPPCTL_STATE", proof.state)
+	t.Setenv("FAKE_VPPCTL_LCP_STATE", proof.lcp)
 	t.Setenv("FAKE_VPPCTL_NAT_STATE", natState)
 	controller := &productionProofServiceController{clock: clock}
 	transaction := apply.NewProductionGatewayTransaction(vpp.Adapter{Client: vpp.NewVPPCTLClient(binaryPath)}, clock)

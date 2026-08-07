@@ -36,8 +36,9 @@ func TestDPDKTransactionReusesIdenticalDeviceWidePathWithoutRestart(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Status != "already_applied" || receipt.Changed || !reflect.DeepEqual(host.trace, traceAfterFirst) {
-		t.Fatalf("receipt=%#v trace=%v, want unchanged trace %v", receipt, host.trace, traceAfterFirst)
+	wantTrace := append(append([]string(nil), traceAfterFirst...), "verify-dpdk")
+	if receipt.Status != "already_applied" || receipt.Changed || !reflect.DeepEqual(host.trace, wantTrace) {
+		t.Fatalf("receipt=%#v trace=%v, want unchanged dataplane with verification %v", receipt, host.trace, wantTrace)
 	}
 	if _, err := transaction.Rollback(context.Background(), "txn-second"); err == nil {
 		t.Fatal("reused path unexpectedly owned a rollback snapshot")
@@ -56,8 +57,30 @@ func TestDPDKTransactionReusesPersistedPathAfterControlPlaneRestart(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if receipt.Status != "already_applied" || receipt.Changed || !reflect.DeepEqual(host.trace, traceAfterFirst) {
-		t.Fatalf("receipt=%#v trace=%v, want persisted path reuse", receipt, host.trace)
+	wantTrace := append(append([]string(nil), traceAfterFirst...), "verify-dpdk")
+	if receipt.Status != "already_applied" || receipt.Changed || !reflect.DeepEqual(host.trace, wantTrace) {
+		t.Fatalf("receipt=%#v trace=%v, want persisted path verification", receipt, host.trace)
+	}
+}
+
+func TestDPDKTransactionReappliesPersistedPathWhenVPPRuntimeIsStale(t *testing.T) {
+	host := &fakeHost{}
+	first := Transaction{Host: host, Now: fixedClock}
+	if _, err := first.Apply(context.Background(), dpdkRequest("txn-first")); err != nil {
+		t.Fatal(err)
+	}
+	host.verifyDPDKFailures = 1
+	restarted := Transaction{Host: host, Now: fixedClock}
+	receipt, err := restarted.Apply(context.Background(), dpdkRequest("txn-replay"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Status != "applied" || !receipt.Changed {
+		t.Fatalf("receipt=%#v, want re-applied path", receipt)
+	}
+	wantSuffix := []string{"verify-dpdk", "snapshot", "stop-vpp", "configure-dpdk", "start-vpp", "verify-dpdk"}
+	if !reflect.DeepEqual(host.trace[len(host.trace)-len(wantSuffix):], wantSuffix) {
+		t.Fatalf("trace=%v, want suffix=%v", host.trace, wantSuffix)
 	}
 }
 
@@ -110,9 +133,10 @@ func TestNativeTierDoesNotTouchPrivilegedHost(t *testing.T) {
 }
 
 type fakeHost struct {
-	trace  []string
-	fail   string
-	active *ActiveState
+	trace              []string
+	fail               string
+	verifyDPDKFailures int
+	active             *ActiveState
 }
 
 func (host *fakeHost) call(name string) error {
@@ -133,6 +157,11 @@ func (host *fakeHost) ConfigureDPDK(context.Context, vpp.NativePath, Snapshot) e
 }
 func (host *fakeHost) StartVPP(context.Context) error { return host.call("start-vpp") }
 func (host *fakeHost) VerifyDPDK(context.Context, vpp.NativePath) error {
+	if host.verifyDPDKFailures > 0 {
+		host.verifyDPDKFailures--
+		host.trace = append(host.trace, "verify-dpdk")
+		return errors.New("injected stale runtime")
+	}
 	return host.call("verify-dpdk")
 }
 func (host *fakeHost) Restore(context.Context, Snapshot) error { return host.call("restore") }

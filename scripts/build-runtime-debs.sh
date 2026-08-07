@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/build-runtime-debs.sh [smartdns|dns-vpp-proxy|xray|vpp|vpp-fdio|vpp-smart-qos|vpp-security-guard|vpp-pppoe-client|vpp-orchestrator|vpp-apply|all]
+Usage: scripts/build-runtime-debs.sh [smartdns|dns-vpp-proxy|xray|vpp|vpp-fdio|vpp-smart-qos|vpp-security-guard|vpp-orchestrator|vpp-apply|all]
 
 Builds source-backed runtime .deb packages for commercial Ly Route rootfs builds.
 
@@ -26,7 +26,6 @@ Environment:
   LY_ROUTE_FDIO_VPP_DISTRO        FD.io Debian distro path. Defaults to bookworm.
   LY_ROUTE_FDIO_VPP_DISTRO_ID     packagecloud distro version id. Defaults to 215.
   LY_ROUTE_FDIO_CACHE_DIR         Directory containing predownloaded FD.io .deb packages.
-  LY_ROUTE_VPP_DEV_DEBS_DIR       Existing matching-architecture VPP development packages.
 EOF
 }
 
@@ -117,11 +116,11 @@ build_dns_vpp_proxy() {
   package_root=$work_dir/root
   binary=$work_dir/ly-route-dns-vpp-proxy
   cc -O2 -Wall -Wextra -Werror -std=c11 -o "$binary" "$repo_root/packaging/runtime/dns-vpp-proxy.c" -ldl
-  mkdir -p "$package_root/DEBIAN" "$package_root/usr/lib/ly-route" "$package_root/lib/systemd/system" "$package_root/etc/ly-route"
+  mkdir -p "$package_root/DEBIAN" "$package_root/usr/lib/ly-route" "$package_root/lib/systemd/system" "$package_root/etc/ly-route" \
+    "$package_root/etc/systemd/system/smartdns.service.d" "$package_root/etc/systemd/system/ly-route-policy-routing.service.d"
   cp "$binary" "$package_root/usr/lib/ly-route/ly-route-dns-vpp-proxy"
   ln -s ly-route-dns-vpp-proxy "$package_root/usr/lib/ly-route/ly-route-dns-vpp-proxy-v6"
   chmod 0755 "$package_root/usr/lib/ly-route/ly-route-dns-vpp-proxy"
-  printf '%s\n' '# source-prefix match-kind domain smartdns-port' >"$package_root/etc/ly-route/dns-source-routes.conf"
   cat > "$package_root/DEBIAN/control" <<EOF
 Package: ly-route-dns-vpp-proxy
 Version: $version
@@ -129,20 +128,41 @@ Section: net
 Priority: optional
 Architecture: $deb_arch
 Maintainer: Ly Route <root@ly-route.local>
-Depends: vpp
+Depends: vpp, smartdns
 Description: Ly Route VPP native DNS service adapter
 EOF
+  cat > "$package_root/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+install -d -m 0755 /etc/ly-route
+if [ ! -e /etc/ly-route/dns-source-routes.conf ]; then
+  umask 027
+  printf '%s\n' '# source-prefix match-kind domain smartdns-port' >/etc/ly-route/dns-source-routes.conf
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+exit 0
+EOF
+  chmod 0755 "$package_root/DEBIAN/postinst"
+  cp "$repo_root/packaging/rootfs-overlay/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf" \
+    "$package_root/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf"
+  cp "$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf" \
+    "$package_root/etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf"
   cat > "$package_root/lib/systemd/system/ly-route-dns-vpp-proxy.service" <<'EOF'
 [Unit]
 Description=LY-Route VPP native DNS service adapter
-Requires=vpp.service smartdns.service
-After=vpp.service smartdns.service
+Requires=vpp.service smartdns.service ly-route-dns-vpp-v6-namespace.service ly-route-policy-routing.service
+PartOf=vpp.service ly-route-dns-vpp-v6-namespace.service ly-route-policy-routing.service
+After=vpp.service smartdns.service ly-route-dns-vpp-v6-namespace.service ly-route-policy-routing.service
 Before=ly-route-dns-vpp-session.service
 
 [Service]
 Type=simple
 Environment=VCL_CONFIG=/etc/ly-route/vcl.conf
 Environment=VCL_VPP_API_SOCKET=/run/vpp/api.sock
+Environment=VCL_APP_NAMESPACE_ID=dns-v4
+Environment=VCL_APP_NAMESPACE_SECRET=4242
 Environment=LD_PRELOAD=/usr/lib/ly-route/libvcl_ldpreload.so
 Environment=LY_ROUTE_DNS_FAMILY=ipv4
 Environment=LY_ROUTE_DNS_SOURCE_ROUTES=/etc/ly-route/dns-source-routes.conf
@@ -156,8 +176,9 @@ EOF
   cat > "$package_root/lib/systemd/system/ly-route-dns-vpp-proxy-v6.service" <<'EOF'
 [Unit]
 Description=LY-Route VPP native IPv6 DNS service adapter
-Requires=vpp.service smartdns.service ly-route-dns-vpp-v6-namespace.service
-After=vpp.service smartdns.service ly-route-dns-vpp-v6-namespace.service
+Requires=vpp.service smartdns.service ly-route-dns-vpp-v6-namespace.service ly-route-policy-routing.service
+PartOf=vpp.service ly-route-dns-vpp-v6-namespace.service ly-route-policy-routing.service
+After=vpp.service smartdns.service ly-route-dns-vpp-v6-namespace.service ly-route-policy-routing.service
 Before=ly-route-dns-vpp-session.service
 
 [Service]
@@ -349,6 +370,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import time
 
 def fail(message):
     print(message, file=sys.stderr)
@@ -409,6 +431,30 @@ def expand_command(command):
         raise ValueError(f"missing environment variable for VPP command {command!r}: {', '.join(missing)}")
     return expanded
 
+def prepare_replay_command(command, acl_ids):
+    create = re.fullmatch(r"set acl-plugin acl index ([0-9]+) (.+)", command)
+    if create:
+        stable_id = int(create.group(1))
+        return f"set acl-plugin acl {create.group(2)}", stable_id
+    for stable_id, allocated_id in acl_ids.items():
+        command = re.sub(
+            rf"\bacl\s+index\s+{stable_id}\b",
+            f"acl index {allocated_id}",
+            command,
+        )
+        command = re.sub(
+            rf"\bacl\s+{stable_id}\b",
+            f"acl {allocated_id}",
+            command,
+        )
+    return command, None
+
+def allocated_acl_id(stdout, stderr):
+    match = re.search(r"\bACL index:\s*([0-9]+)\b", f"{stdout}\n{stderr}", re.IGNORECASE)
+    if match is None:
+        raise ValueError("VPP did not report the allocated ACL index")
+    return int(match.group(1))
+
 def write_receipt(path, receipt):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temporary = path + ".tmp"
@@ -416,6 +462,82 @@ def write_receipt(path, receipt):
         json.dump(receipt, handle, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(temporary, path)
+
+def desired_tap_names(operations, command_map):
+    """Find TAP names owned by the DNS/proxy networks being replayed."""
+    names = set()
+    for operation in operations:
+        name = operation_name(operation)
+        if name not in {"vpp.dns-service.network", "vpp.proxy-service.network"}:
+            continue
+        payload = operation.get("Payload") or operation.get("payload") or {}
+        def collect(value):
+            if isinstance(value, dict):
+                for key in ("vpp_interface", "host_interface", "ingress_vpp_interface",
+                            "ingress_host_interface", "egress_vpp_interface",
+                            "egress_host_interface"):
+                    item = value.get(key)
+                    if isinstance(item, str) and item.strip():
+                        names.add(item.strip())
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+        collect(payload)
+        commands = commands_from_operation(operation) or commands_from_map(operation, command_map)
+        for command in commands:
+            match = re.search(r"host-if-name\s+(\S+)", command)
+            if match:
+                names.add(match.group(1))
+            match = re.search(r"set interface name\s+\S+\s+(\S+)", command)
+            if match:
+                names.add(match.group(1))
+    return names
+
+def clear_stale_taps(vppctl, operations, command_map, receipt):
+    """Remove stale TAP objects before replaying deterministic names.
+
+    A stopped transaction may leave the old object in VPP. Replaying a
+    create/rename then produces an ambiguous interface and makes the next
+    Apply fail even though the desired configuration is valid.
+    """
+    targets = desired_tap_names(operations, command_map)
+    managed_prefixes = ("lydns", "lydnsh", "lypxin", "lypxhin", "lypxout", "lypxhout")
+
+    def managed_name(name):
+        return any(name.startswith(prefix) for prefix in managed_prefixes)
+    result = subprocess.run([vppctl, "show", "tap"], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        fail_with_receipt(f"failed to inspect VPP TAP interfaces: {result.stderr.strip()}")
+    records = []
+    for block in re.split(r"(?=^Interface:\s)", result.stdout, flags=re.MULTILINE):
+        header = re.search(r"^Interface:\s+\S+\s+\(ifindex\s+(\d+)\)", block, re.MULTILINE)
+        if header is None:
+            continue
+        names = set(re.findall(r'^Interface:\s+(\S+)', block, re.MULTILINE))
+        names.update(re.findall(r'^\s*name\s+"([^"]+)"', block, re.MULTILINE))
+        matching = {name for name in names if managed_name(name)}
+        if not matching:
+            continue
+        index = header.group(1)
+        records.append((int(index), matching))
+    keep = set()
+    for target in targets:
+        candidates = sorted(index for index, matching in records if target in matching)
+        if candidates:
+            keep.add(candidates[0])
+    removed = []
+    for index, matching in sorted(records, reverse=True):
+        if index in keep:
+            continue
+        delete_result = run_vppctl(vppctl, f"delete tap sw_if_index {index}")
+        if delete_result.returncode != 0:
+            fail_with_receipt(f"failed to remove stale VPP TAP {index}: {delete_result.stderr.strip()}")
+        removed.append({"sw_if_index": index, "names": sorted(matching)})
+    if removed:
+        receipt["stale_taps_removed"] = removed
 
 if len(sys.argv) not in (2, 3):
     fail("usage: vpp-apply [--dry-run] /path/to/operations.json")
@@ -438,6 +560,46 @@ def fail_with_receipt(message):
     receipt["error"] = message
     write_receipt(receipt_path, receipt)
     fail(message)
+
+def pppoe_underlay_interfaces(operations, command_map):
+    """Return native VPP PPPoE interfaces referenced by replay commands."""
+    names = set()
+    for operation in operations:
+        commands = commands_from_operation(operation)
+        if not commands:
+            commands = commands_from_map(operation, command_map)
+        for command in commands:
+            names.update(re.findall(r"\bpppoe_session[0-9]+\b", command))
+    return sorted(names)
+
+def wait_for_pppoe_underlay(vppctl, operations, command_map):
+    """Do not replay routes until every native PPPoE session interface exists."""
+    interfaces = pppoe_underlay_interfaces(operations, command_map)
+    if not interfaces:
+        return
+    try:
+        attempts = int(os.environ.get("LY_ROUTE_PPPOE_READY_ATTEMPTS", "60"))
+        interval = float(os.environ.get("LY_ROUTE_PPPOE_READY_INTERVAL", "1"))
+    except ValueError:
+        fail_with_receipt("PPPoE readiness retry settings must be positive numbers")
+    if attempts <= 0 or interval <= 0:
+        fail_with_receipt("PPPoE readiness retry settings must be positive numbers")
+    for attempt in range(attempts):
+        session = subprocess.run([vppctl, "show", "pppoe", "session"], text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        session_ready = session.returncode == 0 and bool(session.stdout.strip())
+        interfaces_ready = True
+        for interface in interfaces:
+            result = subprocess.run([vppctl, "show", "interface", interface], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0 or interface not in result.stdout:
+                interfaces_ready = False
+                break
+        if session_ready and interfaces_ready:
+            return
+        if attempt + 1 < attempts:
+            time.sleep(interval)
+    fail_with_receipt("native PPPoE underlay did not become ready before VPP operation replay: " + ", ".join(interfaces))
 
 vppctl = shutil.which("vppctl")
 if vppctl is None and not dry_run:
@@ -466,10 +628,27 @@ if not operations:
     sys.exit(0)
 
 if not dry_run:
-    version_result = subprocess.run([vppctl, "show", "version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if version_result.returncode != 0:
-        fail_with_receipt("vppctl show version failed")
+    try:
+        ready_attempts = int(os.environ.get("LY_ROUTE_VPP_READY_ATTEMPTS", "60"))
+        ready_interval = float(os.environ.get("LY_ROUTE_VPP_READY_INTERVAL", "1"))
+    except ValueError:
+        fail_with_receipt("VPP readiness retry settings must be positive numbers")
+    if ready_attempts <= 0 or ready_interval <= 0:
+        fail_with_receipt("VPP readiness retry settings must be positive numbers")
+    for attempt in range(ready_attempts):
+        version_result = subprocess.run([vppctl, "show", "version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if version_result.returncode == 0:
+            break
+        if attempt + 1 < ready_attempts:
+            time.sleep(ready_interval)
+    else:
+        fail_with_receipt("VPP API did not become ready before operation replay")
 
+    wait_for_pppoe_underlay(vppctl, operations, command_map)
+
+clear_stale_taps(vppctl, operations, command_map, receipt)
+
+acl_ids = {}
 for index, operation in enumerate(operations):
     if not isinstance(operation, dict):
         fail_with_receipt(f"operation {index} must be an object")
@@ -495,13 +674,19 @@ for index, operation in enumerate(operations):
             entry["results"].append({"command": receipt_command, "status": "failed", "stderr": receipt_text(str(err))})
             receipt["operations"].append(entry)
             fail_with_receipt(str(err))
-        argv = shlex.split(command)
+        effective_command, stable_acl_id = prepare_replay_command(command, acl_ids)
+        argv = shlex.split(effective_command)
         if not argv:
             entry["results"].append({"command": receipt_command, "status": "failed", "stderr": "empty VPP command"})
             receipt["operations"].append(entry)
             fail_with_receipt(f"empty VPP command for operation {name}")
         if dry_run:
-            entry["results"].append({"command": receipt_command, "status": "dry-run"})
+            result_entry = {"command": receipt_command, "status": "dry-run"}
+            if effective_command != command:
+                result_entry["effective_command"] = effective_command
+            entry["results"].append(result_entry)
+            if stable_acl_id is not None:
+                acl_ids[stable_acl_id] = stable_acl_id
             continue
         result = subprocess.run([vppctl] + argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout = result.stdout.strip()
@@ -513,7 +698,17 @@ for index, operation in enumerate(operations):
             entry["results"].append({"command": receipt_command, "status": "failed", "stdout": receipt_text(stdout), "stderr": receipt_text(stderr)})
             receipt["operations"].append(entry)
             fail_with_receipt(f"vppctl command failed for operation {name}: {receipt_command}")
-        entry["results"].append({"command": receipt_command, "status": "applied", "stdout": receipt_text(stdout), "stderr": receipt_text(stderr)})
+        if stable_acl_id is not None:
+            try:
+                acl_ids[stable_acl_id] = allocated_acl_id(stdout, stderr)
+            except ValueError as err:
+                entry["results"].append({"command": receipt_command, "status": "failed", "stdout": receipt_text(stdout), "stderr": receipt_text(str(err))})
+                receipt["operations"].append(entry)
+                fail_with_receipt(f"failed to recover dynamic ACL for operation {name}: {err}")
+        result_entry = {"command": receipt_command, "status": "applied", "stdout": receipt_text(stdout), "stderr": receipt_text(stderr)}
+        if effective_command != command:
+            result_entry["effective_command"] = effective_command
+        entry["results"].append(result_entry)
     receipt["operations"].append(entry)
 
 receipt["status"] = "applied"
@@ -610,25 +805,18 @@ build_vpp_fdio() {
 }
 
 build_vpp_smart_qos() {
+  require_fdio_amd64
   require_command cmake
-  build_debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-}
-  owned_build_debs=false
-  if [ -z "$build_debs" ]; then
-    require_fdio_amd64
-    build_debs=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-smart-qos-deps.XXXXXX")
-    owned_build_debs=true
-    fetch_fdio_package vpp-dev "$build_debs"
-    fetch_fdio_package libvppinfra-dev "$build_debs"
-  fi
+  build_debs=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-smart-qos-deps.XXXXXX")
   package_root=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-smart-qos-package.XXXXXX")
-  trap 'if [ "$owned_build_debs" = true ]; then rm -rf "$build_debs"; fi; rm -rf "$package_root"' RETURN
-  plugin=$(LY_ROUTE_RUNTIME_DEB_ARCH="$deb_arch" LY_ROUTE_VPP_DEV_DEBS_DIR="$build_debs" "$repo_root/scripts/build-vpp-smart-qos-plugin.sh" | tail -1)
+  trap 'rm -rf "$build_debs" "$package_root"' RETURN
+  fetch_fdio_package vpp-dev "$build_debs"
+  fetch_fdio_package libvppinfra-dev "$build_debs"
+  plugin=$(LY_ROUTE_VPP_DEV_DEBS_DIR="$build_debs" "$repo_root/scripts/build-vpp-smart-qos-plugin.sh" | tail -1)
   [ -f "$plugin" ] || { echo "smart QoS plugin build did not produce a library" >&2; exit 1; }
-  multiarch=$(dpkg-architecture -a"$deb_arch" -qDEB_HOST_MULTIARCH)
-  plugin_dir="$package_root/usr/lib/$multiarch/vpp_plugins"
-  mkdir -p "$package_root/DEBIAN" "$plugin_dir"
-  cp "$plugin" "$plugin_dir/ly_route_smart_qos_plugin.so"
-  chmod 0644 "$plugin_dir/ly_route_smart_qos_plugin.so"
+  mkdir -p "$package_root/DEBIAN" "$package_root/usr/lib/x86_64-linux-gnu/vpp_plugins"
+  cp "$plugin" "$package_root/usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_smart_qos_plugin.so"
+  chmod 0644 "$package_root/usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_smart_qos_plugin.so"
   cat > "$package_root/DEBIAN/control" <<EOF
 Package: ly-route-vpp-smart-qos
 Version: 25.10.0+lyroute1
@@ -636,7 +824,7 @@ Section: net
 Priority: optional
 Architecture: $deb_arch
 Maintainer: Ly Route <root@ly-route.local>
-Depends: vpp
+Depends: vpp (= $fdio_vpp_version)
 Description: Ly Route VPP FQ-CoDel smart QoS plugin
 EOF
   mkdir -p "$out_dir"
@@ -645,25 +833,18 @@ EOF
 }
 
 build_vpp_security_guard() {
+  require_fdio_amd64
   require_command cmake
-  build_debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-}
-  owned_build_debs=false
-  if [ -z "$build_debs" ]; then
-    require_fdio_amd64
-    build_debs=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-security-guard-deps.XXXXXX")
-    owned_build_debs=true
-    fetch_fdio_package vpp-dev "$build_debs"
-    fetch_fdio_package libvppinfra-dev "$build_debs"
-  fi
+  build_debs=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-security-guard-deps.XXXXXX")
   package_root=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-security-guard-package.XXXXXX")
-  trap 'if [ "$owned_build_debs" = true ]; then rm -rf "$build_debs"; fi; rm -rf "$package_root"' RETURN
-  plugin=$(LY_ROUTE_RUNTIME_DEB_ARCH="$deb_arch" LY_ROUTE_VPP_DEV_DEBS_DIR="$build_debs" "$repo_root/scripts/build-vpp-security-guard-plugin.sh" | tail -1)
+  trap 'rm -rf "$build_debs" "$package_root"' RETURN
+  fetch_fdio_package vpp-dev "$build_debs"
+  fetch_fdio_package libvppinfra-dev "$build_debs"
+  plugin=$(LY_ROUTE_VPP_DEV_DEBS_DIR="$build_debs" "$repo_root/scripts/build-vpp-security-guard-plugin.sh" | tail -1)
   [ -f "$plugin" ] || { echo "security guard plugin build did not produce a library" >&2; exit 1; }
-  multiarch=$(dpkg-architecture -a"$deb_arch" -qDEB_HOST_MULTIARCH)
-  plugin_dir="$package_root/usr/lib/$multiarch/vpp_plugins"
-  mkdir -p "$package_root/DEBIAN" "$plugin_dir"
-  cp "$plugin" "$plugin_dir/ly_route_security_guard_plugin.so"
-  chmod 0644 "$plugin_dir/ly_route_security_guard_plugin.so"
+  mkdir -p "$package_root/DEBIAN" "$package_root/usr/lib/x86_64-linux-gnu/vpp_plugins"
+  cp "$plugin" "$package_root/usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_security_guard_plugin.so"
+  chmod 0644 "$package_root/usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_security_guard_plugin.so"
   cat > "$package_root/DEBIAN/control" <<EOF
 Package: ly-route-vpp-security-guard
 Version: 25.10.0+lyroute1
@@ -671,52 +852,12 @@ Section: net
 Priority: optional
 Architecture: $deb_arch
 Maintainer: Ly Route <root@ly-route.local>
-Depends: vpp
+Depends: vpp (= $fdio_vpp_version)
 Description: Ly Route VPP protocol-aware security rate guard plugin
 EOF
   mkdir -p "$out_dir"
   rm -f "$out_dir/ly-route-vpp-security-guard_"*"_${deb_arch}.deb"
   dpkg-deb --build --root-owner-group "$package_root" "$out_dir/ly-route-vpp-security-guard_25.10.0+lyroute1_${deb_arch}.deb" >/dev/null
-}
-
-build_vpp_pppoe_client() {
-  require_command cmake
-  require_command dpkg-deb
-  require_command go
-  build_debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-}
-  owned_build_debs=false
-  if [ -z "$build_debs" ]; then
-    require_fdio_amd64
-    build_debs=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-pppoe-deps.XXXXXX")
-    owned_build_debs=true
-    fetch_fdio_package vpp-dev "$build_debs"
-    fetch_fdio_package libvppinfra-dev "$build_debs"
-  fi
-  package_root=$(mktemp -d "${TMPDIR:-/tmp}/ly-route-vpp-pppoe-package.XXXXXX")
-  trap 'if [ "$owned_build_debs" = true ]; then rm -rf "$build_debs"; fi; rm -rf "$package_root"' RETURN
-  plugin=$(LY_ROUTE_RUNTIME_DEB_ARCH="$deb_arch" LY_ROUTE_VPP_DEV_DEBS_DIR="$build_debs" "$repo_root/scripts/build-vpp-pppoe-client-plugin.sh" | tail -1)
-  [ -f "$plugin" ] || { echo "PPPoE client plugin build did not produce a library" >&2; exit 1; }
-  multiarch=$(dpkg-architecture -a"$deb_arch" -qDEB_HOST_MULTIARCH)
-  plugin_dir="$package_root/usr/lib/$multiarch/vpp_plugins"
-  mkdir -p "$package_root/DEBIAN" "$package_root/usr/lib/ly-route" "$plugin_dir"
-  (cd "$repo_root/backend" && GOOS=linux GOARCH="$(goarch_for_deb_arch "$deb_arch")" CGO_ENABLED=0 \
-    go build -trimpath -ldflags '-s -w' -o "$package_root/usr/lib/ly-route/ly-route-pppoe-client" ./cmd/ly-route-pppoe-client)
-  cp "$plugin" "$plugin_dir/ly_route_pppoe_client_plugin.so"
-  chmod 0755 "$package_root/usr/lib/ly-route/ly-route-pppoe-client"
-  chmod 0644 "$plugin_dir/ly_route_pppoe_client_plugin.so"
-  cat > "$package_root/DEBIAN/control" <<EOF
-Package: ly-route-vpp-pppoe-client
-Version: 25.10.0+lyroute1
-Section: net
-Priority: optional
-Architecture: $deb_arch
-Maintainer: Ly Route <root@ly-route.local>
-Depends: vpp
-Description: Ly Route native VPP PPPoE client and control-frame plugin
-EOF
-  mkdir -p "$out_dir"
-  rm -f "$out_dir/ly-route-vpp-pppoe-client_"*"_${deb_arch}.deb"
-  dpkg-deb --build --root-owner-group "$package_root" "$out_dir/ly-route-vpp-pppoe-client_25.10.0+lyroute1_${deb_arch}.deb" >/dev/null
 }
 
 build_vpp_orchestrator() {
@@ -755,7 +896,6 @@ case "$target" in
   vpp-fdio) build_vpp_fdio ;;
   vpp-smart-qos) build_vpp_smart_qos ;;
   vpp-security-guard) build_vpp_security_guard ;;
-  vpp-pppoe-client) build_vpp_pppoe_client ;;
   vpp-orchestrator) build_vpp_orchestrator ;;
   vpp-apply) build_vpp_apply ;;
   all)
@@ -766,7 +906,6 @@ case "$target" in
     build_vpp_fdio
     build_vpp_smart_qos
     build_vpp_security_guard
-    build_vpp_pppoe_client
     build_vpp_orchestrator
     ;;
   -h|--help) usage ; exit 0 ;;

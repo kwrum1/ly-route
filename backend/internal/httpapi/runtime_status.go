@@ -22,14 +22,22 @@ type RuntimeEvidenceProvider = serviceRuntime.RuntimeEvidenceProvider
 type RuntimeEvidenceRequest = serviceRuntime.EvidenceRequest
 
 func (server *Server) setRuntimeEvidence(result RuntimeApplyResult) {
-	if (result.Status == RuntimeStatusCommitted || result.RuntimeState == RuntimeStateRunning) && !completeRuntimeEvidence(result, server.now().UTC()) {
+	now := server.now().UTC()
+	if (result.Status == RuntimeStatusCommitted || result.RuntimeState == RuntimeStateRunning) && !completeRuntimeEvidence(result, now) {
 		result.Status = apply.ReceiptDegraded
 		result.RuntimeState = "degraded"
-		result.Reason = runtimeEvidenceReason(result)
+		result.Reason = incompleteRuntimeEvidenceReason(result, now)
 	}
 	server.runtimeMu.Lock()
 	server.lastRuntime = &result
 	server.runtimeMu.Unlock()
+}
+
+func incompleteRuntimeEvidenceReason(result RuntimeApplyResult, now time.Time) string {
+	if gatewayErr := completeGatewayRuntimeEvidence(result, now); gatewayErr != nil {
+		return "gateway runtime evidence is incomplete: " + gatewayErr.Error()
+	}
+	return runtimeEvidenceReason(result)
 }
 
 func (server *Server) runtimeEvidence() RuntimeApplyResult {
@@ -63,7 +71,8 @@ func (server *Server) runtimeEvidence() RuntimeApplyResult {
 func (server *Server) applyRuntimeEvidence(components []RuntimeComponentState) []RuntimeComponentState {
 	result := server.runtimeEvidence()
 	now := server.now().UTC()
-	chainComplete := completeRuntimeEvidence(result, now)
+	commitComplete := completeRuntimeEvidence(result, runtimeCommitValidationTime(result))
+	currentlyFresh := completeRuntimeEvidence(result, now)
 	for index := range components {
 		component := &components[index]
 		capability := component.Name
@@ -72,16 +81,34 @@ func (server *Server) applyRuntimeEvidence(components []RuntimeComponentState) [
 		component.ApplyReceipt = result.Receipt
 		component.ApplyReceipt.Capability = capability
 		component.ReadbackAt = result.Readback.Timestamp
-		component.Fresh = chainComplete
-		if component.State == "running" && !chainComplete {
+		component.Fresh = currentlyFresh
+		if component.State == "running" && !commitComplete {
 			component.State = "degraded"
 			component.Available = false
 			component.Reason = runtimeEvidenceReason(result)
-		} else if component.Reason == "" && chainComplete {
-			component.Reason = "apply receipt and fresh readback verified"
+		} else if component.Reason == "" && commitComplete {
+			component.Reason = "apply receipt verified; live component health verified"
 		}
 	}
 	return components
+}
+
+func runtimeCommitValidationTime(result RuntimeApplyResult) time.Time {
+	reference := result.Readback.Timestamp
+	if result.AppliedAt.After(reference) {
+		reference = result.AppliedAt
+	}
+	for _, evidence := range result.GatewayEvidence {
+		for _, candidate := range []time.Time{evidence.ApplyReceipt.AppliedAt, evidence.Readback.Timestamp, evidence.Before.ReadbackAt, evidence.After.ReadbackAt} {
+			if candidate.After(reference) {
+				reference = candidate
+			}
+		}
+	}
+	if reference.IsZero() {
+		return time.Now().UTC()
+	}
+	return reference
 }
 
 func completeRuntimeEvidence(result RuntimeApplyResult, now time.Time) bool {
@@ -220,5 +247,39 @@ func (server *Server) latestRuntimeSnapshotID(ctx context.Context) string {
 	if err != nil || len(snapshots) == 0 {
 		return ""
 	}
-	return snapshots[0].ID
+	// A request that was interrupted after the gateway phase can leave a
+	// snapshot whose service commit happened long after the typed VPP evidence
+	// was collected.  It must not become the rollback target for every later
+	// request.  Walk back to the newest structurally valid generation instead
+	// of allowing one incomplete snapshot to brick the apply path.
+	for _, snapshot := range snapshots {
+		if runtimeSnapshotRollbackValid(snapshot, server.now().UTC()) {
+			return snapshot.ID
+		}
+	}
+	return ""
+}
+
+func runtimeSnapshotRollbackValid(snapshot persistence.RuntimeSnapshot, now time.Time) bool {
+	if err := persistence.VerifyPayload(snapshot.Payload, snapshot.PayloadHash); err != nil {
+		return false
+	}
+	var payload apply.SnapshotPayload
+	if err := json.Unmarshal(snapshot.Payload, &payload); err != nil {
+		return false
+	}
+	if payload.Receipt.TransactionID == "" || payload.Readback.TransactionID == "" {
+		return false
+	}
+	if payload.Receipt.TransactionID != snapshot.SourceTransactionID || payload.Readback.TransactionID != snapshot.SourceTransactionID {
+		return false
+	}
+	if len(payload.GatewayEvidence) == 0 {
+		return true
+	}
+	validationTime := snapshot.CreatedAt
+	if validationTime.IsZero() || validationTime.After(now) {
+		validationTime = now
+	}
+	return apply.ValidateGatewayEvidence(payload.GatewayEvidence, snapshot.SourceTransactionID, validationTime) == nil
 }

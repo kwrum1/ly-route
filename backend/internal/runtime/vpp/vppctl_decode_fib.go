@@ -29,6 +29,11 @@ func parseFIBResult(results []VPPCTLCommandResult, tableID int) ([]fibPath, erro
 		switch {
 		case line == "unicast-ip4-chain", strings.HasPrefix(line, "path-list:["), strings.HasPrefix(line, "[@") && strings.Contains(line, "dpo-load-balance"):
 			continue
+		case line == "stacked-on:", strings.HasPrefix(line, "[@") && strings.Contains(line, "-tx-dpo:"):
+			// VPP 25.10 prints the underlying interface DPO on a nested
+			// `stacked-on:` line after the resolved `via ...` path.  It is
+			// descriptive output, not a second forwarding path.
+			continue
 		case strings.HasPrefix(line, "path:["):
 			pendingWeight, pendingPreference = 1, 0
 			if pendingWeight, err = fibPathAttribute(line, "weight=", 1); err != nil {

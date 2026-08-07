@@ -13,6 +13,44 @@ import (
 	"ly-route/backend/internal/runtime/vpp"
 )
 
+func TestRuntimeStateIgnoresOptionalComponentsThatAreNotConfigured(t *testing.T) {
+	components := []RuntimeComponentState{
+		{Name: "smartdns", State: "running", Available: true},
+		{Name: "kea", State: "not_configured"},
+		{Name: "xray", State: "not_configured"},
+		{Name: "pppd", State: "running", Available: true},
+		{Name: "vpp", State: "running", Available: true},
+		{Name: "persistence", State: "running", Available: true},
+	}
+	if state := runtimeState(components); state != RuntimeStateRunning {
+		t.Fatalf("runtime state = %q, want running for healthy configured components", state)
+	}
+}
+
+func TestAppliedRuntimeDoesNotDegradeOnlyBecauseCommitEvidenceAges(t *testing.T) {
+	now := fixedClock()()
+	clock := now
+	server := New(WithClock(func() time.Time { return clock }))
+	transactionID := "txn-aged-in-memory"
+	server.setRuntimeEvidence(RuntimeApplyResult{
+		Status:        RuntimeStatusCommitted,
+		RuntimeState:  RuntimeStateRunning,
+		TransactionID: transactionID,
+		Receipt:       apply.ApplyReceipt{TransactionID: transactionID, Capability: "runtime.apply", Status: apply.ReceiptApplied, AppliedAt: now},
+		Readback:      apply.Readback{TransactionID: transactionID, Capability: "runtime.apply", Timestamp: now, Fresh: true},
+		AppliedAt:     now,
+	})
+
+	clock = now.Add(apply.ReadbackFreshnessWindow + time.Minute)
+	components := server.applyRuntimeEvidence([]RuntimeComponentState{{Name: "vpp", State: "running", Available: true}})
+	if components[0].State != RuntimeStateRunning || !components[0].Available {
+		t.Fatalf("aged committed evidence degraded a healthy component: %#v", components[0])
+	}
+	if components[0].Fresh {
+		t.Fatalf("aged transaction evidence was reported as currently fresh: %#v", components[0])
+	}
+}
+
 func TestReconcileReceiptExposesStaleReadbackCause(t *testing.T) {
 	// Given
 	ctx := context.Background()

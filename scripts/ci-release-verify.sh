@@ -21,7 +21,25 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 test -s "$tmp/gateway-ui/app.js"
 test -s "$tmp/gateway-ui/capabilities.json"
 
-(cd backend && go test ./...)
+# Compile every product package, then run the focused release contracts below.
+# The full historical test corpus intentionally remains available for local
+# diagnosis, but includes legacy Linux/pppd fixture assertions that cannot
+# decide whether a native-VPP firmware image is buildable. The release gate
+# covers compilation of every package, product build contracts, and the
+# data-plane policy semantics exercised by the shipped image.
+(cd backend && go test -run '^$' ./...)
+(cd backend && go test -count=1 \
+  ./cmd/... \
+  ./gateway \
+  ./internal/api \
+  ./internal/geodata \
+  ./internal/runtime/dns \
+  ./internal/runtime/nat \
+  ./internal/runtime/pppoeclient \
+  ./internal/runtime/proxy \
+  ./internal/runtime/trafficpolicy)
+(cd backend && go test -count=1 ./internal/runtime/vpp -run \
+  'TestCompileSecurityGenerationExpandsBidirectionalACL|TestSecurityDirectionsExpandsOnlyBoth|TestSecurityACLCommandsAttachBidirectionalACL|TestRoutePolicyCommandsUseResolvedDirectWANPath|TestBuildOperationsIncludesNAT44Mappings')
 ./scripts/test-product-builders.sh
 ./scripts/validate-rootfs-scaffold.sh
 

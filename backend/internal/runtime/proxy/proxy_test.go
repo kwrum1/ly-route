@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -19,14 +18,34 @@ func TestProxyEgressUsesVPPServiceHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(compiled.NftablesCapture, NftablesCapturePlan{}) || !reflect.DeepEqual(compiled.LinuxPolicyRouting, LinuxPolicyRoutingPlan{}) {
-		t.Fatalf("legacy host interception plans must be empty: %#v %#v", compiled.NftablesCapture, compiled.LinuxPolicyRouting)
+	if compiled.NftablesCapture.Table != "ly_route_proxy_capture" || compiled.NftablesCapture.IngressInterface != compiled.ServiceNetwork.IngressHostInterface {
+		t.Fatalf("proxy capture is not scoped to the VPP service TAP: %#v", compiled.NftablesCapture)
 	}
-	if len(compiled.VPPSteering) != 3 || compiled.VPPSteering[0].Action != "handoff.to-vpp-service" || compiled.VPPSteering[0].AttachmentTarget != "vpp.proxy-service" {
+	if compiled.LinuxPolicyRouting.Network.EgressID != egress.ID || compiled.LinuxPolicyRouting.DefaultRoute.Device != compiled.ServiceNetwork.EgressHostInterface {
+		t.Fatalf("proxy return path is not bound to the VPP service network: %#v", compiled.LinuxPolicyRouting)
+	}
+	if len(compiled.VPPSteering) != 1 || compiled.VPPSteering[0].TargetKind != "vpp.proxy-service.network" || compiled.VPPSteering[0].Action != "handoff.to-vpp-service" || compiled.VPPSteering[0].AttachmentTarget != "vpp.proxy-service" {
 		t.Fatalf("VPP steering = %#v", compiled.VPPSteering)
 	}
-	if compiled.XrayRuntime.ListenAddress != "127.0.0.1" || compiled.XrayRuntime.ListenPort != 12345 || compiled.XrayRuntime.ConfigPayload.Inbounds[0].Settings.FollowRedirect {
+	if compiled.XrayRuntime.ListenAddress != "0.0.0.0" || compiled.XrayRuntime.ListenPort != compiled.ServiceNetwork.ListenerPort || !compiled.XrayRuntime.ConfigPayload.Inbounds[0].Settings.FollowRedirect {
 		t.Fatalf("Xray service listener = %#v", compiled.XrayRuntime)
+	}
+	if compiled.XrayRuntime.ConfigPayload.Routing != nil {
+		t.Fatalf("fixed-node Xray runtime contains business routing or DNS: %#v", compiled.XrayRuntime.ConfigPayload)
+	}
+	payload, err := json.Marshal(compiled.XrayRuntime.ConfigPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), `"routing"`) || strings.Contains(string(payload), `"dns"`) {
+		t.Fatalf("fixed-node Xray JSON contains business routing or DNS: %s", payload)
+	}
+	if got := compiled.XrayRuntime.ConfigPayload.Inbounds[0].Settings.Network; got != "tcp,udp" {
+		t.Fatalf("proxy service interface is not full-proxy TCP/UDP: %q", got)
+	}
+	sockopt, _ := compiled.XrayRuntime.ConfigPayload.Outbounds[0].StreamSettings["sockopt"].(map[string]any)
+	if sockopt["mark"] != compiled.ServiceNetwork.OutboundMark {
+		t.Fatalf("Xray outbound mark = %#v", sockopt)
 	}
 }
 
@@ -48,12 +67,25 @@ func TestProxyEgressRejectsLegacyHostPaths(t *testing.T) {
 }
 
 func TestProxyEgressJSONDoesNotExposePhysicalWAN(t *testing.T) {
-	data, err := json.Marshal(NewProxyEgress("proxy-media", "xray-vpp-service"))
+	egress := NewProxyEgress("proxy-media", "xray-vpp-service")
+	egress.UnderlayWANID = "wan-pppoe"
+	data, err := json.Marshal(egress)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(data), "physical_interface") || strings.Contains(string(data), "pppoe_password") {
 		t.Fatalf("proxy JSON leaked physical WAN fields: %s", data)
+	}
+	var decoded Egress
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := CompileEgress(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.UnderlayWANID != "wan-pppoe" || compiled.UnderlayWANID != "wan-pppoe" || compiled.VPPSteering[0].UnderlayWANID != "wan-pppoe" {
+		t.Fatalf("proxy underlay was not preserved through runtime compilation: decoded=%#v compiled=%#v", decoded, compiled)
 	}
 }
 
@@ -67,5 +99,18 @@ func TestCompileNodeOutboundSupportsVLESSReality(t *testing.T) {
 	}
 	if outbound.Protocol != "vless" || outbound.StreamSettings["security"] != "reality" {
 		t.Fatalf("compiled outbound = %#v", outbound)
+	}
+}
+
+func TestServiceNetworkTapIDsFitVPPExplicitTapRange(t *testing.T) {
+	network := ServiceNetworkForEgressID("proxy-egress-acceptance")
+	if network.IngressTapID < proxyIngressTapIDBase || network.IngressTapID >= proxyIngressTapIDBase+proxyTapIDSpan {
+		t.Fatalf("ingress TAP id %d is outside the VPP-safe range", network.IngressTapID)
+	}
+	if network.EgressTapID < proxyEgressTapIDBase || network.EgressTapID >= proxyEgressTapIDBase+proxyTapIDSpan {
+		t.Fatalf("egress TAP id %d is outside the VPP-safe range", network.EgressTapID)
+	}
+	if network.IngressTapID == network.EgressTapID {
+		t.Fatalf("TAP peers share id %d", network.IngressTapID)
 	}
 }

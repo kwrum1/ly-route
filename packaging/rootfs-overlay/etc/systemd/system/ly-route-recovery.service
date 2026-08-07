@@ -1,12 +1,13 @@
 [Unit]
 Description=Ly Route single-device recovery reconcile
-After=ly-route-control-api.service network-online.target
-Wants=network-online.target
+After=ly-route-control-api.service ly-route-vpp-tune.service vpp.service network-online.target
+Wants=network-online.target vpp.service
 
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/ly-route/runtime.env
 ExecStart=/usr/lib/ly-route/recover-runtime.sh
+TimeoutStartSec=420s
 
 [Install]
 WantedBy=multi-user.target

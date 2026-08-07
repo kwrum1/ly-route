@@ -51,6 +51,9 @@ type Egress struct {
 	SemanticType   SemanticType     `json:"semantic_type"`
 	DisplayList    string           `json:"display_list"`
 	RuntimeProfile RuntimeProfile   `json:"runtime_profile"`
+	UnderlayWANID  string           `json:"underlay_wan_id,omitempty"`
+	NodeID         string           `json:"node_id,omitempty"`
+	SubscriptionID string           `json:"subscription_id,omitempty"`
 	CapturePath    CapturePath      `json:"capture_path"`
 	Engine         Engine           `json:"engine"`
 	Handoff        DataplaneHandoff `json:"handoff"`
@@ -62,6 +65,9 @@ type LogicalWANRow struct {
 	SemanticType   SemanticType     `json:"semantic_type"`
 	DisplayList    string           `json:"display_list"`
 	RuntimeProfile RuntimeProfile   `json:"runtime_profile"`
+	UnderlayWANID  string           `json:"underlay_wan_id,omitempty"`
+	NodeID         string           `json:"node_id,omitempty"`
+	SubscriptionID string           `json:"subscription_id,omitempty"`
 	CapturePath    CapturePath      `json:"capture_path"`
 	Engine         Engine           `json:"engine"`
 	Handoff        DataplaneHandoff `json:"handoff"`
@@ -79,22 +85,27 @@ type DataplaneTarget struct {
 }
 
 type VPPSteeringInstruction struct {
-	Order            int              `json:"order"`
-	EgressID         string           `json:"egress_id"`
-	Handoff          DataplaneHandoff `json:"handoff"`
-	TargetKind       string           `json:"target_kind"`
-	Action           string           `json:"action"`
-	AttachmentTarget string           `json:"attachment_target"`
+	Order            int                 `json:"order"`
+	EgressID         string              `json:"egress_id"`
+	UnderlayWANID    string              `json:"underlay_wan_id,omitempty"`
+	UnderlayRoute    string              `json:"underlay_route,omitempty"`
+	Handoff          DataplaneHandoff    `json:"handoff"`
+	TargetKind       string              `json:"target_kind"`
+	Action           string              `json:"action"`
+	AttachmentTarget string              `json:"attachment_target"`
+	ServiceNetwork   ProxyServiceNetwork `json:"service_network,omitempty"`
 }
 
 type NftablesCapturePlan struct {
-	EgressID   string          `json:"egress_id"`
-	Family     string          `json:"family"`
-	Table      string          `json:"table"`
-	TargetPort int             `json:"target_port"`
-	Mark       string          `json:"mark"`
-	Chains     []NftablesChain `json:"chains"`
-	Rules      []NftablesRule  `json:"rules"`
+	EgressID         string          `json:"egress_id"`
+	Family           string          `json:"family"`
+	Table            string          `json:"table"`
+	TargetPort       int             `json:"target_port"`
+	Mark             string          `json:"mark"`
+	InboundMark      string          `json:"inbound_mark,omitempty"`
+	IngressInterface string          `json:"ingress_interface,omitempty"`
+	Chains           []NftablesChain `json:"chains"`
+	Rules            []NftablesRule  `json:"rules"`
 }
 
 type NftablesChain struct {
@@ -114,16 +125,19 @@ type NftablesRule struct {
 }
 
 type LinuxPolicyRoutingPlan struct {
-	EgressID     string             `json:"egress_id"`
-	Mark         string             `json:"mark"`
-	MarkValue    uint32             `json:"mark_value"`
-	MarkMask     string             `json:"mark_mask"`
-	TableID      int                `json:"table_id"`
-	TableName    string             `json:"table_name"`
-	RulePriority int                `json:"rule_priority"`
-	RuleSelector LinuxRuleSelector  `json:"rule_selector"`
-	DefaultRoute LinuxDefaultRoute  `json:"default_route"`
-	Underlay     LinuxUnderlayRoute `json:"underlay"`
+	EgressID      string              `json:"egress_id"`
+	Mark          string              `json:"mark"`
+	MarkValue     uint32              `json:"mark_value"`
+	MarkMask      string              `json:"mark_mask"`
+	TableID       int                 `json:"table_id"`
+	TableName     string              `json:"table_name"`
+	RulePriority  int                 `json:"rule_priority"`
+	RuleSelector  LinuxRuleSelector   `json:"rule_selector"`
+	DefaultRoute  LinuxDefaultRoute   `json:"default_route"`
+	Underlay      LinuxUnderlayRoute  `json:"underlay"`
+	Network       ProxyServiceNetwork `json:"network,omitempty"`
+	LANRoutes     []string            `json:"lan_routes,omitempty"`
+	UnderlayRoute string              `json:"underlay_route,omitempty"`
 }
 
 type LinuxRuleSelector struct {
@@ -148,19 +162,20 @@ type LinuxUnderlayRoute struct {
 }
 
 type XrayRuntime struct {
-	EgressID          string            `json:"egress_id"`
-	Engine            Engine            `json:"engine"`
-	Mode              ListenerMode      `json:"mode"`
-	ProcessName       string            `json:"process_name"`
-	ConfigPath        string            `json:"config_path"`
-	HealthCheckTarget string            `json:"health_check_target"`
-	ListenAddress     string            `json:"listen_address"`
-	ListenPort        int               `json:"listen_port"`
-	ListenerTarget    string            `json:"listener_target"`
-	Network           string            `json:"network"`
-	Protocol          string            `json:"protocol"`
-	OutboundTag       string            `json:"outbound_tag"`
-	ConfigPayload     XrayConfigPayload `json:"config_payload"`
+	EgressID          string              `json:"egress_id"`
+	Engine            Engine              `json:"engine"`
+	Mode              ListenerMode        `json:"mode"`
+	ProcessName       string              `json:"process_name"`
+	ConfigPath        string              `json:"config_path"`
+	HealthCheckTarget string              `json:"health_check_target"`
+	ListenAddress     string              `json:"listen_address"`
+	ListenPort        int                 `json:"listen_port"`
+	ListenerTarget    string              `json:"listener_target"`
+	Network           string              `json:"network"`
+	Protocol          string              `json:"protocol"`
+	OutboundTag       string              `json:"outbound_tag"`
+	ServiceNetwork    ProxyServiceNetwork `json:"service_network"`
+	ConfigPayload     XrayConfigPayload   `json:"config_payload"`
 }
 
 type XrayConfigPayload struct {
@@ -177,11 +192,12 @@ type XrayLog struct {
 }
 
 type XrayInbound struct {
-	Tag      string               `json:"tag"`
-	Listen   string               `json:"listen"`
-	Port     int                  `json:"port"`
-	Protocol string               `json:"protocol"`
-	Settings XrayDokodemoSettings `json:"settings"`
+	Tag            string               `json:"tag"`
+	Listen         string               `json:"listen"`
+	Port           int                  `json:"port"`
+	Protocol       string               `json:"protocol"`
+	Settings       XrayDokodemoSettings `json:"settings"`
+	StreamSettings map[string]any       `json:"streamSettings,omitempty"`
 }
 
 type XrayDokodemoSettings struct {
@@ -274,6 +290,7 @@ type CompiledEgress struct {
 	SemanticType       SemanticType             `json:"semantic_type"`
 	DisplayList        string                   `json:"display_list"`
 	RuntimeProfile     RuntimeProfile           `json:"runtime_profile"`
+	UnderlayWANID      string                   `json:"underlay_wan_id,omitempty"`
 	CapturePath        CapturePath              `json:"capture_path"`
 	Engine             Engine                   `json:"engine"`
 	Handoff            DataplaneHandoff         `json:"handoff"`
@@ -284,6 +301,7 @@ type CompiledEgress struct {
 	NftablesCapture    NftablesCapturePlan      `json:"nftables_capture"`
 	LinuxPolicyRouting LinuxPolicyRoutingPlan   `json:"linux_policy_routing"`
 	XrayRuntime        XrayRuntime              `json:"xray_runtime"`
+	ServiceNetwork     ProxyServiceNetwork      `json:"service_network"`
 }
 
 var ErrInvalidEgress = errors.New("invalid proxy egress")
@@ -347,6 +365,9 @@ func (egress Egress) LogicalWANRow() (LogicalWANRow, error) {
 		SemanticType:   egress.SemanticType,
 		DisplayList:    egress.DisplayList,
 		RuntimeProfile: egress.RuntimeProfile,
+		UnderlayWANID:  strings.TrimSpace(egress.UnderlayWANID),
+		NodeID:         strings.TrimSpace(egress.NodeID),
+		SubscriptionID: strings.TrimSpace(egress.SubscriptionID),
 		CapturePath:    egress.CapturePath,
 		Engine:         egress.Engine,
 		Handoff:        egress.Handoff,
@@ -382,6 +403,9 @@ func ValidateEgress(egress Egress) error {
 	if !isSupportedListenerMode(egress.ListenerMode) {
 		return fmt.Errorf("%w: listener_mode must be %q", ErrInvalidEgress, VPPServiceListener)
 	}
+	if strings.TrimSpace(egress.NodeID) != "" && strings.TrimSpace(egress.SubscriptionID) != "" {
+		return fmt.Errorf("%w: node_id and subscription_id are mutually exclusive", ErrInvalidEgress)
+	}
 
 	return nil
 }
@@ -391,19 +415,24 @@ func CompileEgress(egress Egress) (CompiledEgress, error) {
 		return CompiledEgress{}, err
 	}
 
+	network := ServiceNetworkForEgressID(egress.ID)
 	dataplaneTargets := []DataplaneTarget{
-		{Kind: "vpp.abf.policy", ID: egress.ID},
-		{Kind: "vpp.pbr.policy", ID: egress.ID},
-		{Kind: "vpp.service-chain.egress-binding", ID: egress.ID},
+		{Kind: "vpp.proxy-service.network", ID: egress.ID},
 	}
 
 	listenerMode := normalizedListenerMode(egress.ListenerMode)
+	capture := compileNftablesCaptureForNetwork(egress, network)
+	routing, err := compileLinuxPolicyRoutingForNetwork(egress, network, capture)
+	if err != nil {
+		return CompiledEgress{}, err
+	}
 
 	return CompiledEgress{
 		ID:             egress.ID,
 		SemanticType:   egress.SemanticType,
 		DisplayList:    egress.DisplayList,
 		RuntimeProfile: egress.RuntimeProfile,
+		UnderlayWANID:  strings.TrimSpace(egress.UnderlayWANID),
 		CapturePath:    egress.CapturePath,
 		Engine:         egress.Engine,
 		Handoff:        egress.Handoff,
@@ -418,9 +447,10 @@ func CompileEgress(egress Egress) (CompiledEgress, error) {
 		},
 		DataplaneTargets:   dataplaneTargets,
 		VPPSteering:        compileVPPSteering(egress, dataplaneTargets),
-		NftablesCapture:    NftablesCapturePlan{},
-		LinuxPolicyRouting: LinuxPolicyRoutingPlan{},
-		XrayRuntime:        compileXrayRuntime(egress, listenerMode),
+		NftablesCapture:    capture,
+		LinuxPolicyRouting: routing,
+		XrayRuntime:        compileXrayRuntime(egress, network, listenerMode),
+		ServiceNetwork:     network,
 	}, nil
 }
 
@@ -554,15 +584,19 @@ func normalizedListenerMode(mode ListenerMode) ListenerMode {
 
 func compileVPPSteering(egress Egress, targets []DataplaneTarget) []VPPSteeringInstruction {
 	action, attachmentTarget := vppHandoffAction(egress.Handoff)
+	network := ServiceNetworkForEgressID(egress.ID)
 	steering := make([]VPPSteeringInstruction, len(targets))
 	for i, target := range targets {
 		steering[i] = VPPSteeringInstruction{
 			Order:            i + 1,
 			EgressID:         egress.ID,
+			UnderlayWANID:    strings.TrimSpace(egress.UnderlayWANID),
+			UnderlayRoute:    network.UnderlayRoute,
 			Handoff:          egress.Handoff,
 			TargetKind:       target.Kind,
 			Action:           action,
 			AttachmentTarget: attachmentTarget,
+			ServiceNetwork:   network,
 		}
 	}
 
@@ -574,46 +608,47 @@ func vppHandoffAction(handoff DataplaneHandoff) (string, string) {
 }
 
 func compileNftablesCapture(egress Egress) NftablesCapturePlan {
+	return compileNftablesCaptureForNetwork(egress, ServiceNetworkForEgressID(egress.ID))
+}
+
+func compileNftablesCaptureForNetwork(egress Egress, network ProxyServiceNetwork) NftablesCapturePlan {
 	const (
-		family     = "inet"
-		table      = "ly_route_proxy_capture"
-		chain      = "proxy_prerouting"
-		targetPort = 12345
-		mark       = "0x1"
+		family = "inet"
+		table  = "ly_route_proxy_capture"
+		chain  = "proxy_prerouting"
 	)
+	mark := fmt.Sprintf("0x%x", network.IngressMark)
 
 	return NftablesCapturePlan{
-		EgressID:   egress.ID,
-		Family:     family,
-		Table:      table,
-		TargetPort: targetPort,
-		Mark:       mark,
+		EgressID:         egress.ID,
+		Family:           family,
+		Table:            table,
+		TargetPort:       network.ListenerPort,
+		Mark:             fmt.Sprintf("0x%x", network.IngressMark),
+		InboundMark:      fmt.Sprintf("0x%x", network.IngressMark),
+		IngressInterface: network.IngressHostInterface,
 		Chains: []NftablesChain{
 			{Name: chain, Type: "filter", Hook: "prerouting", Priority: -150, Policy: "accept"},
 		},
 		Rules: []NftablesRule{
-			{Order: 1, EgressID: egress.ID, Chain: chain, Expression: "meta mark 0x1", Action: "return"},
-			{Order: 2, EgressID: egress.ID, Chain: chain, Expression: "iifname lo", Action: "return"},
-			{Order: 3, EgressID: egress.ID, Chain: chain, Expression: "fib daddr type local", Action: "return"},
-			{Order: 4, EgressID: egress.ID, Chain: chain, Expression: "tcp dport 53", Action: "return"},
-			{Order: 5, EgressID: egress.ID, Chain: chain, Expression: "udp dport 53", Action: "return"},
-			{Order: 6, EgressID: egress.ID, Chain: chain, Expression: "meta l4proto tcp", Action: "tproxy to :12345 mark set 0x1 accept"},
-			{Order: 7, EgressID: egress.ID, Chain: chain, Expression: "meta l4proto udp", Action: "tproxy to :12345 mark set 0x1 accept"},
+			{Order: 1, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta mark %s", network.IngressHostInterface, fmt.Sprintf("0x%x", network.IngressMark)), Action: "return"},
+			{Order: 2, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta l4proto tcp", network.IngressHostInterface), Action: fmt.Sprintf("tproxy to :%d meta mark set %s accept", network.ListenerPort, mark)},
+			{Order: 3, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta l4proto udp", network.IngressHostInterface), Action: fmt.Sprintf("tproxy to :%d meta mark set %s accept", network.ListenerPort, mark)},
 		},
 	}
 }
 
 func compileLinuxPolicyRouting(egress Egress, capture NftablesCapturePlan) (LinuxPolicyRoutingPlan, error) {
+	return compileLinuxPolicyRoutingForNetwork(egress, ServiceNetworkForEgressID(egress.ID), capture)
+}
+
+func compileLinuxPolicyRoutingForNetwork(egress Egress, network ProxyServiceNetwork, capture NftablesCapturePlan) (LinuxPolicyRoutingPlan, error) {
 	const (
 		markMask     = "0xffffffff"
-		tableID      = 1001
 		tableName    = "ly_route_proxy_egress"
-		rulePriority = 1001
 		family       = "inet"
-		underlayKind = "vpp.service-chain.egress-binding"
+		underlayKind = "vpp.proxy-service.network"
 		defaultRoute = "default"
-		device       = "lo"
-		scope        = "link"
 	)
 
 	markValue, err := parseHexUint32(capture.Mark)
@@ -626,27 +661,28 @@ func compileLinuxPolicyRouting(egress Egress, capture NftablesCapturePlan) (Linu
 		Mark:         capture.Mark,
 		MarkValue:    markValue,
 		MarkMask:     markMask,
-		TableID:      tableID,
+		TableID:      network.OutboundTableID,
 		TableName:    tableName,
-		RulePriority: rulePriority,
+		RulePriority: network.OutboundRulePriority,
 		RuleSelector: LinuxRuleSelector{
 			Family: family,
 			Mark:   capture.Mark,
 			Mask:   markMask,
-			Table:  tableID,
+			Table:  network.OutboundTableID,
 		},
 		DefaultRoute: LinuxDefaultRoute{
 			Destination: defaultRoute,
-			Table:       tableID,
-			Via:         "",
-			Device:      device,
-			Scope:       scope,
+			Table:       network.OutboundTableID,
+			Via:         network.EgressVPPAddress,
+			Device:      network.EgressHostInterface,
+			Scope:       "link",
 		},
 		Underlay: LinuxUnderlayRoute{
 			EgressID: egress.ID,
 			Kind:     underlayKind,
 			ID:       egress.ID,
 		},
+		Network: network,
 	}
 	if err := validateLinuxPolicyRoutingPlan(plan); err != nil {
 		return LinuxPolicyRoutingPlan{}, err
@@ -671,7 +707,7 @@ func validateLinuxPolicyRoutingPlan(plan LinuxPolicyRoutingPlan) error {
 	if plan.TableID == 253 || plan.TableID == 254 || plan.TableID == 255 {
 		return fmt.Errorf("%w: linux policy routing table %d is reserved", ErrInvalidEgress, plan.TableID)
 	}
-	if plan.RuleSelector.Family != "inet" || plan.DefaultRoute.Destination != "default" || strings.TrimSpace(plan.DefaultRoute.Device) == "" || plan.Underlay.Kind != "vpp.service-chain.egress-binding" {
+	if plan.RuleSelector.Family != "inet" || plan.DefaultRoute.Destination != "default" || strings.TrimSpace(plan.DefaultRoute.Device) == "" || (plan.Underlay.Kind != "vpp.service-chain.egress-binding" && plan.Underlay.Kind != "vpp.proxy-service.network") {
 		return fmt.Errorf("%w: linux policy routing underlay/default route combination is unsupported", ErrInvalidEgress)
 	}
 
@@ -690,33 +726,34 @@ func parseHexUint32(value string) (uint32, error) {
 	return uint32(parsed), nil
 }
 
-func compileXrayRuntime(egress Egress, mode ListenerMode) XrayRuntime {
+func compileXrayRuntime(egress Egress, network ProxyServiceNetwork, mode ListenerMode) XrayRuntime {
 	const (
-		processName   = "xray"
-		listenAddress = "127.0.0.1"
-		healthAddress = "127.0.0.1"
-		network       = "tcp,udp"
-		protocol      = "dokodemo-door"
+		processName      = "xray"
+		listenAddress    = "0.0.0.0"
+		healthAddress    = "127.0.0.1"
+		transportNetwork = "tcp,udp"
+		protocol         = "dokodemo-door"
 	)
 
 	inboundTag := egress.ID + "-vpp-service-inbound"
 	configPath := "/etc/xray/config.json"
-	const listenerPort = 12345
+	listenerPort := network.ListenerPort
 	listenerTarget := fmt.Sprintf("%s:%d", listenAddress, listenerPort)
 	healthCheckTarget := fmt.Sprintf("%s:%d", healthAddress, listenerPort)
 	config := XrayConfigPayload{
 		Log: XrayLog{Level: "warning"},
 		Inbounds: []XrayInbound{
 			{
-				Tag:      inboundTag,
-				Listen:   listenAddress,
-				Port:     listenerPort,
-				Protocol: protocol,
-				Settings: XrayDokodemoSettings{Network: network, FollowRedirect: false},
+				Tag:            inboundTag,
+				Listen:         listenAddress,
+				Port:           listenerPort,
+				Protocol:       protocol,
+				Settings:       XrayDokodemoSettings{Network: transportNetwork, FollowRedirect: true},
+				StreamSettings: map[string]any{"sockopt": map[string]any{"tproxy": "tproxy"}},
 			},
 		},
 		Outbounds: []XrayOutbound{
-			{Tag: egress.ID, Protocol: "freedom"},
+			{Tag: egress.ID, Protocol: "freedom", StreamSettings: map[string]any{"sockopt": map[string]any{"mark": network.OutboundMark}}},
 		},
 	}
 
@@ -730,9 +767,10 @@ func compileXrayRuntime(egress Egress, mode ListenerMode) XrayRuntime {
 		ListenAddress:     listenAddress,
 		ListenPort:        listenerPort,
 		ListenerTarget:    listenerTarget,
-		Network:           network,
+		Network:           transportNetwork,
 		Protocol:          protocol,
 		OutboundTag:       egress.ID,
 		ConfigPayload:     config,
+		ServiceNetwork:    network,
 	}
 }

@@ -122,6 +122,29 @@ func TestVPPCTLChannelDecodeFailureRetainsResult(t *testing.T) {
 	}
 }
 
+func TestVPPCTLSnapshotAllowsMissingManagedInterfaceAfterVerifiedRestart(t *testing.T) {
+	request := SnapshotRequest{
+		TransactionID: "txn-cold-start",
+		AllowMissing:  true,
+		Interfaces:    []string{"lyroute-ens192", "lyroute-ens224"},
+		Candidates: SnapshotCandidates{Interfaces: []InterfaceState{
+			{Name: "lyroute-ens192"},
+			{Name: "lyroute-ens224"},
+		}},
+		Capabilities: []SnapshotCapability{SnapshotCapabilityInterfaces},
+	}
+	responses := map[string]fakeVPPResponse{
+		"show interface address": {stdout: "local0 (down):\n"},
+	}
+	snapshot, err := (Adapter{Client: NewVPPCTLClient(writeFakeVPPCTL(t, responses))}).Snapshot(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Interfaces) != 0 {
+		t.Fatalf("interfaces = %#v, want no managed interfaces", snapshot.Interfaces)
+	}
+}
+
 func TestVPPCTLSnapshotDecodesAllGatewayResourceClasses(t *testing.T) {
 	// Given
 	interfaceCandidate := InterfaceState{Name: "lyroute-eth1"}
@@ -155,6 +178,17 @@ func TestVPPCTLSnapshotDecodesAllGatewayResourceClasses(t *testing.T) {
 			assert: func(t *testing.T, snapshot Snapshot) {
 				t.Helper()
 				if !reflect.DeepEqual(snapshot.Interfaces, []InterfaceState{{Name: "lyroute-eth1", AdminState: "up", LinkState: "up", Addresses: []string{"192.0.2.1/24"}}}) {
+					t.Fatalf("interfaces = %#v", snapshot.Interfaces)
+				}
+			},
+		},
+		{
+			name: "interface address with non-default FIB metadata", capability: SnapshotCapabilityInterfaces,
+			request:   SnapshotRequest{Interfaces: []string{interfaceCandidate.Name}, Candidates: SnapshotCandidates{Interfaces: []InterfaceState{interfaceCandidate}}},
+			responses: map[string]fakeVPPResponse{"show interface address": {stdout: "lyroute-eth1 (up):\n  L3 198.18.17.217/30 ip4 table-id 30756 fib-idx 1\n"}},
+			assert: func(t *testing.T, snapshot Snapshot) {
+				t.Helper()
+				if !reflect.DeepEqual(snapshot.Interfaces, []InterfaceState{{Name: "lyroute-eth1", AdminState: "up", LinkState: "up", Addresses: []string{"198.18.17.217/30"}}}) {
 					t.Fatalf("interfaces = %#v", snapshot.Interfaces)
 				}
 			},
@@ -243,7 +277,7 @@ func TestVPPCTLSnapshotDecodesAllGatewayResourceClasses(t *testing.T) {
 		{
 			name: "nat44 port maps", capability: SnapshotCapabilityNAT44,
 			request:   SnapshotRequest{NATPortMappings: []string{portCandidate.ID}, Candidates: SnapshotCandidates{NATPortMappings: []nat.PortMapping{portCandidate}}},
-			responses: map[string]fakeVPPResponse{"show nat44 static mappings": {stdout: "NAT44 static mappings:\n  tcp local 192.168.88.20:8443 external 203.0.113.10:8443 vrf 0\n"}},
+			responses: map[string]fakeVPPResponse{"show nat44 static mappings": {stdout: "NAT44 static mappings:\n  TCP local 192.168.88.20:8443 external 203.0.113.10:8443 vrf 0\n"}},
 			assert: func(t *testing.T, snapshot Snapshot) {
 				t.Helper()
 				if !reflect.DeepEqual(snapshot.NAT.PortMappings, []nat.PortMapping{portCandidate}) {
@@ -284,6 +318,7 @@ func TestVPPCTLSnapshotFailsClosed(t *testing.T) {
 		{name: "truncated bond output", capability: SnapshotCapabilityBonds, request: SnapshotRequest{Bonds: []string{"BondEthernet0"}, Candidates: SnapshotCandidates{Bonds: []BondState{{Name: "BondEthernet0", Mode: "active-backup"}}}}, responses: map[string]fakeVPPResponse{"show bond details": {stdout: "BondEthernet0\n  mode: active-backup\n  number of members: 2\n    lyroute-eth1\n"}}},
 		{name: "malformed port", capability: SnapshotCapabilityNAT44, request: SnapshotRequest{NATPortMappings: []string{"web"}, Candidates: SnapshotCandidates{NATPortMappings: []nat.PortMapping{{ID: "web", Protocol: "tcp", ExternalAddress: "203.0.113.10", ExternalPort: 8443, InternalHost: "192.168.88.20", InternalPort: 443}}}}, responses: map[string]fakeVPPResponse{"show nat44 static mappings": {stdout: "NAT44 static mappings:\n  tcp local 192.168.88.20:nope external 203.0.113.10:8443 vrf 0\n"}}},
 		{name: "unknown grammar", capability: SnapshotCapabilityInterfaces, request: SnapshotRequest{Interfaces: []string{"lyroute-eth1"}, Candidates: SnapshotCandidates{Interfaces: []InterfaceState{{Name: "lyroute-eth1"}}}}, responses: map[string]fakeVPPResponse{"show interface address": {stdout: "interface maybe present\n"}}},
+		{name: "unknown interface address metadata", capability: SnapshotCapabilityInterfaces, request: SnapshotRequest{Interfaces: []string{"lyroute-eth1"}, Candidates: SnapshotCandidates{Interfaces: []InterfaceState{{Name: "lyroute-eth1"}}}}, responses: map[string]fakeVPPResponse{"show interface address": {stdout: "lyroute-eth1 (up):\n  L3 192.0.2.1/24 unexpected metadata\n"}}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

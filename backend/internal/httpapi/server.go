@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	controlapi "ly-route/backend/internal/api"
+	"ly-route/backend/internal/geodata"
 	"ly-route/backend/internal/orchestrator"
 	"ly-route/backend/internal/orchestratorapi"
 	"ly-route/backend/internal/persistence"
@@ -85,6 +87,7 @@ type DNSPolicyResource struct {
 	ID           string                       `json:"id"`
 	Kind         string                       `json:"kind"`
 	Name         string                       `json:"name"`
+	Priority     int                          `json:"priority"`
 	Enabled      bool                         `json:"enabled"`
 	Policy       dns.Policy                   `json:"policy"`
 	Render       dns.SmartDNSRender           `json:"render"`
@@ -112,7 +115,10 @@ type ProxyEgressWriteRequest struct {
 	DisplayList    string             `json:"display_list"`
 	ProxyProfileID string             `json:"proxy_profile_id"`
 	UnderlayWANID  string             `json:"underlay_wan_id"`
+	NodeID         string             `json:"node_id,omitempty"`
+	SubscriptionID string             `json:"subscription_id,omitempty"`
 	LowCopy        bool               `json:"low_copy"`
+	Description    string             `json:"description,omitempty"`
 }
 
 type ConfigApplyRequest struct {
@@ -147,6 +153,7 @@ type Server struct {
 	interfaceTelemetry            InterfaceTelemetryCollector
 	dhcpLeases                    DHCPLeaseCollector
 	vppCounters                   VPPCounterCollector
+	policyHits                    PolicyHitCollector
 	topTelemetry                  TopTelemetryCollector
 	subscriptionFetch             func(context.Context, string, bool) ([]byte, error)
 	trafficTrend                  TrafficTrendCollector
@@ -175,6 +182,10 @@ type DHCPLeaseCollector interface {
 
 type VPPCounterCollector interface {
 	Dashboard(context.Context) (map[string]any, error)
+	PolicyHits(context.Context) ([]map[string]any, error)
+}
+
+type PolicyHitCollector interface {
 	PolicyHits(context.Context) ([]map[string]any, error)
 }
 
@@ -377,6 +388,10 @@ func WithVPPCounters(collector VPPCounterCollector) Option {
 	return func(server *Server) { server.vppCounters = collector }
 }
 
+func WithPolicyHitTelemetry(collector PolicyHitCollector) Option {
+	return func(server *Server) { server.policyHits = collector }
+}
+
 func WithTopTelemetry(collector TopTelemetryCollector) Option {
 	return func(server *Server) { server.topTelemetry = collector }
 }
@@ -504,6 +519,7 @@ func (server *Server) handleDNSPolicies(w http.ResponseWriter, r *http.Request) 
 				writeError(w, r, http.StatusInternalServerError, "dns_policy_invalid", err.Error())
 				return
 			}
+			resource.Priority = normalizedDNSPolicyPriority(document.Priority)
 			items = append(items, resource)
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "request_id": requestID(r)})
@@ -538,7 +554,7 @@ func (server *Server) handleDNSPolicies(w http.ResponseWriter, r *http.Request) 
 			writeError(w, r, http.StatusUnprocessableEntity, "invalid_dns_policy", err.Error())
 			return
 		}
-		if err := server.store.SavePolicy(r.Context(), persistence.PolicyDocument{Namespace: "dns-policy", PolicyID: resource.ID, Priority: 10, Enabled: resource.Enabled, Payload: payload, PayloadHash: hash, UpdatedAt: server.now().UTC()}); err != nil {
+		if err := server.store.SavePolicy(r.Context(), persistence.PolicyDocument{Namespace: "dns-policy", PolicyID: resource.ID, Priority: resource.Priority, Enabled: resource.Enabled, Payload: payload, PayloadHash: hash, UpdatedAt: server.now().UTC()}); err != nil {
 			server.recordAudit(session.Username, session.Role, "/api/v1/dns/policies", "create", "failure", err.Error(), r)
 			writeError(w, r, http.StatusInternalServerError, "dns_policy_save_failed", "DNS policy could not be saved")
 			return
@@ -585,6 +601,7 @@ func (server *Server) handleDNSPolicyItem(w http.ResponseWriter, r *http.Request
 			writeError(w, r, http.StatusInternalServerError, "dns_policy_invalid", err.Error())
 			return
 		}
+		resource.Priority = normalizedDNSPolicyPriority(document.Priority)
 		writeJSON(w, http.StatusOK, map[string]any{"item": resource, "request_id": requestID(r)})
 	case http.MethodPost, http.MethodPatch:
 		server.handleDNSPolicyMutation(w, r, id)
@@ -610,7 +627,17 @@ func (server *Server) handleDNSResolve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "dns_policy_invalid", err.Error())
 		return
 	}
-	compiled, err := dns.CompilePolicy(resource.Policy, []proxy.Egress{server.proxyEgress})
+	// The persisted policy keeps object-group references and UI aliases such as
+	// source "any" so the control-plane representation remains editable.  The
+	// decision endpoint must compile the same expanded policy used by runtime
+	// rendering; compiling the raw payload here makes a valid UI policy fail
+	// closed with an invalid-source error.
+	expandedPolicy, err := server.expandDNSPolicyForDecision(r.Context(), resource.Policy)
+	if err != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "dns_policy_compile_failed", err.Error())
+		return
+	}
+	compiled, err := dns.CompilePolicy(expandedPolicy, []proxy.Egress{server.proxyEgress})
 	if err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "dns_policy_compile_failed", err.Error())
 		return
@@ -691,7 +718,7 @@ func (server *Server) handleDNSRuleUpdates(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "rollback_save_failed", "rollback metadata could not be saved")
 		return
 	}
-	if err := server.store.SavePolicy(r.Context(), persistence.PolicyDocument{Namespace: "dns-policy", PolicyID: resource.ID, Priority: 10, Enabled: resource.Enabled, Payload: payload, PayloadHash: payloadHash, UpdatedAt: server.now().UTC()}); err != nil {
+	if err := server.store.SavePolicy(r.Context(), persistence.PolicyDocument{Namespace: "dns-policy", PolicyID: resource.ID, Priority: resource.Priority, Enabled: resource.Enabled, Payload: payload, PayloadHash: payloadHash, UpdatedAt: server.now().UTC()}); err != nil {
 		server.recordAudit(session.Username, session.Role, "/api/v1/dns/rule-updates", "update", "failure", err.Error(), r)
 		writeError(w, r, http.StatusInternalServerError, "dns_policy_save_failed", "DNS policy could not be saved")
 		return
@@ -766,16 +793,29 @@ func (server *Server) handleDNSIPSetObservations(w http.ResponseWriter, r *http.
 		return
 	}
 	prefix := "dns-observed-" + req.RuleID + "-"
+	// The sync timer refreshes member expiry timestamps frequently.  Those
+	// timestamps are persistence data, but they do not change the VPP route
+	// set.  Re-applying the complete runtime for every timestamp refresh can
+	// serialize indefinitely behind runtimeApplyMu and starve the control API.
+	// Only a change in the observed address set requires a dataplane apply.
+	existingIPs := map[string]struct{}{}
 	for _, item := range items {
 		id := stringField(item, "id")
 		if strings.HasPrefix(id, prefix) {
+			for _, ip := range stringSliceField(item, "ips") {
+				if address, parseErr := netip.ParseAddr(strings.TrimSpace(ip)); parseErr == nil {
+					existingIPs[address.String()] = struct{}{}
+				}
+			}
 			if err := server.store.DeleteConfig(r.Context(), "domain_ip_set", id); err != nil && !errors.Is(err, persistence.ErrNotFound) {
 				writeError(w, r, http.StatusInternalServerError, "dns_sync_delete_failed", "stale DNS observation could not be removed")
 				return
 			}
 		}
 	}
+	observedIPs := make(map[string]struct{}, len(validMembers))
 	for _, member := range validMembers {
+		observedIPs[member.IP] = struct{}{}
 		item := map[string]any{
 			"id":          prefix + strings.ReplaceAll(member.IP, ":", "_"),
 			"kind":        "observed",
@@ -794,18 +834,34 @@ func (server *Server) handleDNSIPSetObservations(w http.ResponseWriter, r *http.
 			return
 		}
 	}
-	applyRequest := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/apply", nil)
-	applyRequest.RemoteAddr = "127.0.0.1:0"
-	applyRequest.Header.Set(HeaderDNSSyncToken, server.dnsSyncToken)
-	applyResponse := httptest.NewRecorder()
-	server.handleRuntimeApply(applyResponse, applyRequest)
+	runtimeApply := json.RawMessage(`{"status":"unchanged"}`)
+	if !sameStringSet(existingIPs, observedIPs) {
+		applyRequest := httptest.NewRequest(http.MethodPost, "/api/v1/runtime/apply", nil)
+		applyRequest.RemoteAddr = "127.0.0.1:0"
+		applyRequest.Header.Set(HeaderDNSSyncToken, server.dnsSyncToken)
+		applyResponse := httptest.NewRecorder()
+		server.handleRuntimeApply(applyResponse, applyRequest)
+		runtimeApply = json.RawMessage(applyResponse.Body.Bytes())
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"rule_id":         req.RuleID,
 		"set_name":        expectedSet,
 		"members_applied": len(validMembers),
-		"runtime_apply":   json.RawMessage(applyResponse.Body.Bytes()),
+		"runtime_apply":   runtimeApply,
 		"request_id":      requestID(r),
 	})
+}
+
+func sameStringSet(left, right map[string]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if _, ok := right[value]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (server *Server) validDNSSyncRequest(r *http.Request) bool {
@@ -827,11 +883,50 @@ func (server *Server) activeDNSPolicyResource(ctx context.Context) (DNSPolicyRes
 		if err != nil {
 			return DNSPolicyResource{}, err
 		}
+		merged := dns.NewPolicy(dns.Reject(), []dns.Rule{})
+		merged.Engine = "smartdns"
+		found := false
+		lastPriority := 1000
 		for _, document := range documents {
 			if !document.Enabled {
 				continue
 			}
-			return server.dnsPolicyResource(ctx, document.PolicyID, document.PolicyID, document.Enabled, document.Payload)
+			var policy dns.Policy
+			if err := json.Unmarshal(document.Payload, &policy); err != nil {
+				return DNSPolicyResource{}, fmt.Errorf("decode DNS policy %q: %w", document.PolicyID, err)
+			}
+			for _, rule := range policy.Rules {
+				if strings.TrimSpace(rule.ID) == "" {
+					continue
+				}
+				// Policy IDs are user-editable. Prefixing only on collision keeps
+				// DNS observation and diagnostics stable while preventing one
+				// policy from shadowing another policy's rule ID.
+				for _, existing := range merged.Rules {
+					if existing.ID == rule.ID {
+						rule.ID = document.PolicyID + ":" + rule.ID
+						break
+					}
+				}
+				merged.Rules = append(merged.Rules, rule)
+			}
+			// Policies are returned in ascending persistence priority. The
+			// highest-priority-number policy supplies the final miss/default.
+			merged.Miss = policy.Miss
+			lastPriority = normalizedDNSPolicyPriority(document.Priority)
+			found = true
+		}
+		if found {
+			payload, marshalErr := json.Marshal(merged)
+			if marshalErr != nil {
+				return DNSPolicyResource{}, marshalErr
+			}
+			resource, resourceErr := server.dnsPolicyResource(ctx, "active", "Active DNS Policy", true, payload)
+			if resourceErr != nil {
+				return DNSPolicyResource{}, resourceErr
+			}
+			resource.Priority = lastPriority
+			return resource, nil
 		}
 	}
 	return server.defaultDNSPolicyResource(ctx)
@@ -842,7 +937,12 @@ func (server *Server) dnsPolicyResourceForID(ctx context.Context, id string) (DN
 	if server.store != nil {
 		document, err := server.store.Policy(ctx, "dns-policy", id)
 		if err == nil {
-			return server.dnsPolicyResource(ctx, document.PolicyID, document.PolicyID, document.Enabled, document.Payload)
+			resource, resourceErr := server.dnsPolicyResource(ctx, document.PolicyID, document.PolicyID, document.Enabled, document.Payload)
+			if resourceErr != nil {
+				return DNSPolicyResource{}, resourceErr
+			}
+			resource.Priority = normalizedDNSPolicyPriority(document.Priority)
+			return resource, nil
 		}
 		if !errors.Is(err, persistence.ErrNotFound) {
 			return DNSPolicyResource{}, err
@@ -862,7 +962,19 @@ func (server *Server) defaultDNSPolicyResource(ctx context.Context) (DNSPolicyRe
 	if err != nil {
 		return DNSPolicyResource{}, err
 	}
-	return server.dnsPolicyResource(ctx, "default", "Default DNS Policy", true, payload)
+	resource, err := server.dnsPolicyResource(ctx, "default", "Default DNS Policy", true, payload)
+	if err != nil {
+		return DNSPolicyResource{}, err
+	}
+	resource.Priority = normalizedDNSPolicyPriority(1000)
+	return resource, nil
+}
+
+func normalizedDNSPolicyPriority(priority int) int {
+	if priority <= 0 {
+		return 1000
+	}
+	return priority
 }
 
 func (server *Server) handleDNSPolicyMutation(w http.ResponseWriter, r *http.Request, id string) {
@@ -897,7 +1009,7 @@ func (server *Server) handleDNSPolicyMutation(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusUnprocessableEntity, "invalid_dns_policy", err.Error())
 		return
 	}
-	if err := server.store.SavePolicy(r.Context(), persistence.PolicyDocument{Namespace: "dns-policy", PolicyID: resource.ID, Priority: 10, Enabled: resource.Enabled, Payload: payload, PayloadHash: hash, UpdatedAt: server.now().UTC()}); err != nil {
+	if err := server.store.SavePolicy(r.Context(), persistence.PolicyDocument{Namespace: "dns-policy", PolicyID: resource.ID, Priority: resource.Priority, Enabled: resource.Enabled, Payload: payload, PayloadHash: hash, UpdatedAt: server.now().UTC()}); err != nil {
 		server.recordAudit(session.Username, session.Role, r.URL.Path, "update", "failure", err.Error(), r)
 		writeError(w, r, http.StatusInternalServerError, "dns_policy_save_failed", "DNS policy could not be saved")
 		return
@@ -1555,7 +1667,7 @@ func (server *Server) capabilities(ctx context.Context) []controlapi.CapabilityS
 		states = append(states, server.serviceCapability(ctx, serviceRuntime.Xray, "xray", "xray service runtime is not configured"))
 	}
 	if server.profile.AllowsService(product.ServicePPPoE) {
-		states = append(states, server.optionalCapability(ctx, serviceRuntime.PPPd, "pppoe", "pppd service runtime is not configured"))
+		states = append(states, server.optionalCapability(ctx, serviceRuntime.PPPoE, "pppoe", "PPPoE service runtime is not configured"))
 	}
 	if server.profile.AllowsService(product.ServiceNftables) {
 		states = append(states, server.serviceCapability(ctx, serviceRuntime.Nftables, "nftables", "nftables service runtime is not configured"))
@@ -1687,7 +1799,12 @@ func (server *Server) proxyEgressResources(ctx context.Context) ([]controlapi.Pr
 				if err := json.Unmarshal(document.Payload, &egress); err != nil {
 					return nil, err
 				}
-				resource, err := server.proxyEgressResource(egress, document.ResourceID, true)
+				name := nonEmpty(stringField(payload, "name"), document.ResourceID)
+				enabled := true
+				if configured, ok := payload["enabled"].(bool); ok {
+					enabled = configured
+				}
+				resource, err := server.proxyEgressResource(egress, name, enabled)
 				if err != nil {
 					return nil, err
 				}
@@ -1769,14 +1886,30 @@ func (server *Server) handleProxyXrayRuntime(action string) http.HandlerFunc {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"service": "xray", "state": "available", "available": true, "logs": serviceRuntime.Redact(logs), "request_id": requestID(r)})
 		case "restart":
-			plan, err := server.buildRuntimePlan(r.Context(), requestID(r))
+			egress, configured, err := server.runtimeProxyEgress(r.Context())
 			if err != nil {
 				server.recordAudit(session.Username, session.Role, r.URL.Path, action, "failure", err.Error(), r)
 				writeError(w, r, http.StatusUnprocessableEntity, "xray_restart_plan_failed", err.Error())
 				return
 			}
-			artifacts := artifactsForService(plan.RuntimeArtifacts, serviceRuntime.Xray)
-			if len(artifacts) == 0 {
+			if !configured {
+				writeError(w, r, http.StatusUnprocessableEntity, "xray_artifacts_missing", "proxy egress is not configured")
+				return
+			}
+			compiled, err := proxy.CompileEgress(egress)
+			if err == nil {
+				if warning := server.compileProxySubscription(r.Context(), egress, &compiled); warning != "" {
+					err = errors.New(warning)
+				}
+			}
+			if err != nil {
+				server.recordAudit(session.Username, session.Role, r.URL.Path, action, "failure", err.Error(), r)
+				writeError(w, r, http.StatusUnprocessableEntity, "xray_restart_plan_failed", err.Error())
+				return
+			}
+			proxy.ApplyOutboundSocketMark(&compiled.XrayRuntime.ConfigPayload, compiled.ServiceNetwork.OutboundMark)
+			artifacts, err := serviceRuntime.RenderXray(compiled)
+			if err != nil || len(artifacts) == 0 {
 				server.recordAudit(session.Username, session.Role, r.URL.Path, action, "failure", "xray artifacts are not rendered", r)
 				writeError(w, r, http.StatusUnprocessableEntity, "xray_artifacts_missing", "xray artifacts are not rendered")
 				return
@@ -1887,16 +2020,30 @@ func (server *Server) compileProxyEgressResource(req ProxyEgressWriteRequest) (c
 	}
 	profile := proxy.RuntimeProfile(nonEmpty(req.ProxyProfileID, "xray-tproxy-outbound"))
 	egress := proxy.NewProxyEgress(req.ID, profile)
+	egress.UnderlayWANID = strings.TrimSpace(req.UnderlayWANID)
+	egress.NodeID = strings.TrimSpace(req.NodeID)
+	egress.SubscriptionID = strings.TrimSpace(req.SubscriptionID)
 	if err := proxy.ValidateEgress(egress); err != nil {
 		return controlapi.ProxyEgressResource{}, nil, "", err
 	}
-	payloadObject := map[string]any{"id": egress.ID, "semantic_type": egress.SemanticType, "display_list": egress.DisplayList, "runtime_profile": egress.RuntimeProfile, "capture_path": egress.CapturePath, "engine": egress.Engine, "handoff": egress.Handoff, "listener_mode": egress.ListenerMode, "underlay_wan_id": strings.TrimSpace(req.UnderlayWANID)}
+	payloadObject := map[string]any{"id": egress.ID, "name": nonEmpty(req.Name, req.ID), "enabled": req.Enabled, "semantic_type": egress.SemanticType, "display_list": egress.DisplayList, "runtime_profile": egress.RuntimeProfile, "capture_path": egress.CapturePath, "engine": egress.Engine, "handoff": egress.Handoff, "listener_mode": egress.ListenerMode, "underlay_wan_id": egress.UnderlayWANID}
+	if egress.NodeID != "" {
+		payloadObject["node_id"] = egress.NodeID
+	}
+	if egress.SubscriptionID != "" {
+		payloadObject["subscription_id"] = egress.SubscriptionID
+	}
+	if strings.TrimSpace(req.Description) != "" {
+		payloadObject["description"] = strings.TrimSpace(req.Description)
+	}
 	payload, hash, err := persistence.MarshalPayload(payloadObject)
 	if err != nil {
 		return controlapi.ProxyEgressResource{}, nil, "", err
 	}
 	resource, err := server.proxyEgressResource(egress, nonEmpty(req.Name, req.ID), req.Enabled)
-	resource.UnderlayWANID = strings.TrimSpace(req.UnderlayWANID)
+	resource.UnderlayWANID = egress.UnderlayWANID
+	resource.NodeID = egress.NodeID
+	resource.SubscriptionID = egress.SubscriptionID
 	return resource, payload, hash, err
 }
 
@@ -2145,6 +2292,10 @@ func (server *Server) compileDNSPolicyResource(ctx context.Context, req DNSPolic
 	if strings.TrimSpace(req.ID) == "" {
 		return DNSPolicyResource{}, nil, "", fmt.Errorf("dns policy id is required")
 	}
+	priority := normalizedDNSPolicyPriority(req.Priority)
+	if priority < 1 || priority > 65535 {
+		return DNSPolicyResource{}, nil, "", fmt.Errorf("dns policy priority must be between 1 and 65535")
+	}
 	policy := req.Policy
 	if strings.TrimSpace(policy.Engine) == "" && len(policy.Rules) == 0 && policy.Miss.Kind == "" {
 		policy = dns.NewPolicy(dns.Reject(), []dns.Rule{{ID: req.ID, Domains: []string{}, Outcome: dns.Direct()}})
@@ -2157,7 +2308,7 @@ func (server *Server) compileDNSPolicyResource(ctx context.Context, req DNSPolic
 	if err != nil {
 		return DNSPolicyResource{}, nil, "", err
 	}
-	domainSets, err := server.currentDNSDomainSets(ctx)
+	domainSets, err := server.currentDNSDomainSetsFor(ctx, []map[string]any{{"policy": policy}})
 	if err != nil {
 		return DNSPolicyResource{}, nil, "", err
 	}
@@ -2170,7 +2321,7 @@ func (server *Server) compileDNSPolicyResource(ctx context.Context, req DNSPolic
 	if err != nil {
 		return DNSPolicyResource{}, nil, "", err
 	}
-	return DNSPolicyResource{ID: req.ID, Kind: "policy", Name: nonEmpty(req.Name, req.ID), Enabled: req.Enabled, Policy: policy, Render: compiled.RenderSmartDNS(), Capabilities: []controlapi.CapabilityState{server.serviceCapability(context.Background(), serviceRuntime.SmartDNS, "smartdns", "SmartDNS service runtime is not configured")}}, payload, hash, nil
+	return DNSPolicyResource{ID: req.ID, Kind: "policy", Name: nonEmpty(req.Name, req.ID), Priority: priority, Enabled: req.Enabled, Policy: policy, Render: compiled.RenderSmartDNS(), Capabilities: []controlapi.CapabilityState{server.serviceCapability(context.Background(), serviceRuntime.SmartDNS, "smartdns", "SmartDNS service runtime is not configured")}}, payload, hash, nil
 }
 
 func (server *Server) dnsPolicyResource(ctx context.Context, id, name string, enabled bool, payload json.RawMessage) (DNSPolicyResource, error) {
@@ -2194,6 +2345,11 @@ func (server *Server) expandDNSPolicySourceGroups(ctx context.Context, policy dn
 	if err != nil {
 		return dns.Policy{}, err
 	}
+	consumer := map[string]any{"policy": policy}
+	items, err = materializeObjectGroupItems(items, referencedObjectGroupIDs(items, []map[string]any{consumer}))
+	if err != nil {
+		return dns.Policy{}, err
+	}
 	expanded := policy
 	expanded.Rules = append([]dns.Rule(nil), policy.Rules...)
 	for index := range expanded.Rules {
@@ -2206,6 +2362,47 @@ func (server *Server) expandDNSPolicySourceGroups(ctx context.Context, policy dn
 			return dns.Policy{}, fmt.Errorf("dns rule %q source selectors: %w", rule.ID, expandErr)
 		}
 		rule.SourcePrefixes = selectors
+	}
+	return expanded, nil
+}
+
+// expandDNSPolicyForDecision produces the executable decision view used by
+// the diagnostic/preview endpoint. Runtime SmartDNS keeps domain-set IDs in
+// its rendered configuration, but the pure policy evaluator needs the actual
+// domain selectors to make the same first-match decision as SmartDNS.
+func (server *Server) expandDNSPolicyForDecision(ctx context.Context, policy dns.Policy) (dns.Policy, error) {
+	expanded, err := server.expandDNSPolicySourceGroups(ctx, policy)
+	if err != nil {
+		return dns.Policy{}, err
+	}
+	sets, err := server.currentDNSDomainSets(ctx)
+	if err != nil {
+		return dns.Policy{}, err
+	}
+	for index := range expanded.Rules {
+		rule := &expanded.Rules[index]
+		for _, setID := range rule.DomainSetIDs {
+			setID = strings.TrimSpace(setID)
+			entries, exists := sets[setID]
+			if !exists {
+				return dns.Policy{}, fmt.Errorf("dns policy references unavailable domain set %q", setID)
+			}
+			for _, entry := range entries {
+				entry = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(entry)), ".")
+				if entry == "" {
+					continue
+				}
+				if strings.HasPrefix(entry, "*.") {
+					rule.DomainSuffixes = append(rule.DomainSuffixes, strings.TrimPrefix(entry, "*."))
+					continue
+				}
+				if strings.HasPrefix(entry, ".") {
+					rule.DomainSuffixes = append(rule.DomainSuffixes, strings.TrimPrefix(entry, "."))
+					continue
+				}
+				rule.Domains = append(rule.Domains, entry)
+			}
+		}
 	}
 	return expanded, nil
 }
@@ -2223,19 +2420,23 @@ var desiredResourceDefs = map[string]desiredResourceDef{
 	"interface_bond": {CollectionPath: "/api/v1/interface-bonds", Defaults: []map[string]any{}},
 	"object_group": {CollectionPath: "/api/v1/objects/ip-groups", Defaults: []map[string]any{
 		{"id": "obj-local-lan", "kind": "ip", "name": "Local LAN", "entries": []string{"192.168.88.0/24"}},
+		{"id": "obj-geoip-cn", "kind": "ip", "name": "GeoIP 中国大陆", "entries": []string{}, "source": map[string]any{"provider": "v2ray-rules-dat", "format": "geoip", "category": "CN", "file": "geoip.dat", "sha256": "6ba63d75f307d16a81ae09406ddcf2779fa75cb642d4aae59613370d62d33509"}, "source_entry_count": 5822},
+		{"id": "obj-geosite-cn", "kind": "domain", "name": "GeoSite 中国大陆", "entries": []string{}, "source": map[string]any{"provider": "v2ray-rules-dat", "format": "geosite", "category": "CN", "file": "geosite.dat", "sha256": "857227f9dcedbfda5c067ba740ca8a461a06a6ac12aeeb99dcbf82c0e1bdb125"}, "source_entry_count": 111514},
 		{"id": "obj-proxy-domains", "kind": "domain", "name": "Proxy Domains", "entries": []string{}},
 	}},
-	"wan_link":                {CollectionPath: "/api/v1/gateway/wan-links", Defaults: []map[string]any{}},
-	"wan_group":               {CollectionPath: "/api/v1/gateway/wan-groups", Defaults: []map[string]any{}},
-	"route_policy":            {CollectionPath: "/api/v1/gateway/policies/routes", Defaults: []map[string]any{}},
-	"nat_static":              {CollectionPath: "/api/v1/gateway/nat/static", Defaults: []map[string]any{}},
-	"port_map":                {CollectionPath: "/api/v1/gateway/nat/port-maps", Defaults: []map[string]any{}},
-	"proxy_node":              {CollectionPath: "/api/v1/proxy/nodes", Defaults: []map[string]any{}},
-	"proxy_subscription":      {CollectionPath: "/api/v1/proxy/subscriptions", Defaults: []map[string]any{}},
-	"proxy_group":             {CollectionPath: "/api/v1/proxy/groups", Defaults: []map[string]any{{"id": "proxy-group-default", "kind": "group", "name": "Default Proxy Group", "enabled": true, "members": []string{"proxy-egress-default"}, "degraded": true}}},
-	"dns_policy":              {CollectionPath: "/api/v1/dns/policies", Defaults: []map[string]any{{"id": "default", "kind": "policy", "name": "Default DNS Policy", "enabled": true, "policy": map[string]any{"engine": "smartdns", "miss": map[string]any{"kind": "reject"}, "rules": []any{}}, "degraded": true}}},
-	"domain_ip_set":           {CollectionPath: "/api/v1/dns/domain-ip-sets", Defaults: []map[string]any{}},
-	"dns_upstream":            {CollectionPath: "/api/v1/dns/upstreams", Defaults: []map[string]any{{"id": "dns-direct-default", "name": "Default Direct Resolvers", "engine": "smartdns", "servers": []string{"1.1.1.1", "8.8.8.8"}, "cache_size": 32768, "ttl_min_seconds": 60, "ttl_max_seconds": 600, "prefetch": true, "degraded": true, "degraded_reason": "SmartDNS process manager not wired"}}},
+	"wan_link":           {CollectionPath: "/api/v1/gateway/wan-links", Defaults: []map[string]any{}},
+	"wan_group":          {CollectionPath: "/api/v1/gateway/wan-groups", Defaults: []map[string]any{}},
+	"route_policy":       {CollectionPath: "/api/v1/gateway/policies/routes", Defaults: []map[string]any{}},
+	"nat_static":         {CollectionPath: "/api/v1/gateway/nat/static", Defaults: []map[string]any{}},
+	"port_map":           {CollectionPath: "/api/v1/gateway/nat/port-maps", Defaults: []map[string]any{}},
+	"proxy_node":         {CollectionPath: "/api/v1/proxy/nodes", Defaults: []map[string]any{}},
+	"proxy_subscription": {CollectionPath: "/api/v1/proxy/subscriptions", Defaults: []map[string]any{}},
+	"proxy_group":        {CollectionPath: "/api/v1/proxy/groups", Defaults: []map[string]any{{"id": "proxy-group-default", "kind": "group", "name": "Default Proxy Group", "enabled": true, "members": []string{"proxy-egress-default"}, "degraded": true}}},
+	"dns_policy":         {CollectionPath: "/api/v1/dns/policies", Defaults: []map[string]any{{"id": "default", "kind": "policy", "name": "Default DNS Policy", "enabled": true, "policy": map[string]any{"engine": "smartdns", "miss": map[string]any{"kind": "reject"}, "rules": []any{}}, "degraded": true}}},
+	"domain_ip_set":      {CollectionPath: "/api/v1/dns/domain-ip-sets", Defaults: []map[string]any{}},
+	"dns_upstream": {CollectionPath: "/api/v1/dns/upstreams", Defaults: []map[string]any{
+		{"id": "dns-direct-default", "name": "Default Direct Resolvers", "engine": "smartdns", "servers": []string{"1.1.1.1", "8.8.8.8"}, "cache_size": 32768, "ttl_min_seconds": 60, "ttl_max_seconds": 600, "prefetch": true, "degraded": true, "degraded_reason": "SmartDNS process manager not wired"},
+	}},
 	"dhcp_server":             {CollectionPath: "/api/v1/dhcp/servers", Defaults: []map[string]any{}},
 	"dhcp_lease":              {CollectionPath: "/api/v1/dhcp/leases", Defaults: []map[string]any{}},
 	"dhcp_static_binding":     {CollectionPath: "/api/v1/dhcp/static-bindings", Defaults: []map[string]any{}},
@@ -2270,6 +2471,9 @@ func (server *Server) handleDesiredCollection(resourceType string) http.HandlerF
 			}
 			if resourceType == "port_map" {
 				items = decoratePortMapItems(items)
+			}
+			if resourceType == "route_policy" {
+				items = server.decorateRoutePolicyRuntimeStates(r.Context(), items)
 			}
 			if resourceType == "object_group" && server.profile.ID() == product.Orchestrator().ID() {
 				filtered := make([]map[string]any, 0, len(items))
@@ -2354,6 +2558,9 @@ func (server *Server) handleDesiredItem(resourceType string) http.HandlerFunc {
 			}
 			if resourceType == "port_map" {
 				item = decoratePortMapItem(item)
+			}
+			if resourceType == "route_policy" {
+				item = server.decorateRoutePolicyRuntimeState(r.Context(), item)
 			}
 			if resourceType == "traffic_control" {
 				item = decorateTrafficControlItem(item)
@@ -2477,6 +2684,12 @@ func containsReference(value any, id string) bool {
 				return true
 			}
 		}
+	case []map[string]any:
+		for _, child := range typed {
+			if containsReference(child, id) {
+				return true
+			}
+		}
 	case []string:
 		for _, child := range typed {
 			if strings.TrimSpace(child) == id {
@@ -2502,6 +2715,19 @@ func (server *Server) handleObjectGroupExport(w http.ResponseWriter, r *http.Req
 	if !ok {
 		writeError(w, r, http.StatusNotFound, "not_found", "resource was not found")
 		return
+	}
+	if source, hasSource := objectGroupSource(item); hasSource {
+		materialized, materializeErr := materializeObjectGroupItems([]map[string]any{item}, map[string]bool{id: true})
+		if materializeErr != nil {
+			writeError(w, r, http.StatusUnprocessableEntity, "geodata_source_unavailable", materializeErr.Error())
+			return
+		}
+		if len(materialized) == 1 {
+			item = materialized[0]
+		} else {
+			writeError(w, r, http.StatusUnprocessableEntity, "geodata_source_unavailable", fmt.Sprintf("object group %q source %s could not be materialized", id, source.File))
+			return
+		}
 	}
 	entries := objectGroupEntries(item)
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "kind": objectGroupKind(item), "entries": entries, "text": strings.Join(entries, "\n"), "request_id": requestID(r)})
@@ -2529,7 +2755,64 @@ func (server *Server) handleObjectGroupImport(w http.ResponseWriter, r *http.Req
 	var req struct {
 		Text string `json:"text"`
 	}
-	if err := decodeStrictJSON(r, &req); err != nil {
+	importMode := "append"
+	var importedSource *geodata.Source
+	importKind := strings.ToLower(strings.TrimSpace(r.FormValue("kind")))
+	if importKind == "" {
+		importKind = "ip"
+	}
+	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data") {
+		if err := r.ParseMultipartForm(64 << 20); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid_multipart", "uploaded object-group file could not be read")
+			return
+		}
+		importMode = strings.ToLower(strings.TrimSpace(r.FormValue("mode")))
+		if importMode == "" {
+			importMode = "append"
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "file_required", "an object-group import file is required")
+			return
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(file, 64<<20))
+		_ = file.Close()
+		if readErr != nil {
+			writeError(w, r, http.StatusBadRequest, "file_read_failed", "uploaded object-group file could not be read")
+			return
+		}
+		format := strings.ToLower(strings.TrimSpace(r.FormValue("format")))
+		if format == "" {
+			switch strings.ToLower(filepath.Ext(header.Filename)) {
+			case ".dat":
+				format = "geosite"
+			default:
+				format = "text"
+			}
+		}
+		category := strings.TrimSpace(r.FormValue("category"))
+		if format == "geoip" || format == "geosite" {
+			parsed, parseErr := func() (geodata.Data, error) {
+				if format == "geoip" {
+					return geodata.ParseGeoIP(raw, category)
+				}
+				return geodata.ParseGeoSite(raw, category)
+			}()
+			if parseErr != nil {
+				writeError(w, r, http.StatusUnprocessableEntity, "geodata_import_failed", parseErr.Error())
+				return
+			}
+			req.Text = strings.Join(parsed.Entries, "\n")
+			importedSource = &geodata.Source{Format: format, Category: parsed.Category, File: header.Filename, EntryCount: len(parsed.Entries)}
+		} else {
+			textData, parseErr := geodata.ParseText(raw, importKind)
+			if parseErr != nil {
+				writeError(w, r, http.StatusUnprocessableEntity, "text_import_failed", parseErr.Error())
+				return
+			}
+			req.Text = strings.Join(textData.Entries, "\n")
+		}
+	} else if err := decodeStrictJSON(r, &req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 		return
 	}
@@ -2542,11 +2825,32 @@ func (server *Server) handleObjectGroupImport(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusNotFound, "not_found", "resource was not found")
 		return
 	}
+	// A source-backed built-in group is intentionally lazy in list responses.
+	// Once a user imports or appends manual entries, materialize the source once
+	// and remove the lazy source marker so the edited group is authoritative.
+	if _, hasSource := objectGroupSource(item); hasSource {
+		if importMode != "overwrite" && importMode != "replace" {
+			materialized, materializeErr := materializeObjectGroupItems([]map[string]any{item}, map[string]bool{id: true})
+			if materializeErr != nil {
+				writeError(w, r, http.StatusUnprocessableEntity, "geodata_source_unavailable", materializeErr.Error())
+				return
+			}
+			if len(materialized) == 1 {
+				item = materialized[0]
+			}
+		}
+		delete(item, "source")
+	}
 	originalEntries := objectGroupEntries(item)
-	entries, invalidLines := importObjectGroupEntries(objectGroupKind(item), originalEntries, req.Text)
+	baseEntries := originalEntries
+	if importMode == "overwrite" || importMode == "replace" {
+		baseEntries = nil
+	}
+	entries, invalidLines := importObjectGroupEntries(objectGroupKind(item), baseEntries, req.Text)
 	if len(entries) > 0 {
 		item["entries"] = entries
 		item["members"] = entries
+		item["source_entry_count"] = len(entries)
 		item["compiled_expansion"] = map[string]any{"kind": objectGroupKind(item), "entries": entries, "entry_count": len(entries)}
 		affected, _ := server.objectGroupReferences(r.Context(), id)
 		for _, consumer := range affected {
@@ -2555,6 +2859,9 @@ func (server *Server) handleObjectGroupImport(w http.ResponseWriter, r *http.Req
 		}
 		item["affected_consumers"] = affected
 		item["runtime_state"] = "desired_not_applied"
+		if importedSource != nil {
+			item["import_source"] = importedSource
+		}
 		item["capabilities"] = server.degradedRuntimeCapabilities()
 		raw, hash, err := persistence.MarshalPayload(item)
 		if err != nil {
@@ -2569,7 +2876,11 @@ func (server *Server) handleObjectGroupImport(w http.ResponseWriter, r *http.Req
 		}
 	}
 	server.recordAudit(session.Username, session.Role, r.URL.Path, "import", "success", "", r)
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "imported_count": len(entries) - len(originalEntries), "entries": entries, "invalid_lines": invalidLines, "compiled_expansion": item["compiled_expansion"], "affected_consumers": item["affected_consumers"], "runtime_state": "desired_not_applied", "request_id": requestID(r)})
+	importedCount := len(entries)
+	if importMode != "overwrite" && importMode != "replace" && len(entries) >= len(originalEntries) {
+		importedCount = len(entries) - len(originalEntries)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "imported_count": importedCount, "entries": entries, "invalid_lines": invalidLines, "compiled_expansion": item["compiled_expansion"], "affected_consumers": item["affected_consumers"], "runtime_state": "desired_not_applied", "request_id": requestID(r)})
 }
 
 func objectGroupKind(item map[string]any) string {
@@ -2643,6 +2954,67 @@ func canonicalObjectGroupEntries(kind string, raw []string) ([]string, error) {
 
 func objectGroupEntries(item map[string]any) []string {
 	return append(stringSliceField(item, "entries"), stringSliceField(item, "members")...)
+}
+
+// objectGroupSource is deliberately metadata-only in the public object-group
+// response.  Large GeoSite categories can contain more than one hundred
+// thousand selectors; expanding them in every list response makes the UI
+// slow and needlessly increases the persistence/API surface.  Runtime
+// compilation calls materializeObjectGroupItems for only referenced groups.
+func objectGroupSource(item map[string]any) (geodata.Source, bool) {
+	raw, ok := item["source"].(map[string]any)
+	if !ok || len(raw) == 0 {
+		return geodata.Source{}, false
+	}
+	source := geodata.Source{
+		Format:   stringField(raw, "format"),
+		Category: stringField(raw, "category"),
+		File:     stringField(raw, "file"),
+		SHA256:   stringField(raw, "sha256"),
+	}
+	return source, source.Format != "" && source.Category != ""
+}
+
+func materializeObjectGroupItems(items []map[string]any, required map[string]bool) ([]map[string]any, error) {
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		clone := cloneObject(item)
+		id := stringField(clone, "id")
+		source, hasSource := objectGroupSource(clone)
+		if hasSource && (required == nil || required[id]) {
+			data, err := geodata.LoadSource(source)
+			if err != nil {
+				return nil, fmt.Errorf("object group %q: %w", id, err)
+			}
+			if objectGroupKind(clone) == "ip" && data.Format != geodata.FormatGeoIP {
+				return nil, fmt.Errorf("object group %q requires a GeoIP source", id)
+			}
+			if objectGroupKind(clone) == "domain" && data.Format != geodata.FormatGeoSite {
+				return nil, fmt.Errorf("object group %q requires a GeoSite source", id)
+			}
+			clone["entries"] = append([]string(nil), data.Entries...)
+			clone["members"] = append([]string(nil), data.Entries...)
+			clone["source_entry_count"] = len(data.Entries)
+			if sourceMap, ok := clone["source"].(map[string]any); ok {
+				sourceMap["sha256"] = data.SourceSHA256
+				sourceMap["entry_count"] = len(data.Entries)
+			}
+		}
+		result = append(result, clone)
+	}
+	return result, nil
+}
+
+func referencedObjectGroupIDs(groups, consumers []map[string]any) map[string]bool {
+	required := make(map[string]bool)
+	for _, group := range groups {
+		id := stringField(group, "id")
+		if id == "" || !containsReference(consumers, id) {
+			continue
+		}
+		required[id] = true
+	}
+	return required
 }
 
 func importObjectGroupEntries(kind string, existing []string, text string) ([]string, []map[string]any) {
@@ -2884,6 +3256,13 @@ func (server *Server) handleDesiredMutation(w http.ResponseWriter, r *http.Reque
 		server.recordAudit(session.Username, session.Role, r.URL.Path, action, "failure", "request body must be valid JSON", r)
 		writeError(w, r, http.StatusBadRequest, "invalid_json", "request body must be valid JSON")
 		return
+	}
+	if resourceType == "proxy_node" {
+		if err := normalizeProxyNodeURIPayload(payload); err != nil {
+			server.recordAudit(session.Username, session.Role, r.URL.Path, action, "failure", err.Error(), r)
+			writeError(w, r, http.StatusUnprocessableEntity, "invalid_desired_resource", err.Error())
+			return
+		}
 	}
 	id := nonEmpty(explicitID, stringField(payload, "id"))
 	if id == "" {
@@ -3181,6 +3560,138 @@ func (server *Server) runtimeAddressAssignments(ctx context.Context) ([]vpp.Addr
 	return assignments, nil
 }
 
+// runtimeSmartQoSAssignments maps the user-facing WAN upload/download limits to
+// the physical VPP egress interfaces. PPPoE has no WAN address assignment of its
+// own, but its encapsulated packets still leave through the underlay interface.
+// The aggregate WAN download rate is shaped on the logical LAN egress.
+func (server *Server) runtimeSmartQoSAssignments(ctx context.Context, addressAssignments []vpp.AddressAssignment, proxyEgress proxy.Egress, hasProxyEgress bool) ([]vpp.AddressAssignment, error) {
+	wanItems, err := server.desiredItems(ctx, "wan_link")
+	if err != nil {
+		return nil, err
+	}
+
+	wanOrder := make([]string, 0, len(addressAssignments)+len(wanItems))
+	wanAssignments := map[string]vpp.AddressAssignment{}
+	wanInterfaceByID := map[string]string{}
+	downloadByWAN := map[string]uint64{}
+	for _, assignment := range addressAssignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "wan") || strings.TrimSpace(assignment.LinuxInterface) == "" {
+			continue
+		}
+		if _, exists := wanAssignments[assignment.LinuxInterface]; !exists {
+			wanOrder = append(wanOrder, assignment.LinuxInterface)
+		}
+		wanAssignments[assignment.LinuxInterface] = assignment
+	}
+	for _, item := range wanItems {
+		if truthy(item["deleted"]) {
+			continue
+		}
+		if enabled, present := item["enabled"]; present && !truthy(enabled) {
+			continue
+		}
+		linuxInterface := server.resolveInterfaceID(ctx, firstNonEmpty(stringField(item, "interface_id"), stringField(item, "id"), stringField(item, "name")))
+		if linuxInterface == "" || (!server.managementNetworkShared(ctx) && linuxInterface == server.managementInterfaceID(ctx)) || !vppInterfaceNameSafe(linuxInterface) {
+			continue
+		}
+		if _, exists := wanAssignments[linuxInterface]; !exists {
+			wanOrder = append(wanOrder, linuxInterface)
+		}
+		uploadKbps := smartQoSBandwidthKbps(item, "wan")
+		if wanID := firstStringField(item, "id", "name"); wanID != "" {
+			wanInterfaceByID[wanID] = linuxInterface
+		}
+		downloadByWAN[linuxInterface] = smartQoSBandwidthKbps(item, "lan")
+		wanAssignments[linuxInterface] = vpp.AddressAssignment{
+			ID: nonEmpty(stringField(item, "id"), linuxInterface), LinuxInterface: linuxInterface,
+			VPPInterface: vppInterfaceName(linuxInterface), Role: "wan", BandwidthKbps: uploadKbps,
+		}
+	}
+	if hasProxyEgress {
+		underlayWANIDs, resolveErr := server.proxyUnderlayWANIDs(ctx, proxyEgress)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		for _, wanID := range underlayWANIDs {
+			linuxInterface := wanInterfaceByID[wanID]
+			if linuxInterface == "" {
+				return nil, fmt.Errorf("proxy egress %q underlay WAN %q has no eligible physical VPP interface", proxyEgress.ID, wanID)
+			}
+			if _, exists := wanAssignments[linuxInterface]; !exists {
+				return nil, fmt.Errorf("proxy egress %q underlay WAN %q is not covered by smart QoS", proxyEgress.ID, wanID)
+			}
+		}
+	}
+
+	var aggregateDownloadKbps uint64
+	for _, downloadKbps := range downloadByWAN {
+		if ^uint64(0)-aggregateDownloadKbps < downloadKbps {
+			return nil, fmt.Errorf("aggregate WAN download bandwidth overflows")
+		}
+		aggregateDownloadKbps += downloadKbps
+	}
+
+	assignments := make([]vpp.AddressAssignment, 0, len(addressAssignments)+len(wanOrder))
+	seenLAN := map[string]struct{}{}
+	for _, assignment := range addressAssignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			continue
+		}
+		if _, duplicate := seenLAN[assignment.VPPInterface]; duplicate {
+			continue
+		}
+		seenLAN[assignment.VPPInterface] = struct{}{}
+		if aggregateDownloadKbps > 0 {
+			assignment.BandwidthKbps = aggregateDownloadKbps
+		}
+		assignments = append(assignments, assignment)
+	}
+	for _, linuxInterface := range wanOrder {
+		assignments = append(assignments, wanAssignments[linuxInterface])
+	}
+	return assignments, nil
+}
+
+func (server *Server) proxyUnderlayWANIDs(ctx context.Context, egress proxy.Egress) ([]string, error) {
+	underlayID := strings.TrimSpace(egress.UnderlayWANID)
+	if underlayID == "" {
+		// Legacy in-memory callers may omit the field. A persisted/UI-created
+		// proxy egress is validated before it reaches runtime; leave selection to
+		// the single-WAN fallback below for those callers.
+		return nil, nil
+	}
+	if item, ok, err := server.desiredItem(ctx, "wan_link", underlayID); err != nil {
+		return nil, err
+	} else if ok {
+		if !desiredEnabled(item) {
+			return nil, fmt.Errorf("proxy egress %q underlay WAN %q is disabled", egress.ID, underlayID)
+		}
+		return []string{underlayID}, nil
+	}
+	if group, ok, err := server.desiredItem(ctx, "wan_group", underlayID); err != nil {
+		return nil, err
+	} else if ok {
+		if !desiredEnabled(group) {
+			return nil, fmt.Errorf("proxy egress %q underlay WAN group %q is disabled", egress.ID, underlayID)
+		}
+		members := wanGroupMemberIDs(group)
+		if len(members) == 0 {
+			return nil, fmt.Errorf("proxy egress %q underlay WAN group %q has no members", egress.ID, underlayID)
+		}
+		for _, memberID := range members {
+			item, exists, lookupErr := server.desiredItem(ctx, "wan_link", memberID)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if !exists || !desiredEnabled(item) {
+				return nil, fmt.Errorf("proxy egress %q underlay WAN group %q member %q is unavailable", egress.ID, underlayID, memberID)
+			}
+		}
+		return members, nil
+	}
+	return nil, fmt.Errorf("proxy egress %q references unknown underlay WAN %q", egress.ID, underlayID)
+}
+
 func smartQoSBandwidthKbps(item map[string]any, role string) uint64 {
 	keys := []string{"smart_qos_bandwidth_kbps", "bandwidth_kbps"}
 	if strings.EqualFold(strings.TrimSpace(role), "lan") {
@@ -3433,7 +3944,7 @@ func (server *Server) validateDesiredRuntimePayload(ctx context.Context, resourc
 		_, err := nat.CompileConfig([]map[string]any{payload}, nil)
 		return err
 	case "port_map":
-		wanItems, err := server.desiredItems(ctx, "wan_link")
+		wanItems, err := server.natWANItems(ctx)
 		if err != nil {
 			return err
 		}
@@ -3446,6 +3957,16 @@ func (server *Server) validateDesiredRuntimePayload(ctx context.Context, resourc
 		}
 		_, err = flow.CompileIntent(intent)
 		return err
+	case "dhcp_server":
+		assignments, err := server.runtimeAddressAssignments(ctx)
+		if err != nil {
+			return err
+		}
+		interfaceID := strings.TrimSpace(stringField(payload, "interface_id"))
+		if _, ok := server.dhcpLANControlInterface(ctx, interfaceID, assignments); !ok {
+			return fmt.Errorf("DHCP service interface %s is not a configured logical LAN", interfaceID)
+		}
+		return nil
 	case "security_acl":
 		groups, err := server.desiredItems(ctx, "object_group")
 		if err != nil {
@@ -3459,6 +3980,9 @@ func (server *Server) validateDesiredRuntimePayload(ctx context.Context, resourc
 		}
 		if lowCopyRequested(payload) {
 			return fmt.Errorf("poc_failed: low-copy proxy handoff requires Task 16 PASS")
+		}
+		if stringField(payload, "node_id") != "" && stringField(payload, "subscription_id") != "" {
+			return fmt.Errorf("proxy_egress node_id and subscription_id are mutually exclusive")
 		}
 		return nil
 	case "wan_group":
@@ -3697,7 +4221,7 @@ func normalizeWANLinkPayload(payload map[string]any) {
 		payload["ipv6"] = map[string]any{"mode": wanIPv6Mode(wanType), "ra": wanType == "dhcp", "dhcpv6": wanType == "dhcp", "prefix_delegation": wanType == "dhcp" || wanType == "pppoe"}
 	}
 	if _, ok := payload["passive_state"]; !ok {
-		payload["passive_state"] = map[string]any{"removal_triggers": []string{"link_down", "pppd_down", "dhcp_lease_expired"}, "auto_rejoin": true, "active_health_checks": false}
+		payload["passive_state"] = map[string]any{"removal_triggers": []string{"link_down", "pppoe_session_down", "dhcp_lease_expired"}, "auto_rejoin": true, "active_health_checks": false}
 	}
 	if wanType == "pppoe" {
 		if secret := firstStringField(payload, "password", "pppoe_password"); secret != "" {
@@ -3715,17 +4239,47 @@ func normalizeWANGroupPayload(payload map[string]any) {
 		payload["load_balance"] = map[string]any{"mode": "per_connection_weighted"}
 	}
 	if _, ok := payload["passive_state"]; !ok {
-		payload["passive_state"] = map[string]any{"removal_triggers": []string{"link_down", "pppd_down", "dhcp_lease_expired"}, "auto_rejoin": true, "active_health_checks": false}
+		payload["passive_state"] = map[string]any{"removal_triggers": []string{"link_down", "pppoe_session_down", "dhcp_lease_expired"}, "auto_rejoin": true, "active_health_checks": false}
 	}
 }
 
 func redactProxyDesiredPayload(payload map[string]any) {
-	for _, key := range []string{"secret", "token", "password", "url", "subscription_url"} {
+	for _, key := range []string{"secret", "token", "password", "url", "subscription_url", "uri"} {
 		if value := stringField(payload, key); value != "" {
 			payload[key+"_redacted"] = "redacted"
 			delete(payload, key)
 		}
 	}
+}
+
+func normalizeProxyNodeURIPayload(payload map[string]any) error {
+	raw := strings.TrimSpace(stringField(payload, "uri"))
+	if raw == "" {
+		address := strings.TrimSpace(stringField(payload, "address"))
+		if strings.Contains(address, "://") {
+			raw = address
+		}
+	}
+	if raw == "" {
+		return nil
+	}
+	node, err := proxy.ParseNodeURI(raw)
+	if err != nil {
+		return fmt.Errorf("proxy node URI: %w", err)
+	}
+	if stringField(payload, "id") == "" {
+		payload["id"] = node.ID
+	}
+	if stringField(payload, "name") == "" {
+		payload["name"] = node.Name
+	}
+	payload["protocol"] = node.Protocol
+	payload["address"] = node.Address
+	payload["port"] = node.Port
+	payload["secret"] = node.Secret
+	payload["settings"] = node.Settings
+	payload["uri"] = raw
+	return nil
 }
 
 func extractDesiredSecrets(resourceType string, payload map[string]any) map[string]string {
@@ -4164,6 +4718,21 @@ func (server *Server) handleRuntimeApply(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": result.Status, "runtime_state": result.RuntimeState, "reason": result.Reason, "transaction_id": transactionID, "request_id": requestID(r)})
 		return
 	}
+	if plan.DataplaneState == "dataplane_locked" && len(plan.GatewayPlan.NativePath.Assignments) > 0 {
+		reason := "dataplane prerequisites are not satisfied"
+		if len(plan.Warnings) > 0 && strings.TrimSpace(plan.Warnings[0]) != "" {
+			reason = plan.Warnings[0]
+		}
+		result := degradedRuntimeResult(transactionID, reason, server.now().UTC())
+		result.Status = "dataplane_locked"
+		result.GatewayPlan = &plan.GatewayPlan
+		result.Components = plan.Components
+		if recordErr := server.recordRuntimeApply(r.Context(), result, session, r); recordErr != nil {
+			result.Reason += ": audit persistence: " + recordErr.Error()
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": result.Status, "runtime_state": result.RuntimeState, "reason": result.Reason, "transaction_id": transactionID, "components": result.Components, "dataplane_prerequisites": plan.DataplaneProof, "request_id": requestID(r)})
+		return
+	}
 	if !server.serviceRuntimeConfigured() {
 		result := degradedRuntimeResult(transactionID, "service runtime controller is not configured", server.now().UTC())
 		result.Status = "unavailable"
@@ -4178,14 +4747,14 @@ func (server *Server) handleRuntimeApply(w http.ResponseWriter, r *http.Request)
 	}
 	serviceArtifacts := runtimeServiceArtifacts(plan.RuntimeArtifacts, server.gatewayTransaction != nil)
 	evidenceRequest := RuntimeEvidenceRequest{TransactionID: transactionID, Capability: "/api/v1/runtime/apply", Artifacts: serviceArtifacts}
-	appliedArtifacts := serviceArtifacts
+	var appliedArtifacts []serviceRuntime.RenderedArtifact
 	var capabilityFailures []apply.CapabilityFailureEvidence
 	executor := apply.Executor{
 		Store:   server.store,
 		Now:     server.now,
 		Gateway: server.gatewayTransaction,
 		Apply: func(ctx context.Context, _ apply.Plan) error {
-			report := server.services.ApplyCapabilities(ctx, serviceArtifacts)
+			report := server.services.ApplyCapabilitiesForTransaction(ctx, transactionID, serviceArtifacts)
 			appliedArtifacts = report.AppliedArtifacts
 			capabilityFailures = serviceFailureEvidence(report.Failures)
 			evidenceRequest.Artifacts = appliedArtifacts
@@ -4254,7 +4823,7 @@ func (server *Server) handleRuntimeApply(w http.ResponseWriter, r *http.Request)
 	}
 	result := RuntimeApplyResult{Status: resultStatus, RuntimeState: state, TransactionID: transactionID, Reason: reason, Components: components, Applied: artifactServiceNames(appliedArtifacts), SnapshotHash: runtimePlanHash(plan), AppliedAt: server.now().UTC(), Receipt: receipt, Readback: readback, GatewayPlan: &plan.GatewayPlan, GatewayEvidence: execution.GatewayResult.Evidence, CapabilityFailures: capabilityFailures}
 	server.setRuntimeEvidence(result)
-	writeJSON(w, statusCode, map[string]any{"status": result.Status, "runtime_state": result.RuntimeState, "reason": result.Reason, "transaction_id": transactionID, "components": components, "applied_services": result.Applied, "snapshot_hash": result.SnapshotHash, "request_id": requestID(r)})
+	writeJSON(w, statusCode, map[string]any{"status": result.Status, "runtime_state": result.RuntimeState, "reason": result.Reason, "transaction_id": transactionID, "components": components, "applied_services": result.Applied, "capability_failures": result.CapabilityFailures, "snapshot_hash": result.SnapshotHash, "request_id": requestID(r)})
 }
 
 func (server *Server) refreshVPPNativeProof(ctx context.Context) error {
@@ -4317,9 +4886,11 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 	if err != nil {
 		return RuntimePlan{}, err
 	}
+	var smartQoSAssignments []vpp.AddressAssignment
 	var compiledProxy proxy.CompiledEgress
 	var compiledFlow flow.CompiledIntent
 	var artifacts []serviceRuntime.RenderedArtifact
+	var dnsServiceNetworks []vpp.DNSServiceNetwork
 	var planningWarnings []string
 	proxyRuntimeWarning := ""
 	var proxyEgresses []proxy.Egress
@@ -4330,24 +4901,15 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 			return RuntimePlan{}, err
 		}
 		proxyEgresses = []proxy.Egress{proxyEgress}
-		proxyRuntimeWarning = server.compileProxySubscription(ctx, &compiledProxy)
+		proxyRuntimeWarning = server.compileProxySubscription(ctx, proxyEgress, &compiledProxy)
 		if proxyRuntimeWarning != "" {
 			planningWarnings = append(planningWarnings, proxyRuntimeWarning)
 			degradeProxyRuntime(&compiledProxy)
-		} else {
-			xrayArtifacts, err := serviceRuntime.RenderXray(compiledProxy)
-			if err != nil {
-				return RuntimePlan{}, err
-			}
-			artifacts = append(artifacts, xrayArtifacts...)
-			if compiledProxy.LinuxPolicyRouting.EgressID != "" {
-				routingArtifacts, err := serviceRuntime.RenderLinuxPolicyRouting(compiledProxy.LinuxPolicyRouting)
-				if err != nil {
-					return RuntimePlan{}, err
-				}
-				artifacts = append(artifacts, routingArtifacts...)
-			}
 		}
+	}
+	smartQoSAssignments, err = server.runtimeSmartQoSAssignments(ctx, addressAssignments, proxyEgress, hasProxyEgress && proxyRuntimeWarning == "")
+	if err != nil {
+		return RuntimePlan{}, err
 	}
 	if hasFlowIntent {
 		var err error
@@ -4368,15 +4930,55 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 	if err != nil {
 		return RuntimePlan{}, err
 	}
+	if hasProxyEgress && proxyRuntimeWarning == "" {
+		underlayRoute, resolveErr := server.proxyUnderlayRoute(ctx, proxyEgress, compiledPolicy)
+		if resolveErr != nil {
+			return RuntimePlan{}, resolveErr
+		}
+		underlayMTU, resolveErr := server.proxyUnderlayMTU(ctx, proxyEgress)
+		if resolveErr != nil {
+			return RuntimePlan{}, resolveErr
+		}
+		if bindErr := proxy.BindServiceNetwork(&compiledProxy, underlayRoute, proxyLANRoutes(addressAssignments), underlayMTU); bindErr != nil {
+			return RuntimePlan{}, bindErr
+		}
+		xrayArtifacts, renderErr := serviceRuntime.RenderXray(compiledProxy)
+		if renderErr != nil {
+			return RuntimePlan{}, renderErr
+		}
+		artifacts = append(artifacts, xrayArtifacts...)
+	}
 	securityGeneration, err := server.currentSecurityGeneration(ctx, compiledPolicy, addressAssignments)
 	if err != nil {
 		return RuntimePlan{}, err
 	}
-	dnsPolicies, dnsArtifacts, err := server.currentDNSPolicies(ctx, proxyEgresses)
+	dnsPolicies, dnsArtifacts, dnsNetworks, err := server.currentDNSPolicies(ctx, proxyEgresses, compiledPolicy)
 	if err != nil {
 		return RuntimePlan{}, err
 	}
+	dnsServiceNetworks = dnsNetworks
 	artifacts = append(artifacts, dnsArtifacts...)
+	if hasProxyEgress && proxyRuntimeWarning == "" {
+		if bindErr := proxy.BindServiceNetwork(
+			&compiledProxy,
+			compiledProxy.ServiceNetwork.UnderlayRoute,
+			proxyServiceReturnRoutes(addressAssignments, dnsServiceNetworks, proxyEgress.ID),
+			compiledProxy.ServiceNetwork.MTU,
+		); bindErr != nil {
+			return RuntimePlan{}, bindErr
+		}
+		routingArtifacts, renderErr := serviceRuntime.RenderLinuxPolicyRouting(compiledProxy.LinuxPolicyRouting, dnsServiceNetworks...)
+		if renderErr != nil {
+			return RuntimePlan{}, renderErr
+		}
+		artifacts = append(artifacts, routingArtifacts...)
+	} else if len(dnsServiceNetworks) > 0 {
+		routingArtifacts, renderErr := serviceRuntime.RenderDNSServiceRouting(dnsServiceNetworks)
+		if renderErr != nil {
+			return RuntimePlan{}, renderErr
+		}
+		artifacts = append(artifacts, routingArtifacts...)
+	}
 	dnsInterception := serviceRuntime.DNSInterceptionPlan{}
 	if strings.TrimSpace(compiledProxy.NftablesCapture.Table) != "" {
 		nftablesArtifacts, renderErr := serviceRuntime.RenderGatewayNftablesCapture(compiledProxy.NftablesCapture, dnsInterception)
@@ -4385,7 +4987,7 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 		}
 		artifacts = append(artifacts, nftablesArtifacts...)
 	}
-	dhcpPlans, dhcpArtifacts, err := server.currentDHCPServers(ctx)
+	dhcpPlans, dhcpArtifacts, err := server.currentDHCPServers(ctx, addressAssignments)
 	if err != nil {
 		return RuntimePlan{}, err
 	}
@@ -4413,7 +5015,9 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 		dataplanePrepared = composition.HasDataplaneController()
 	}
 	runtimePolicy := runtimePolicyForAddressAssignments(compiledPolicy, addressAssignments)
-	operations, err := vpp.BuildOperations(vpp.Plan{RequestID: requestID, NativePath: nativePath, DataplanePrepared: dataplanePrepared, AddressAssignments: addressAssignments, Proxy: compiledProxy, Flow: compiledFlow, NAT: compiledNAT, Policy: runtimePolicy, DNSInterception: dnsInterceptionEnabled})
+	selectedPath, selectionErr := vpp.SelectNativePath(nativePath)
+	smartQoSEnabled := selectionErr == nil && selectedPath.SmartQoS
+	operations, err := vpp.BuildOperations(vpp.Plan{RequestID: requestID, NativePath: nativePath, DataplanePrepared: dataplanePrepared, AddressAssignments: addressAssignments, SmartQoSAssignments: smartQoSAssignments, SmartQoSEnabled: smartQoSEnabled, Proxy: compiledProxy, Flow: compiledFlow, NAT: compiledNAT, Policy: runtimePolicy, DNSInterception: dnsInterceptionEnabled, DNSServiceNetworks: dnsServiceNetworks})
 	dataplaneState := "native_ready"
 	var dataplaneProof []vpp.PrerequisiteResult
 	warnings := append([]string(nil), planningWarnings...)
@@ -4428,11 +5032,9 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 		dataplaneProof = locked.Prerequisites
 		warnings = append(warnings, err.Error())
 	}
-	if err == nil {
-		if selectedPath, selectionErr := vpp.SelectNativePath(nativePath); selectionErr == nil && selectedPath.SmartQoS {
-			dataplaneState = "smart_qos_ready"
-			dataplaneProof = selectedPath.Prerequisites
-		}
+	if err == nil && smartQoSEnabled {
+		dataplaneState = "smart_qos_ready"
+		dataplaneProof = selectedPath.Prerequisites
 	}
 	if err == nil {
 		bondOperations, err := server.currentInterfaceBondOperations(ctx, requestID)
@@ -4487,7 +5089,7 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 		// a time and make ordered policy non-deterministic.
 		gatewayPolicy.SecurityACLs = nil
 	}
-	gatewayPlan := vpp.Plan{RequestID: requestID, NativePath: nativePath, AddressAssignments: addressAssignments, Interfaces: gatewayInterfaces, Bonds: gatewayBonds, Proxy: compiledProxy, Flow: gatewayFlow, NAT: compiledNAT, Policy: gatewayPolicy, Security: securityGeneration, DNSInterception: dnsInterceptionEnabled}
+	gatewayPlan := vpp.Plan{RequestID: requestID, NativePath: nativePath, AddressAssignments: addressAssignments, SmartQoSAssignments: smartQoSAssignments, SmartQoSEnabled: smartQoSEnabled, Interfaces: gatewayInterfaces, Bonds: gatewayBonds, Proxy: compiledProxy, Flow: gatewayFlow, NAT: compiledNAT, Policy: gatewayPolicy, Security: securityGeneration, DNSInterception: dnsInterceptionEnabled, DNSServiceNetworks: dnsServiceNetworks}
 	return RuntimePlan{ProxyEgress: proxyEgress, CompiledProxy: compiledProxy, FlowIntent: flowIntent, CompiledFlow: compiledFlow, CompiledNAT: compiledNAT, CompiledPolicy: compiledPolicy, DNSPolicies: dnsPolicies, ServiceArtifacts: summarizeRuntimeArtifacts(artifacts), RuntimeArtifacts: artifacts, VppOperations: operations, NftablesCapture: compiledProxy.NftablesCapture, DNSInterception: dnsInterception, LinuxPolicyRouting: compiledProxy.LinuxPolicyRouting, DHCPServers: dhcpPlans, PPPoEPeers: summarizePPPoEPeers(pppoePeers), Components: components, Warnings: warnings, DataplaneState: dataplaneState, DataplaneProof: dataplaneProof, GatewayPlan: gatewayPlan}, nil
 }
 
@@ -4531,7 +5133,17 @@ func runtimeServiceArtifacts(artifacts []serviceRuntime.RenderedArtifact, gatewa
 	if !gatewayInstalled {
 		return artifacts
 	}
-	return serviceRuntime.WithoutServices(artifacts, serviceRuntime.VPP)
+	// The typed gateway transaction already applied and verified the live VPP
+	// graph. Persist the same operation set for reboot/crash recovery without
+	// executing the legacy helper a second time.
+	result := serviceRuntime.PersistOnlyForServices(artifacts, serviceRuntime.VPP)
+	if len(artifactsForService(result, serviceRuntime.LinuxRouting)) == 0 {
+		// Reconcile an earlier proxy or DNS routing generation. Leaving its
+		// generated script in place lets systemd replay stale TAPs and FIBs when
+		// SmartDNS is restarted by an otherwise unrelated configuration apply.
+		result = append(result, serviceRuntime.LinuxRoutingResetArtifact())
+	}
+	return result
 }
 
 func (server *Server) currentNATConfig(ctx context.Context) (nat.CompiledConfig, error) {
@@ -4543,7 +5155,7 @@ func (server *Server) currentNATConfig(ctx context.Context) (nat.CompiledConfig,
 	if err != nil {
 		return nat.CompiledConfig{}, err
 	}
-	wanItems, err := server.desiredItems(ctx, "wan_link")
+	wanItems, err := server.natWANItems(ctx)
 	if err != nil {
 		return nat.CompiledConfig{}, err
 	}
@@ -4555,6 +5167,16 @@ func (server *Server) currentNATConfig(ctx context.Context) (nat.CompiledConfig,
 	if err != nil {
 		return nat.CompiledConfig{}, err
 	}
+	for index := range compiled.StaticMappings {
+		if path, ok := wanPaths[compiled.StaticMappings[index].WANInterface]; ok {
+			compiled.StaticMappings[index].WANNextHop = strings.TrimSpace(path.NextHop)
+		}
+	}
+	for index := range compiled.PortMappings {
+		if path, ok := wanPaths[compiled.PortMappings[index].WANInterface]; ok {
+			compiled.PortMappings[index].WANNextHop = strings.TrimSpace(path.NextHop)
+		}
+	}
 	bindings := make(map[string]string, len(wanPaths))
 	for id, path := range wanPaths {
 		bindings[id] = path.VPPInterface
@@ -4563,6 +5185,36 @@ func (server *Server) currentNATConfig(ctx context.Context) (nat.CompiledConfig,
 		return nat.CompiledConfig{}, err
 	}
 	return compiled, nil
+}
+
+func (server *Server) natWANItems(ctx context.Context) ([]map[string]any, error) {
+	items, err := server.desiredItems(ctx, "wan_link")
+	if err != nil {
+		return nil, err
+	}
+	return resolvePPPoENATWANAddresses(ctx, items, livePPPoEAddress), nil
+}
+
+type pppoeAddressLookup func(context.Context, string) (string, string, bool)
+
+func resolvePPPoENATWANAddresses(ctx context.Context, items []map[string]any, lookup pppoeAddressLookup) []map[string]any {
+	resolved := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		clone := make(map[string]any, len(item)+1)
+		for key, value := range item {
+			clone[key] = value
+		}
+		if strings.EqualFold(nonEmpty(stringField(clone, "wan_type"), stringField(clone, "type")), "pppoe") {
+			for _, key := range []string{"external_address", "current_address", "address", "ip", "ip_cidr", "cidr"} {
+				delete(clone, key)
+			}
+			if ipv4, _, ok := lookup(ctx, stringField(clone, "id")); ok && strings.TrimSpace(ipv4) != "" {
+				clone["current_address"] = strings.TrimSpace(ipv4)
+			}
+		}
+		resolved = append(resolved, clone)
+	}
+	return resolved
 }
 
 func (server *Server) natRebuildImpact(ctx context.Context, resourceType, id string, next map[string]any) map[string]any {
@@ -4619,6 +5271,10 @@ func (server *Server) currentTrafficPolicyConfig(ctx context.Context) (trafficpo
 		return trafficpolicy.Config{}, err
 	}
 	objectGroupItems, err := server.desiredItems(ctx, "object_group")
+	if err != nil {
+		return trafficpolicy.Config{}, err
+	}
+	objectGroupItems, err = materializeObjectGroupItems(objectGroupItems, referencedObjectGroupIDs(objectGroupItems, append(append([]map[string]any{}, routeItems...), securityItems...)))
 	if err != nil {
 		return trafficpolicy.Config{}, err
 	}
@@ -4747,7 +5403,16 @@ func (server *Server) currentWANGroupBindings(ctx context.Context) (map[string]t
 		if id == "" || linuxInterface == "" || !vppInterfaceNameSafe(linuxInterface) {
 			continue
 		}
-		bindings[id] = trafficpolicy.WANPath{VPPInterface: vppInterfaceName(linuxInterface), NextHop: wanNextHop(item)}
+		vppInterface := vppInterfaceName(linuxInterface)
+		nextHop := wanNextHop(item)
+		peerID := firstStringField(item, "pppoe_peer_id", "pppoe_id", "id")
+		if sessionInterface, sessionNextHop, connected := livePPPoEPath(ctx, peerID); connected {
+			vppInterface = sessionInterface
+			if sessionNextHop != "" {
+				nextHop = sessionNextHop
+			}
+		}
+		bindings[id] = trafficpolicy.WANPath{VPPInterface: vppInterface, NextHop: nextHop}
 	}
 	interfaceItems, err := server.desiredItems(ctx, "interface")
 	if err != nil {
@@ -4766,7 +5431,188 @@ func (server *Server) currentWANGroupBindings(ctx context.Context) (map[string]t
 			bindings[id] = trafficpolicy.WANPath{VPPInterface: vppInterfaceName(linuxInterface), NextHop: wanNextHop(item)}
 		}
 	}
+	proxyEgress, hasProxyEgress, err := server.runtimeProxyEgress(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if hasProxyEgress && strings.TrimSpace(proxyEgress.ID) != "" {
+		network := proxy.ServiceNetworkForEgressID(proxyEgress.ID)
+		bindings[proxyEgress.ID] = trafficpolicy.WANPath{
+			VPPInterface: network.IngressVPPInterface,
+			NextHop:      network.IngressHostAddress,
+		}
+	}
 	return bindings, nil
+}
+
+func (server *Server) proxyUnderlayRoute(ctx context.Context, egress proxy.Egress, policy trafficpolicy.Config) (string, error) {
+	underlayID := strings.TrimSpace(egress.UnderlayWANID)
+	if underlayID == "" {
+		bindings, err := server.currentWANGroupBindings(ctx)
+		if err != nil {
+			return "", err
+		}
+		candidates := make([]trafficpolicy.WANPath, 0, len(bindings))
+		for id, path := range bindings {
+			if id == egress.ID || strings.TrimSpace(path.VPPInterface) == "" {
+				continue
+			}
+			candidates = append(candidates, path)
+		}
+		if len(candidates) == 0 {
+			// This is retained for isolated unit/runtime fixtures only. The
+			// persisted configuration API rejects an unbound proxy egress.
+			return "local", nil
+		}
+		// Legacy in-memory callers predate the explicit underlay field. Keep
+		// those callers deterministic without weakening the persisted API
+		// validation above: the first sorted path is only a test/runtime
+		// compatibility fallback, never a UI-created configuration.
+		sort.Slice(candidates, func(i, j int) bool {
+			left := strings.TrimSpace(candidates[i].VPPInterface) + "\x00" + strings.TrimSpace(candidates[i].NextHop)
+			right := strings.TrimSpace(candidates[j].VPPInterface) + "\x00" + strings.TrimSpace(candidates[j].NextHop)
+			return left < right
+		})
+		path := candidates[0]
+		if strings.TrimSpace(path.NextHop) != "" {
+			return strings.TrimSpace(path.NextHop) + " " + strings.TrimSpace(path.VPPInterface), nil
+		}
+		return strings.TrimSpace(path.VPPInterface), nil
+	}
+	for _, group := range policy.WANGroups {
+		if group.ID == underlayID {
+			return fmt.Sprintf("ip4-lookup-in-table %d", vpp.WANGroupTableID(group.ID)), nil
+		}
+	}
+	bindings, err := server.currentWANGroupBindings(ctx)
+	if err != nil {
+		return "", err
+	}
+	path, exists := bindings[underlayID]
+	if !exists || strings.TrimSpace(path.VPPInterface) == "" {
+		return "", fmt.Errorf("proxy egress %q underlay %q has no live VPP path", egress.ID, underlayID)
+	}
+	if strings.TrimSpace(path.NextHop) != "" {
+		return strings.TrimSpace(path.NextHop) + " " + strings.TrimSpace(path.VPPInterface), nil
+	}
+	return strings.TrimSpace(path.VPPInterface), nil
+}
+
+func (server *Server) proxyUnderlayMTU(ctx context.Context, egress proxy.Egress) (int, error) {
+	wanIDs, err := server.proxyUnderlayWANIDs(ctx, egress)
+	if err != nil {
+		return 0, err
+	}
+	if len(wanIDs) == 0 {
+		return 1500, nil
+	}
+	effectiveMTU := 0
+	for _, wanID := range wanIDs {
+		item, exists, lookupErr := server.desiredItem(ctx, "wan_link", wanID)
+		if lookupErr != nil {
+			return 0, lookupErr
+		}
+		if !exists || !desiredEnabled(item) {
+			return 0, fmt.Errorf("proxy egress %q underlay WAN %q is unavailable", egress.ID, wanID)
+		}
+		mtu, mtuErr := wanLinkEffectiveMTU(item)
+		if mtuErr != nil {
+			return 0, fmt.Errorf("proxy egress %q underlay WAN %q: %w", egress.ID, wanID, mtuErr)
+		}
+		if effectiveMTU == 0 || mtu < effectiveMTU {
+			effectiveMTU = mtu
+		}
+	}
+	return effectiveMTU, nil
+}
+
+func (server *Server) dnsServiceUnderlayMTU(ctx context.Context, egressID string) (int, error) {
+	egressID = strings.TrimSpace(egressID)
+	if item, exists, err := server.desiredItem(ctx, "proxy_egress", egressID); err != nil {
+		return 0, err
+	} else if exists {
+		if !desiredEnabled(item) {
+			return 0, fmt.Errorf("DNS service egress %q is disabled", egressID)
+		}
+		underlayID := firstStringField(item, "underlay_wan_id", "underlay_wan")
+		if underlayID == "" {
+			return 0, fmt.Errorf("DNS service proxy egress %q has no underlay WAN", egressID)
+		}
+		return server.proxyUnderlayMTU(ctx, proxy.Egress{ID: egressID, UnderlayWANID: underlayID})
+	}
+	return server.proxyUnderlayMTU(ctx, proxy.Egress{ID: "dns-service-" + egressID, UnderlayWANID: egressID})
+}
+
+func wanLinkEffectiveMTU(item map[string]any) (int, error) {
+	wanType := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringField(item, "wan_type"), stringField(item, "type"))))
+	if wanType == "" {
+		if ipv4, ok := item["ipv4"].(map[string]any); ok {
+			wanType = strings.ToLower(strings.TrimSpace(stringField(ipv4, "mode")))
+		}
+	}
+	mtu := firstIntField(item, "mtu")
+	if mtu == 0 {
+		if wanType == "pppoe" {
+			mtu = 1492
+		} else {
+			mtu = 1500
+		}
+	}
+	if mru := firstIntField(item, "mru"); mru > 0 && mru < mtu {
+		mtu = mru
+	}
+	if mtu < 576 || mtu > 9000 {
+		return 0, fmt.Errorf("effective MTU %d is outside 576-9000", mtu)
+	}
+	return mtu, nil
+}
+
+func proxyLANRoutes(assignments []vpp.AddressAssignment) []string {
+	routes := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, assignment := range assignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(assignment.CIDR))
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		route := prefix.Masked().String()
+		if _, exists := seen[route]; exists {
+			continue
+		}
+		seen[route] = struct{}{}
+		routes = append(routes, route)
+	}
+	sort.Strings(routes)
+	return routes
+}
+
+func proxyServiceReturnRoutes(assignments []vpp.AddressAssignment, networks []vpp.DNSServiceNetwork, proxyEgressID string) []string {
+	routes := proxyLANRoutes(assignments)
+	seen := make(map[string]struct{}, len(routes)+len(networks))
+	for _, route := range routes {
+		seen[route] = struct{}{}
+	}
+	proxyEgressID = strings.TrimSpace(proxyEgressID)
+	for _, network := range networks {
+		if proxyEgressID == "" || strings.TrimSpace(network.WANEgressID) != proxyEgressID {
+			continue
+		}
+		address, err := netip.ParseAddr(strings.TrimSpace(network.HostAddress))
+		if err != nil || !address.Is4() {
+			continue
+		}
+		route := netip.PrefixFrom(address, 32).String()
+		if _, exists := seen[route]; exists {
+			continue
+		}
+		seen[route] = struct{}{}
+		routes = append(routes, route)
+	}
+	sort.Strings(routes)
+	return routes
 }
 
 func wanNextHop(item map[string]any) string {
@@ -4971,56 +5817,75 @@ func (server *Server) runtimeFlowIntent(ctx context.Context) (flow.Intent, bool,
 	return server.flowIntent, server.runtimeFlowConfigured, nil
 }
 
-func (server *Server) currentDNSPolicies(ctx context.Context, proxyEgresses []proxy.Egress) ([]DNSPolicyResource, []serviceRuntime.RenderedArtifact, error) {
+func (server *Server) currentDNSPolicies(ctx context.Context, proxyEgresses []proxy.Egress, trafficPolicy trafficpolicy.Config) ([]DNSPolicyResource, []serviceRuntime.RenderedArtifact, []vpp.DNSServiceNetwork, error) {
 	var resources []DNSPolicyResource
-	upstreams, cache, err := server.currentDNSUpstreams(ctx)
+	upstreams, cache, networks, err := server.currentDNSUpstreams(ctx, trafficPolicy)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	domainSets, err := server.currentDNSDomainSets(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	plans := make([]serviceRuntime.SmartDNSPlan, 0)
 	if server.store != nil {
 		documents, err := server.store.Policies(ctx, "dns-policy")
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, document := range documents {
 			resource, err := server.dnsPolicyResource(ctx, document.PolicyID, document.PolicyID, document.Enabled, document.Payload)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
+			resource.Priority = normalizedDNSPolicyPriority(document.Priority)
 			resources = append(resources, resource)
-			render := resource.Render
-			if !document.Enabled {
-				neutralPolicy := dns.NewPolicy(dns.Reject(), []dns.Rule{})
-				compiled, err := dns.CompilePolicy(neutralPolicy, proxyEgresses)
-				if err != nil {
-					return nil, nil, err
-				}
-				render = compiled.RenderSmartDNS()
-			}
-			plans = append(plans, serviceRuntime.SmartDNSPlan{ID: resource.ID, Render: render, Upstreams: upstreams, Cache: cache, DomainSets: domainSets})
 		}
-		if len(plans) > 0 {
-			artifacts, err := serviceRuntime.RenderSmartDNSBundle(plans)
-			return resources, artifacts, err
+		if len(resources) > 0 {
+			// SmartDNS evaluates one global rule set.  Render the same merged
+			// first-match policy used by the decision endpoint instead of
+			// concatenating independent fragments with conflicting miss rules.
+			active, activeErr := server.activeDNSPolicyResource(ctx)
+			if activeErr != nil {
+				return nil, nil, nil, activeErr
+			}
+			artifacts, renderErr := serviceRuntime.RenderSmartDNSBundle([]serviceRuntime.SmartDNSPlan{{ID: "active", Render: active.Render, Upstreams: upstreams, Cache: cache, DomainSets: domainSets}})
+			if renderErr != nil {
+				return nil, nil, nil, renderErr
+			}
+			return resources, artifacts, networks, nil
 		}
 	}
 	policy := dns.NewPolicy(dns.Reject(), []dns.Rule{})
 	compiled, err := dns.CompilePolicy(policy, proxyEgresses)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	resource := DNSPolicyResource{ID: "default", Kind: "policy", Name: "Default DNS Policy", Enabled: true, Policy: policy, Render: compiled.RenderSmartDNS(), Capabilities: []controlapi.CapabilityState{{Name: "smartdns", Available: false, State: controlapi.CapabilityDegraded, Reason: "SmartDNS process manager not wired"}}}
+	resource := DNSPolicyResource{ID: "default", Kind: "policy", Name: "Default DNS Policy", Priority: 1000, Enabled: true, Policy: policy, Render: compiled.RenderSmartDNS(), Capabilities: []controlapi.CapabilityState{{Name: "smartdns", Available: false, State: controlapi.CapabilityDegraded, Reason: "SmartDNS process manager not wired"}}}
 	artifacts, err := serviceRuntime.RenderSmartDNSBundle([]serviceRuntime.SmartDNSPlan{{ID: resource.ID, Render: resource.Render, Upstreams: upstreams, Cache: cache, DomainSets: domainSets}})
-	return []DNSPolicyResource{resource}, artifacts, err
+	return []DNSPolicyResource{resource}, artifacts, networks, err
 }
 
 func (server *Server) currentDNSDomainSets(ctx context.Context) (map[string][]string, error) {
+	var consumers []map[string]any
+	if server.store != nil {
+		if documents, policyErr := server.store.Policies(ctx, "dns-policy"); policyErr == nil {
+			for _, document := range documents {
+				var payload map[string]any
+				if json.Unmarshal(document.Payload, &payload) == nil {
+					consumers = append(consumers, payload)
+				}
+			}
+		}
+	}
+	return server.currentDNSDomainSetsFor(ctx, consumers)
+}
+
+func (server *Server) currentDNSDomainSetsFor(ctx context.Context, consumers []map[string]any) (map[string][]string, error) {
 	items, err := server.desiredItems(ctx, "object_group")
+	if err != nil {
+		return nil, err
+	}
+	items, err = materializeObjectGroupItems(items, referencedObjectGroupIDs(items, consumers))
 	if err != nil {
 		return nil, err
 	}
@@ -5041,47 +5906,188 @@ func (server *Server) currentDNSDomainSets(ctx context.Context) (map[string][]st
 	return sets, nil
 }
 
-func (server *Server) currentDNSUpstreams(ctx context.Context) ([]serviceRuntime.SmartDNSUpstream, serviceRuntime.SmartDNSCache, error) {
-	items, err := server.desiredItems(ctx, "dns_upstream")
-	if err != nil {
-		return nil, serviceRuntime.SmartDNSCache{}, err
+// dnsServiceResolverServers converts hostname-based DoH endpoints into the
+// IPv4 resolver set used by the VPP service-network underlay. SmartDNS keeps
+// the original DoH URL; VPP only needs reachable bootstrap resolvers for the
+// service-network route. Explicit IPv4 upstreams remain part of the set.
+func dnsServiceResolverServers(servers, bootstrapServers []string) []string {
+	resolvers := make([]string, 0, len(servers)+len(bootstrapServers))
+	hasDoH := false
+	for _, server := range servers {
+		if serviceRuntime.IsDoHServer(server) {
+			hasDoH = true
+			continue
+		}
+		resolvers = append(resolvers, server)
 	}
-	wanItems, err := server.desiredItems(ctx, "wan_link")
-	if err != nil {
-		return nil, serviceRuntime.SmartDNSCache{}, err
+	if hasDoH {
+		resolvers = append(resolvers, bootstrapServers...)
 	}
-	wanInterfaces := map[string]string{}
-	for _, wan := range wanItems {
-		id := stringField(wan, "id")
-		interfaceID := server.resolveInterfaceID(ctx, firstNonEmpty(stringField(wan, "interface_id"), stringField(wan, "id"), stringField(wan, "name")))
-		if id != "" && interfaceID != "" {
-			wanInterfaces[id] = interfaceID
+	return resolvers
+}
+
+// dnsBootstrapProfilesFromPolicy derives the built-in bootstrap resolver
+// profile from the DNS policy that selected each upstream.  The profile is a
+// property of the lookup rule, not of the DoH URL: a rule using a geosite
+// group must be bootstrapped through domestic resolvers, while an otherwise
+// identical DoH upstream used by a non-geosite/default rule uses foreign
+// resolvers.  Explicit bootstrap_profile/bootstrap_servers fields remain
+// authoritative and are handled by currentDNSUpstreams.
+func (server *Server) dnsBootstrapProfilesFromPolicy(ctx context.Context) (map[string]string, error) {
+	profiles := make(map[string]string)
+	if server.store == nil {
+		return profiles, nil
+	}
+	documents, err := server.store.Policies(ctx, "dns-policy")
+	if err != nil {
+		return nil, err
+	}
+	groups, err := server.desiredItems(ctx, "object_group")
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]map[string]any, len(groups))
+	for _, group := range groups {
+		if id := stringField(group, "id"); id != "" {
+			byID[id] = group
 		}
 	}
+	setProfile := func(outcome dns.Outcome, domestic bool) {
+		id := strings.TrimSpace(outcome.UpstreamID)
+		if id == "" {
+			return
+		}
+		if domestic {
+			// Domestic wins if an upstream is intentionally shared by more than
+			// one rule; using foreign bootstrap for a geosite rule is unsafe.
+			profiles[id] = string(serviceRuntime.DNSBootstrapDomestic)
+			return
+		}
+		if _, exists := profiles[id]; !exists {
+			profiles[id] = string(serviceRuntime.DNSBootstrapForeign)
+		}
+	}
+	for _, document := range documents {
+		if !document.Enabled {
+			continue
+		}
+		var policy dns.Policy
+		if err := json.Unmarshal(document.Payload, &policy); err != nil {
+			return nil, fmt.Errorf("decode DNS policy %q for bootstrap profile: %w", document.PolicyID, err)
+		}
+		setProfile(policy.Miss, false)
+		for _, rule := range policy.Rules {
+			domestic := false
+			for _, selector := range rule.DomainSetIDs {
+				selector = strings.TrimSpace(selector)
+				if selector == "" {
+					continue
+				}
+				group := byID[selector]
+				if group == nil {
+					// Keep compatibility with imported geosite selectors whose
+					// source metadata is not materialized in the desired store.
+					domestic = strings.Contains(strings.ToLower(selector), "geosite")
+				} else if dnsObjectGroupIsGeoSite(group) {
+					domestic = true
+				}
+				if domestic {
+					break
+				}
+			}
+			for _, domain := range rule.Domains {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(domain)), "geosite:") {
+					domestic = true
+					break
+				}
+			}
+			setProfile(rule.Outcome, domestic)
+		}
+	}
+	return profiles, nil
+}
+
+func dnsObjectGroupIsGeoSite(group map[string]any) bool {
+	source, _ := group["source"].(map[string]any)
+	format := strings.ToLower(strings.TrimSpace(firstStringField(source, "format", "type")))
+	provider := strings.ToLower(strings.TrimSpace(stringField(source, "provider")))
+	name := strings.ToLower(strings.TrimSpace(firstStringField(group, "id", "name")))
+	return format == "geosite" || strings.Contains(provider, "geosite") || strings.Contains(name, "geosite")
+}
+
+func (server *Server) currentDNSUpstreams(ctx context.Context, policy trafficpolicy.Config) ([]serviceRuntime.SmartDNSUpstream, serviceRuntime.SmartDNSCache, []vpp.DNSServiceNetwork, error) {
+	items, err := server.desiredItems(ctx, "dns_upstream")
+	if err != nil {
+		return nil, serviceRuntime.SmartDNSCache{}, nil, err
+	}
+	bootstrapProfiles, err := server.dnsBootstrapProfilesFromPolicy(ctx)
+	if err != nil {
+		return nil, serviceRuntime.SmartDNSCache{}, nil, err
+	}
 	upstreams := make([]serviceRuntime.SmartDNSUpstream, 0, len(items))
+	networks := make([]vpp.DNSServiceNetwork, 0, len(items))
 	cache := serviceRuntime.SmartDNSCache{}
 	for _, item := range items {
 		if enabled, ok := item["enabled"].(bool); ok && !enabled {
 			continue
 		}
 		wanID := stringField(item, "wan_egress_id")
-		interfaceID := server.resolveInterfaceID(ctx, stringField(item, "interface_id"))
-		if wanID != "" && interfaceID == "" {
-			interfaceID = wanInterfaces[wanID]
+		servers := stringSliceField(item, "servers")
+		bootstrapProfile := firstStringField(item, "bootstrap_profile", "bootstrap_dns_profile")
+		bootstrapServers := stringSliceField(item, "bootstrap_servers")
+		if len(bootstrapServers) == 0 && bootstrapProfile != "" {
+			bootstrapServers = serviceRuntime.BuiltinDNSBootstrap(bootstrapProfile).BootstrapServers
 		}
-		upstreams = append(upstreams, serviceRuntime.SmartDNSUpstream{ID: stringField(item, "id"), Servers: stringSliceField(item, "servers"), Interface: interfaceID, WANEgressID: wanID})
+		if bootstrapProfile == "" {
+			bootstrapProfile = bootstrapProfiles[stringField(item, "id")]
+			if bootstrapProfile == "" {
+				lowerID := strings.ToLower(stringField(item, "id"))
+				if strings.Contains(lowerID, "domestic") || strings.Contains(lowerID, "cn") {
+					bootstrapProfile = string(serviceRuntime.DNSBootstrapDomestic)
+				} else if slices.ContainsFunc(servers, serviceRuntime.IsDoHServer) {
+					bootstrapProfile = string(serviceRuntime.DNSBootstrapForeign)
+				}
+			}
+		}
+		if len(bootstrapServers) == 0 && slices.ContainsFunc(servers, serviceRuntime.IsDoHServer) {
+			bootstrapServers = serviceRuntime.BuiltinDNSBootstrap(bootstrapProfile).BootstrapServers
+		}
+		interfaceID := server.resolveInterfaceID(ctx, stringField(item, "interface_id"))
+		if wanID != "" {
+			serviceResolvers := dnsServiceResolverServers(servers, bootstrapServers)
+			network, networkErr := vpp.DNSServiceNetworkForUpstreamID(stringField(item, "id"), wanID, serviceResolvers)
+			if networkErr != nil {
+				return nil, serviceRuntime.SmartDNSCache{}, nil, networkErr
+			}
+			underlayRoute, routeErr := server.proxyUnderlayRoute(ctx, proxy.Egress{ID: "dns-service-" + network.UpstreamID, UnderlayWANID: wanID}, policy)
+			if routeErr != nil {
+				return nil, serviceRuntime.SmartDNSCache{}, nil, fmt.Errorf("DNS upstream %q cannot resolve its VPP WAN route: %w", network.UpstreamID, routeErr)
+			}
+			underlayMTU, mtuErr := server.dnsServiceUnderlayMTU(ctx, wanID)
+			if mtuErr != nil {
+				return nil, serviceRuntime.SmartDNSCache{}, nil, fmt.Errorf("DNS upstream %q cannot resolve its WAN MTU: %w", network.UpstreamID, mtuErr)
+			}
+			if bindErr := vpp.BindDNSServiceNetwork(&network, underlayRoute, underlayMTU); bindErr != nil {
+				return nil, serviceRuntime.SmartDNSCache{}, nil, bindErr
+			}
+			interfaceID = network.HostInterface
+			networks = append(networks, network)
+		}
+		upstreams = append(upstreams, serviceRuntime.SmartDNSUpstream{ID: stringField(item, "id"), Servers: servers, BootstrapServers: bootstrapServers, Interface: interfaceID, WANEgressID: wanID})
 		candidate := serviceRuntime.SmartDNSCache{Size: firstIntField(item, "cache_size"), TTLMin: firstIntField(item, "ttl_min_seconds", "rr_ttl_min"), TTLMax: firstIntField(item, "ttl_max_seconds", "rr_ttl_max"), Prefetch: truthy(item["prefetch"])}
 		if candidate != (serviceRuntime.SmartDNSCache{}) {
 			if cache != (serviceRuntime.SmartDNSCache{}) && cache != candidate {
-				return nil, serviceRuntime.SmartDNSCache{}, fmt.Errorf("SmartDNS cache settings must be uniform across enabled upstreams")
+				return nil, serviceRuntime.SmartDNSCache{}, nil, fmt.Errorf("SmartDNS cache settings must be uniform across enabled upstreams")
 			}
 			cache = candidate
 		}
 	}
-	return upstreams, cache, nil
+	sort.Slice(upstreams, func(left, right int) bool { return upstreams[left].ID < upstreams[right].ID })
+	sort.Slice(networks, func(left, right int) bool { return networks[left].UpstreamID < networks[right].UpstreamID })
+	return upstreams, cache, networks, nil
 }
 
-func (server *Server) currentDHCPServers(ctx context.Context) ([]serviceRuntime.KeaDHCP4Plan, []serviceRuntime.RenderedArtifact, error) {
+func (server *Server) currentDHCPServers(ctx context.Context, assignments []vpp.AddressAssignment) ([]serviceRuntime.KeaDHCP4Plan, []serviceRuntime.RenderedArtifact, error) {
 	items, err := server.desiredItems(ctx, "dhcp_server")
 	if err != nil {
 		return nil, nil, err
@@ -5095,7 +6101,13 @@ func (server *Server) currentDHCPServers(ctx context.Context) ([]serviceRuntime.
 		if enabled, ok := item["enabled"].(bool); ok && !enabled {
 			continue
 		}
-		plan := serviceRuntime.KeaDHCP4Plan{ID: stringField(item, "id"), InterfaceID: stringField(item, "interface_id"), Subnet: stringField(item, "subnet"), Pools: stringSliceField(item, "pools"), Routers: stringSliceField(item, "routers"), NameServers: stringSliceField(item, "name_servers"), LeaseTime: firstIntField(item, "lease_time_seconds", "valid_lifetime", "valid_lifetime_seconds")}
+		configuredInterface := stringField(item, "interface_id")
+		controlInterface, ok := server.dhcpLANControlInterface(ctx, configuredInterface, assignments)
+		if !ok {
+			return nil, nil, fmt.Errorf("DHCP service interface %s is not a configured logical LAN", configuredInterface)
+		}
+		routers := stringSliceField(item, "routers")
+		plan := serviceRuntime.KeaDHCP4Plan{ID: stringField(item, "id"), InterfaceID: controlInterface, Subnet: stringField(item, "subnet"), Pools: stringSliceField(item, "pools"), Routers: routers, NameServers: dhcpNameServers(stringSliceField(item, "name_servers"), routers), LeaseTime: firstIntField(item, "lease_time_seconds", "valid_lifetime", "valid_lifetime_seconds")}
 		plan.Reservations = reservationsForDHCPPlan(plan, reservations)
 		if plan.ID == "" || plan.InterfaceID == "" || plan.Subnet == "" || len(plan.Pools) == 0 {
 			continue
@@ -5110,6 +6122,32 @@ func (server *Server) currentDHCPServers(ctx context.Context) ([]serviceRuntime.
 		return nil, nil, err
 	}
 	return plans, artifacts, nil
+}
+
+func dhcpNameServers(configured, routers []string) []string {
+	if len(configured) > 0 {
+		return append([]string(nil), configured...)
+	}
+	return append([]string(nil), routers...)
+}
+
+func (server *Server) dhcpLANControlInterface(ctx context.Context, interfaceID string, assignments []vpp.AddressAssignment) (string, bool) {
+	interfaceID = strings.TrimSpace(interfaceID)
+	resolved := server.resolveInterfaceID(ctx, interfaceID)
+	if resolved == "" {
+		resolved = interfaceID
+	}
+	for _, assignment := range assignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			continue
+		}
+		linuxInterface := strings.TrimSpace(assignment.LinuxInterface)
+		if resolved != linuxInterface && interfaceID != strings.TrimSpace(assignment.ID) && interfaceID != strings.TrimSpace(assignment.VPPInterface) {
+			continue
+		}
+		return vpp.LANControlPlaneHostInterface(linuxInterface), true
+	}
+	return "", false
 }
 
 func reservationsForDHCPPlan(plan serviceRuntime.KeaDHCP4Plan, reservations []serviceRuntime.KeaReservation) []serviceRuntime.KeaReservation {
@@ -5151,12 +6189,19 @@ func (server *Server) currentPPPoEPeers(ctx context.Context) ([]serviceRuntime.P
 	if err != nil {
 		return nil, nil, err
 	}
+	natInsideInterfaces, err := server.pppoeNATInsideInterfaces(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	var peers []serviceRuntime.PPPoEPeer
 	for _, item := range items {
 		if strings.ToLower(stringField(item, "type")) != "pppoe" {
 			continue
 		}
-		peer := server.pppoePeerFromDesired(ctx, item)
+		peer, err := server.pppoePeerFromDesired(ctx, item, natInsideInterfaces)
+		if err != nil {
+			return nil, nil, err
+		}
 		peers = append(peers, peer)
 	}
 	if len(peers) == 0 {
@@ -5177,58 +6222,72 @@ func (server *Server) applyLivePPPoEIPv6(ctx context.Context) error {
 		if strings.ToLower(stringField(ipv6, "mode")) != "delegated_prefix" || wanID == "" {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join("/run/ly-route/pppoe", wanID+".json"))
-		if err != nil {
-			return fmt.Errorf("WAN %s is not connected", wanID)
-		}
-		var status struct {
-			State     string `json:"state"`
-			Interface string `json:"interface"`
-			Session   struct {
-				LocalIPv6  string `json:"local_ipv6"`
-				RemoteIPv6 string `json:"remote_ipv6"`
-				IPv6Ready  bool   `json:"ipv6_ready"`
-			} `json:"session"`
-		}
-		if err := json.Unmarshal(content, &status); err != nil {
-			return err
-		}
-		if status.State != "connected" || status.Interface == "" || !status.Session.IPv6Ready {
-			return fmt.Errorf("WAN %s IPv6CP is not ready", wanID)
-		}
 		lanInterface := server.resolveInterfaceID(ctx, firstNonEmpty(stringField(lan, "interface_id"), stringField(lan, "id")))
 		if !strings.HasPrefix(lanInterface, "lyroute-") {
 			lanInterface = "lyroute-" + lanInterface
 		}
-		group := "ly-route-" + wanID
-		commands := [][]string{
-			{"enable", "ip6", "interface", status.Interface},
-		}
-		if status.Session.LocalIPv6 != "" {
-			commands = append(commands, []string{"set", "interface", "ip", "address", status.Interface, status.Session.LocalIPv6 + "/128"})
-		}
-		commands = append(commands,
-			[]string{"enable", "ip6", "interface", lanInterface},
-			[]string{"set", "ip6", "address", lanInterface, "prefix", "group", group, "::1/64"},
-			[]string{"dhcp6", "pd", "client", status.Interface, "prefix", "group", group},
-		)
-		if status.Session.RemoteIPv6 != "" {
-			_, _ = runLiveVPP(ctx, "ip", "route", "del", "::/0", "via", status.Session.RemoteIPv6, status.Interface)
-			commands = append(commands, []string{"ip", "route", "add", "::/0", "via", status.Session.RemoteIPv6, status.Interface})
-		}
-		for _, command := range commands {
-			if _, err := runLiveVPP(ctx, command...); err != nil {
-				return err
-			}
+		if err := waitForPPPoEIPv6Convergence(ctx, wanID, lanInterface); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+func waitForPPPoEIPv6Convergence(ctx context.Context, wanID, lanInterface string) error {
+	statusDir := strings.TrimSpace(os.Getenv("LY_ROUTE_PPPOE_STATUS_DIR"))
+	if statusDir == "" {
+		statusDir = "/run/ly-route/pppoe"
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	var lastReason string
+	for time.Now().Before(deadline) {
+		content, err := os.ReadFile(filepath.Join(statusDir, wanID+".json"))
+		if err == nil {
+			var status struct {
+				State     string `json:"state"`
+				Interface string `json:"interface"`
+				Session   struct {
+					IPv6Ready       bool   `json:"ipv6_ready"`
+					DelegatedPrefix string `json:"delegated_prefix"`
+				} `json:"session"`
+			}
+			if json.Unmarshal(content, &status) == nil && status.State == "connected" && status.Interface != "" && status.Session.IPv6Ready {
+				prefix, parseErr := netip.ParsePrefix(strings.TrimSpace(status.Session.DelegatedPrefix))
+				if parseErr == nil && prefix.Addr().Is6() && prefix.Bits() <= 64 {
+					lanPrefix := netip.PrefixFrom(prefix.Masked().Addr(), 64)
+					raw := lanPrefix.Addr().As16()
+					raw[15] = 1
+					lanAddress := netip.PrefixFrom(netip.AddrFrom16(raw), 64).String()
+					addresses, addressErr := runLiveVPP(ctx, "show", "interface", "address", lanInterface)
+					ra, raErr := runLiveVPP(ctx, "show", "ip6", "interface", lanInterface)
+					addressReady := addressErr == nil && strings.Contains(addresses, lanAddress)
+					raReady := raErr == nil && strings.Contains(ra, "prefix "+lanPrefix.Addr().String()+", length 64")
+					if addressReady && raReady {
+						return nil
+					}
+					lastReason = fmt.Sprintf("LAN address ready=%t, RA ready=%t", addressReady, raReady)
+				} else {
+					lastReason = "delegated prefix is unavailable"
+				}
+			} else {
+				lastReason = "PPPoE IPv6CP is not ready"
+			}
+		} else {
+			lastReason = "PPPoE status is unavailable"
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("WAN %s IPv6 prefix delegation did not converge: %s", wanID, lastReason)
+}
+
 func runLiveVPP(ctx context.Context, args ...string) (string, error) {
 	binary := strings.TrimSpace(os.Getenv("LY_ROUTE_VPPCTL"))
 	if binary == "" {
-		binary = "/usr/local/bin/ly-route-vppctl"
+		binary = "vppctl"
 	}
 	output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
 	if err != nil {
@@ -5293,7 +6352,7 @@ func (server *Server) handlePPPoELifecycle(action string) http.HandlerFunc {
 		case "connect":
 			err = server.services.Apply(r.Context(), artifacts)
 		case "disconnect":
-			err = server.services.Stop(r.Context(), serviceRuntime.PPPd, artifacts)
+			err = server.services.Stop(r.Context(), serviceRuntime.PPPoE, artifacts)
 		default:
 			err = fmt.Errorf("unsupported PPPoE lifecycle action %q", action)
 		}
@@ -5323,13 +6382,20 @@ func (server *Server) pppoeStatuses(ctx context.Context, requestID string) ([]se
 	if err != nil {
 		return nil, nil, err
 	}
+	natInsideInterfaces, err := server.pppoeNATInsideInterfaces(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	var statuses []serviceRuntime.PPPoEStatus
 	var operations []vpp.Operation
 	for _, item := range items {
 		if strings.ToLower(nonEmpty(stringField(item, "wan_type"), stringField(item, "type"))) != "pppoe" {
 			continue
 		}
-		peer := server.pppoePeerFromDesired(ctx, item)
+		peer, err := server.pppoePeerFromDesired(ctx, item, natInsideInterfaces)
+		if err != nil {
+			return nil, nil, err
+		}
 		state := serviceRuntime.PPPoEState(nonEmpty(nonEmpty(stringField(item, "pppoe_state"), stringField(item, "state")), "disconnected"))
 		assignedIPv4 := firstStringField(item, "assigned_ipv4", "current_address")
 		assignedIPv6 := stringField(item, "assigned_ipv6")
@@ -5365,32 +6431,52 @@ func (server *Server) pppoeStatuses(ctx context.Context, requestID string) ([]se
 	return statuses, operations, nil
 }
 
-func (server *Server) pppoePeerFromDesired(ctx context.Context, item map[string]any) serviceRuntime.PPPoEPeer {
+func (server *Server) pppoePeerFromDesired(ctx context.Context, item map[string]any, natInsideInterfaces []string) (serviceRuntime.PPPoEPeer, error) {
 	id := stringField(item, "id")
 	password := firstStringField(item, "password", "pppoe_password")
 	if password == "" && server.store != nil {
 		password, _ = server.store.Secret(ctx, "wan_link", id, "pppoe_password")
 	}
-	return serviceRuntime.PPPoEPeer{ID: id, Interface: stringField(item, "interface_id"), Username: firstStringField(item, "username", "pppoe_username"), Password: password, MTU: intField(item, "mtu"), MRU: intField(item, "mru")}
+	prefixGroup, ipv6LANInterfaces, err := server.pppoeIPv6LANConfig(ctx, id)
+	if err != nil {
+		return serviceRuntime.PPPoEPeer{}, err
+	}
+	return serviceRuntime.PPPoEPeer{ID: id, Interface: stringField(item, "interface_id"), Username: firstStringField(item, "username", "pppoe_username"), Password: password, MTU: intField(item, "mtu"), MRU: intField(item, "mru"), NATInsideInterfaces: append([]string(nil), natInsideInterfaces...), IPv6PrefixGroup: prefixGroup, IPv6LANInterfaces: ipv6LANInterfaces}, nil
+}
+
+func (server *Server) pppoeNATInsideInterfaces(ctx context.Context) ([]string, error) {
+	assignments, err := server.runtimeAddressAssignments(ctx)
+	if err != nil {
+		return nil, err
+	}
+	interfaces := []string{}
+	for _, assignment := range assignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			continue
+		}
+		name := strings.TrimSpace(assignment.VPPInterface)
+		if name == "" {
+			name = vppInterfaceName(strings.TrimSpace(assignment.LinuxInterface))
+		}
+		if name != "" {
+			interfaces = appendUniqueString(interfaces, name)
+		}
+	}
+	return interfaces, nil
 }
 
 func (server *Server) livePPPoEAvailable(ctx context.Context) bool {
 	if !server.serviceRuntimeConfigured() {
 		return false
 	}
-	health, err := server.services.HealthCheck(ctx, serviceRuntime.PPPd)
+	health, err := server.services.HealthCheck(ctx, serviceRuntime.PPPoE)
 	return err == nil && len(health) > 0 && health[0].Available
 }
 
 func livePPPoEAddress(ctx context.Context, peerID string) (string, string, bool) {
 	peerID = strings.TrimSpace(peerID)
-	if peerID == "" || strings.ContainsAny(peerID, "\x00\n\r /\\\t") {
+	if !validPPPoEStatusID(peerID) {
 		return "", "", false
-	}
-	for _, r := range peerID {
-		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
-			return "", "", false
-		}
 	}
 	select {
 	case <-ctx.Done():
@@ -5404,20 +6490,78 @@ func livePPPoEAddress(ctx context.Context, peerID string) (string, string, bool)
 	return pppAddressFromStatusJSON(output)
 }
 
+func livePPPoEInterface(ctx context.Context, peerID string) (string, bool) {
+	interfaceName, _, connected := livePPPoEPath(ctx, peerID)
+	return interfaceName, connected
+}
+
+func livePPPoEPath(ctx context.Context, peerID string) (string, string, bool) {
+	peerID = strings.TrimSpace(peerID)
+	if !validPPPoEStatusID(peerID) {
+		return "", "", false
+	}
+	select {
+	case <-ctx.Done():
+		return "", "", false
+	default:
+	}
+	output, err := os.ReadFile(filepath.Join("/run/ly-route/pppoe", peerID+".json"))
+	if err != nil {
+		return "", "", false
+	}
+	return pppPathFromStatusJSON(output)
+}
+
+func pppPathFromStatusJSON(output []byte) (string, string, bool) {
+	var status struct {
+		State     string `json:"state"`
+		Interface string `json:"interface"`
+		Session   struct {
+			RemoteAddress string `json:"remote_address"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(output, &status); err != nil || status.State != "connected" || !vppInterfaceNameSafe(strings.TrimSpace(status.Interface)) {
+		return "", "", false
+	}
+	interfaceName := strings.TrimSpace(status.Interface)
+	remoteAddress := strings.TrimSpace(status.Session.RemoteAddress)
+	address, err := netip.ParseAddr(remoteAddress)
+	if err != nil || !address.Is4() || address.IsUnspecified() {
+		remoteAddress = ""
+	} else {
+		remoteAddress = address.String()
+	}
+	return interfaceName, remoteAddress, true
+}
+
+func validPPPoEStatusID(peerID string) bool {
+	if peerID == "" || strings.ContainsAny(peerID, "\x00\n\r /\\\t") {
+		return false
+	}
+	for _, r := range peerID {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
 func pppAddressFromStatusJSON(output []byte) (string, string, bool) {
 	var status struct {
 		State     string `json:"state"`
 		Interface string `json:"interface"`
 		Session   struct {
-			LocalAddress     string `json:"local_address"`
-			LocalIPv6Address string `json:"local_ipv6_address"`
+			LocalAddress           string `json:"local_address"`
+			LocalIPv6              string `json:"local_ipv6"`
+			LegacyLocalIPv6Address string `json:"local_ipv6_address"`
+			DelegatedPrefix        string `json:"delegated_prefix"`
 		} `json:"session"`
 	}
 	if err := json.Unmarshal(output, &status); err != nil || status.State != "connected" || strings.TrimSpace(status.Interface) == "" {
 		return "", "", false
 	}
 	ipv4 := strings.TrimSpace(status.Session.LocalAddress)
-	ipv6 := strings.TrimSpace(status.Session.LocalIPv6Address)
+	ipv6 := strings.TrimSpace(firstNonEmpty(status.Session.DelegatedPrefix, status.Session.LocalIPv6, status.Session.LegacyLocalIPv6Address))
 	return ipv4, ipv6, ipv4 != "" || ipv6 != ""
 }
 
@@ -5433,7 +6577,7 @@ func (server *Server) runtimeStatusComponents(ctx context.Context, artifacts []s
 		{productService: product.ServiceSmartDNS, runtimeService: serviceRuntime.SmartDNS},
 		{productService: product.ServiceKea, runtimeService: serviceRuntime.Kea},
 		{productService: product.ServiceXray, runtimeService: serviceRuntime.Xray},
-		{productService: product.ServicePPPoE, runtimeService: serviceRuntime.PPPd},
+		{productService: product.ServicePPPoE, runtimeService: serviceRuntime.PPPoE},
 	} {
 		if !server.profile.AllowsService(service.productService) {
 			continue
@@ -5541,7 +6685,20 @@ type vppApplyReceipt struct {
 }
 
 func (server *Server) vppRuntimeComponent(ctx context.Context, rendered bool) RuntimeComponentState {
+	evidence := server.runtimeEvidence()
+	if evidence.Status == RuntimeStatusCommitted && len(evidence.GatewayEvidence) > 0 && server.serviceRuntimeConfigured() {
+		health, err := server.services.HealthCheck(ctx, serviceRuntime.VPP)
+		if err == nil && len(health) > 0 && health[0].Available {
+			return RuntimeComponentState{Name: "vpp", State: "running", Available: true, Reason: "typed gateway apply and live VPP readback verified"}
+		}
+	}
 	if !rendered {
+		if evidence.Status == RuntimeStatusCommitted && evidence.GatewayPlan != nil && len(evidence.GatewayPlan.NativePath.Assignments) > 0 && server.serviceRuntimeConfigured() {
+			health, err := server.services.HealthCheck(ctx, serviceRuntime.VPP)
+			if err == nil && len(health) > 0 && health[0].Available {
+				return RuntimeComponentState{Name: "vpp", State: "running", Available: true, Reason: "native dataplane is active; no VPP configuration delta"}
+			}
+		}
 		return RuntimeComponentState{Name: "vpp", State: "unavailable", Reason: "no VPP operations rendered"}
 	}
 	if !server.serviceRuntimeConfigured() {
@@ -5664,6 +6821,9 @@ func isPolicyReadbackOperation(name string) bool {
 func runtimeState(components []RuntimeComponentState) string {
 	state := "running"
 	for _, component := range components {
+		if component.State == "not_configured" {
+			continue
+		}
 		if component.State == "unavailable" {
 			return "degraded"
 		}
@@ -5831,7 +6991,7 @@ func (server *Server) handleConfigApply(w http.ResponseWriter, r *http.Request) 
 			if server.services == nil {
 				return errors.New("live runtime apply runner is not configured")
 			}
-			report := server.services.ApplyCapabilities(ctx, serviceArtifacts)
+			report := server.services.ApplyCapabilitiesForTransaction(ctx, transactionID, serviceArtifacts)
 			appliedArtifacts = report.AppliedArtifacts
 			capabilityFailures = serviceFailureEvidence(report.Failures)
 			evidenceRequest.Artifacts = appliedArtifacts
@@ -6669,6 +7829,14 @@ func (server *Server) telemetryPayload(ctx context.Context, kind string) (any, [
 			}
 			capabilities = append(capabilities, controlapi.CapabilityState{Name: "vpp_counters", Available: false, State: controlapi.CapabilityDegraded, Reason: err.Error()})
 		}
+		if server.gatewayTelemetry != nil {
+			if err := server.collectGatewayTelemetry(ctx); err == nil {
+				sessions, throughput := server.gatewayDashboardCounters()
+				return map[string]any{"device_mode": "gateway", "degraded": false, "runtime_state": runtimeStateValue, "active_path": "vpp", "components": components, "last_apply": lastApply, "sessions": sessions, "throughput_bps": throughput, "policy_hits": 0}, append(capabilities, controlapi.CapabilityState{Name: "gateway_vpp_telemetry", Available: true, State: controlapi.CapabilityAvailable})
+			} else {
+				capabilities = append(capabilities, controlapi.CapabilityState{Name: "gateway_vpp_telemetry", Available: false, State: controlapi.CapabilityDegraded, Reason: err.Error()})
+			}
+		}
 		return map[string]any{"device_mode": "gateway", "degraded": runtimeStateValue != "running", "runtime_state": runtimeStateValue, "active_path": "vpp", "components": components, "last_apply": lastApply, "sessions": 0, "throughput_bps": 0, "policy_hits": 0}, capabilities
 	case "interfaces":
 		items, interfaceCapabilities, err := server.interfaceRuntimeSnapshot(ctx)
@@ -6677,6 +7845,13 @@ func (server *Server) telemetryPayload(ctx context.Context, kind string) (any, [
 		}
 		return items, append(capabilities, interfaceCapabilities...)
 	case "policy_hits":
+		if server.policyHits != nil {
+			items, err := server.policyHits.PolicyHits(ctx)
+			if err == nil {
+				return normalizePolicyHits(items, runtimeStateValue, "vpp_acl_lookup"), append(capabilities, controlapi.CapabilityState{Name: "vpp_policy_counters", Available: true, State: controlapi.CapabilityAvailable})
+			}
+			capabilities = append(capabilities, controlapi.CapabilityState{Name: "vpp_policy_counters", Available: false, State: controlapi.CapabilityDegraded, Reason: err.Error()})
+		}
 		if server.vppCounters != nil {
 			items, err := server.vppCounters.PolicyHits(ctx)
 			if err == nil {
@@ -6928,7 +8103,12 @@ func (server *Server) normalizeInterfaceDesiredPayload(ctx context.Context, payl
 }
 
 func (server *Server) normalizeWANLinkDesiredPayload(ctx context.Context, payload map[string]any, explicitID string) {
-	requested := strings.TrimSpace(firstNonEmpty(explicitID, stringField(payload, "interface_id"), stringField(payload, "id")))
+	requested := strings.TrimSpace(firstNonEmpty(stringField(payload, "interface_id"), stringField(payload, "system_name")))
+	if requested == "" && strings.TrimSpace(explicitID) != "" {
+		if existing, found, err := server.desiredItem(ctx, "wan_link", strings.TrimSpace(explicitID)); err == nil && found {
+			requested = strings.TrimSpace(firstNonEmpty(stringField(existing, "interface_id"), stringField(existing, "system_name")))
+		}
+	}
 	actual := server.resolveInterfaceID(ctx, requested)
 	if actual == "" {
 		actual = requested
@@ -7382,9 +8562,9 @@ func (server *Server) auditEvents(ctx context.Context) ([]AuditEvent, error) {
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(value); err != nil {
-		panic(err)
-	}
+	// The status and headers are already committed. A client disconnect is not a
+	// server fault and must not turn into a recovered net/http panic.
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {

@@ -206,6 +206,7 @@ unix {
   nodaemon
   log /var/log/vpp/vpp.log
   cli-listen /run/vpp/cli.sock
+  runtime-dir /run/vpp
   gid vpp
 }
 
@@ -219,6 +220,7 @@ socksvr {
 
 session {
   enable rt-backend rule-table
+  use-app-socket-api
 }
 
 EOF
@@ -230,7 +232,13 @@ EOF
     printf '  workers 0\n'
   fi
   printf '}\n\n'
-  printf 'buffers {\n  buffers-per-numa %s\n}\n' "$buffers_per_numa"
+  printf 'buffers {\n  buffers-per-numa %s\n}\n\n' "$buffers_per_numa"
+  cat <<'EOF'
+plugins {
+  plugin linux_cp_plugin.so { enable }
+  plugin linux_nl_plugin.so { enable }
+}
+EOF
 } > "$(root_path /etc/vpp/startup.conf)"
 
 cat > "$state_dir/vpp-tuning.env" <<EOF

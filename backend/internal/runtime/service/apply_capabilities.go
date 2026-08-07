@@ -38,6 +38,17 @@ func (report ApplyReport) Err() error {
 }
 
 func (runtime Runtime) ApplyCapabilities(ctx context.Context, artifacts []RenderedArtifact) ApplyReport {
+	return runtime.applyCapabilities(ctx, artifacts)
+}
+
+// ApplyCapabilitiesForTransaction carries the transaction identity into the
+// service apply phase so status reads cannot race and rebind a fresh receipt
+// to an older runtime transaction.
+func (runtime Runtime) ApplyCapabilitiesForTransaction(ctx context.Context, transactionID string, artifacts []RenderedArtifact) ApplyReport {
+	return runtime.applyCapabilities(withTransactionID(ctx, transactionID), artifacts)
+}
+
+func (runtime Runtime) applyCapabilities(ctx context.Context, artifacts []RenderedArtifact) ApplyReport {
 	byService := groupByService(artifacts)
 	report := ApplyReport{AppliedArtifacts: make([]RenderedArtifact, 0, len(artifacts))}
 	for _, service := range serviceOrder() {

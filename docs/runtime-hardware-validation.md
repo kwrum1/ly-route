@@ -40,7 +40,7 @@ test -f /etc/smartdns/smartdns.conf
 test -f /etc/xray/config.json
 ```
 
-- Install and enable systemd units for SmartDNS, Kea DHCP4, xray, pppd, and VPP.
+- Install and enable systemd units for SmartDNS, Kea DHCP4, xray, the native PPPoE client, and VPP.
 - Set `/etc/ly-route/control-api.env` with local admin credentials.
 - Enable runtime orchestration only on the appliance:
 
@@ -178,10 +178,10 @@ systemctl is-active xray.service
 
 1. Configure a PPPoE WAN link with test credentials.
 2. Apply runtime state.
-3. Verify the pppd unit is active:
+3. Verify the native PPPoE target is active:
 
 ```sh
-systemctl is-active pppd@ly-route.service
+systemctl is-active ly-route-pppoe.target
 ```
 
 4. Confirm a PPP interface is created, receives an address, and installs the
@@ -220,7 +220,7 @@ systemctl is-active pppd@ly-route.service
 
 ## Failure and Recovery
 
-1. Stop SmartDNS, Kea, xray, pppd, and VPP one at a time.
+1. Stop SmartDNS, Kea, xray, the native PPPoE target, and VPP one at a time.
 2. Refresh runtime status after each stop.
 3. Confirm the UI/API reports a degraded or unavailable component with a reason.
 4. Re-apply runtime state and confirm service restart behavior.
@@ -235,7 +235,7 @@ systemctl is-active pppd@ly-route.service
 - `/api/v1/runtime/status` before and after apply.
 - `/api/v1/runtime/preview` for the tested configuration.
 - `/api/v1/runtime/apply` response including transaction ID.
-- `systemctl status` output for SmartDNS, Kea, xray, pppd, and VPP.
+- `systemctl status` output for SmartDNS, Kea, xray, the native PPPoE target, and VPP.
 - VPP interface/policy counters.
 - VPP-native rules, sessions, and packet counters.
 - DHCP client lease details.

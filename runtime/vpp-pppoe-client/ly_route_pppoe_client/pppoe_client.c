@@ -12,6 +12,7 @@ typedef struct
   u32 control_sw_if_index;
   u32 wan_sw_if_index;
   u64 discovery_packets;
+  u64 dhcp6_packets;
 } ly_pppoe_client_main_t;
 
 typedef enum
@@ -24,12 +25,14 @@ typedef enum
 {
   LY_PPPOE_CLIENT_ERROR_PASSED,
   LY_PPPOE_CLIENT_ERROR_DISCOVERY_FORWARDED,
+  LY_PPPOE_CLIENT_ERROR_DHCP6_FORWARDED,
   LY_PPPOE_CLIENT_N_ERROR,
 } ly_pppoe_client_error_t;
 
 static char *ly_pppoe_client_error_strings[] = {
   "packets passed",
   "PPPoE discovery broadcasts forwarded",
+  "PPPoE DHCPv6 control packets forwarded",
 };
 
 static ly_pppoe_client_main_t ly_pppoe_client_main;
@@ -63,6 +66,52 @@ ly_pppoe_is_client_discovery (vlib_buffer_t *buffer)
   return 0;
 }
 
+static_always_inline int
+ly_pppoe_is_dhcp6 (vlib_buffer_t *buffer, int client_to_server)
+{
+  u8 *frame = vlib_buffer_get_current (buffer);
+  u32 length = buffer->current_length;
+  u32 offset = sizeof (ethernet_header_t);
+
+  if (length < offset + 8 + 40 + 8)
+    return 0;
+
+  ethernet_header_t *ethernet = (ethernet_header_t *) frame;
+  u16 type = clib_net_to_host_u16 (ethernet->type);
+  if (type == ETHERNET_TYPE_VLAN)
+    {
+      if (length < offset + sizeof (ethernet_vlan_header_t) + 8 + 40 + 8)
+        return 0;
+      ethernet_vlan_header_t *vlan =
+        (ethernet_vlan_header_t *) (frame + offset);
+      type = clib_net_to_host_u16 (vlan->type);
+      offset += sizeof (*vlan);
+    }
+  if (type != ETHERNET_TYPE_PPPOE_SESSION)
+    return 0;
+
+  u8 *pppoe = frame + offset;
+  u16 ppp_protocol = ((u16) pppoe[6] << 8) | pppoe[7];
+  if (pppoe[0] != 0x11 || pppoe[1] != 0 || ppp_protocol != 0x0057)
+    return 0;
+
+  u8 *ip6 = pppoe + 8;
+  if ((ip6[0] >> 4) != 6 || ip6[6] != 17)
+    return 0;
+  u8 *udp = ip6 + 40;
+  u16 source = ((u16) udp[0] << 8) | udp[1];
+  u16 destination = ((u16) udp[2] << 8) | udp[3];
+  if (client_to_server)
+    return source == 546 && destination == 547;
+  return source == 547 && destination == 546;
+}
+
+static_always_inline void
+ly_pppoe_forward_to_interface (vlib_buffer_t *buffer, u32 sw_if_index)
+{
+  vnet_buffer (buffer)->sw_if_index[VLIB_TX] = sw_if_index;
+}
+
 VLIB_NODE_FN (ly_pppoe_client_node) (vlib_main_t *vm,
                                      vlib_node_runtime_t *node,
                                      vlib_frame_t *frame)
@@ -77,12 +126,37 @@ VLIB_NODE_FN (ly_pppoe_client_node) (vlib_main_t *vm,
       u32 rx_sw_if_index = vnet_buffer (buffer)->sw_if_index[VLIB_RX];
 
       vnet_feature_next_u16 (&nexts[index], buffer);
-      if (rx_sw_if_index != main->control_sw_if_index ||
-          main->wan_sw_if_index == ~0 ||
-          !ly_pppoe_is_client_discovery (buffer))
+      if (main->control_sw_if_index == ~0 || main->wan_sw_if_index == ~0)
         {
           vlib_node_increment_counter (vm, node->node_index,
                                        LY_PPPOE_CLIENT_ERROR_PASSED, 1);
+          continue;
+        }
+
+      int discovery =
+        rx_sw_if_index == main->control_sw_if_index &&
+        ly_pppoe_is_client_discovery (buffer);
+      int dhcp6_upstream =
+        rx_sw_if_index == main->control_sw_if_index &&
+        ly_pppoe_is_dhcp6 (buffer, 1);
+      int dhcp6_downstream =
+        rx_sw_if_index == main->wan_sw_if_index &&
+        ly_pppoe_is_dhcp6 (buffer, 0);
+      if (!discovery && !dhcp6_upstream && !dhcp6_downstream)
+        {
+          vlib_node_increment_counter (vm, node->node_index,
+                                       LY_PPPOE_CLIENT_ERROR_PASSED, 1);
+          continue;
+        }
+
+      if (dhcp6_downstream)
+        {
+          ly_pppoe_forward_to_interface (buffer,
+                                         main->control_sw_if_index);
+          nexts[index] = LY_PPPOE_CLIENT_NEXT_INTERFACE_OUTPUT;
+          main->dhcp6_packets++;
+          vlib_node_increment_counter (
+            vm, node->node_index, LY_PPPOE_CLIENT_ERROR_DHCP6_FORWARDED, 1);
           continue;
         }
 
@@ -95,11 +169,21 @@ VLIB_NODE_FN (ly_pppoe_client_node) (vlib_main_t *vm,
       ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
       clib_memcpy_fast (ethernet->src_address, hardware->hw_address, 6);
 
-      vnet_buffer (buffer)->sw_if_index[VLIB_TX] = main->wan_sw_if_index;
+      ly_pppoe_forward_to_interface (buffer, main->wan_sw_if_index);
       nexts[index] = LY_PPPOE_CLIENT_NEXT_INTERFACE_OUTPUT;
-      main->discovery_packets++;
-      vlib_node_increment_counter (
-        vm, node->node_index, LY_PPPOE_CLIENT_ERROR_DISCOVERY_FORWARDED, 1);
+      if (discovery)
+        {
+          main->discovery_packets++;
+          vlib_node_increment_counter (
+            vm, node->node_index,
+            LY_PPPOE_CLIENT_ERROR_DISCOVERY_FORWARDED, 1);
+        }
+      else
+        {
+          main->dhcp6_packets++;
+          vlib_node_increment_counter (
+            vm, node->node_index, LY_PPPOE_CLIENT_ERROR_DHCP6_FORWARDED, 1);
+        }
     }
 
   vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
@@ -151,6 +235,9 @@ ly_pppoe_client_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
       if (main->control_sw_if_index != ~0)
         vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
                                      main->control_sw_if_index, 0, 0, 0);
+      if (main->wan_sw_if_index != ~0)
+        vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
+                                     main->wan_sw_if_index, 0, 0, 0);
       main->control_sw_if_index = ~0;
       main->wan_sw_if_index = ~0;
       return 0;
@@ -168,11 +255,21 @@ ly_pppoe_client_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
   if (main->control_sw_if_index != ~0)
     vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
                                  main->control_sw_if_index, 0, 0, 0);
+  if (main->wan_sw_if_index != ~0)
+    vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
+                                 main->wan_sw_if_index, 0, 0, 0);
   main->control_sw_if_index = control_sw_if_index;
   main->wan_sw_if_index = wan_sw_if_index;
   if (vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
                                    control_sw_if_index, 1, 0, 0) != 0)
     return clib_error_return (0, "failed to enable PPPoE discovery forwarding");
+  if (vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
+                                   wan_sw_if_index, 1, 0, 0) != 0)
+    {
+      vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
+                                   control_sw_if_index, 0, 0, 0);
+      return clib_error_return (0, "failed to enable PPPoE DHCPv6 forwarding");
+    }
   return 0;
 }
 
@@ -193,11 +290,12 @@ ly_pppoe_client_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
   else
     vlib_cli_output (vm,
                      "state enabled\ncontrol-interface %U\nwan-interface %U\n"
-                     "discovery-forwarded %llu",
+                     "discovery-forwarded %llu\n"
+                     "dhcp6-forwarded %llu",
                      format_vnet_sw_if_index_name, main->vnet_main,
                      main->control_sw_if_index, format_vnet_sw_if_index_name,
                      main->vnet_main, main->wan_sw_if_index,
-                     main->discovery_packets);
+                     main->discovery_packets, main->dhcp6_packets);
   return 0;
 }
 

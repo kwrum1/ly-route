@@ -43,6 +43,22 @@ func TestCompileConfigBuildsRoutePolicyAndSecurityACL(t *testing.T) {
 	}
 }
 
+func TestCompileConfigExpandsStringSliceObjectGroup(t *testing.T) {
+	compiled, err := CompileConfig([]map[string]any{{
+		"id": "geoip-cn", "action": "route", "egress": "wan0",
+		"match": map[string]any{"dst_ip": "obj-geoip-cn"},
+	}}, nil, []map[string]any{{
+		"id": "obj-geoip-cn", "kind": "ip", "entries": []string{"1.1.1.0/24", "2.2.2.2"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := compiled.RoutePolicies[0].Match.Destinations
+	if strings.Join(got, ",") != "1.1.1.0/24,2.2.2.2/32" {
+		t.Fatalf("destinations = %v", got)
+	}
+}
+
 func TestCompileConfigInfersTCPAndUDPForBarePortConditions(t *testing.T) {
 	compiled, err := CompileConfig([]map[string]any{{
 		"id": "port-route", "action": "route", "egress": "wan0",
@@ -263,6 +279,22 @@ func TestCompileConfigSupportsSchemaObjectGroupsAndOutputDirection(t *testing.T)
 	acl := compiled.SecurityACLs[0]
 	if acl.Match.Direction != "output" || len(acl.Match.Sources) != 2 || len(acl.Match.DestPorts) != 2 || acl.Match.DestPorts[1] != "8443" {
 		t.Fatalf("security acl = %#v", acl)
+	}
+}
+
+func TestCompileConfigPreservesBidirectionalSecurityACL(t *testing.T) {
+	compiled, err := CompileConfig(nil, []map[string]any{{
+		"id": "lan-bidirectional", "action": "deny",
+		"match": map[string]any{
+			"src_ip": "192.168.50.0/24", "dst_ip": "0.0.0.0/0",
+			"protocol": "any", "direction": "both",
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.SecurityACLs) != 1 || compiled.SecurityACLs[0].Match.Direction != "both" {
+		t.Fatalf("compiled bidirectional ACL = %#v", compiled.SecurityACLs)
 	}
 }
 

@@ -14,18 +14,21 @@ import (
 type NativeHook string
 
 const (
-	NativeHookAFXDP NativeHook = "af_xdp"
-	NativeHookRDMA  NativeHook = "rdma"
-	NativeHookDPDK  NativeHook = "dpdk"
+	NativeHookAFXDP   NativeHook = "af_xdp"
+	NativeHookRDMA    NativeHook = "rdma"
+	NativeHookVMXNET3 NativeHook = "vmxnet3"
+	NativeHookDPDK    NativeHook = "dpdk"
 )
 
 type NativeMode string
 
 const (
-	NativeModeZeroCopy NativeMode = "zero_copy"
-	NativeModeRDMADV   NativeMode = "rdma_dv"
-	NativeModeCopy     NativeMode = "copy"
-	NativeModeDPDKVFIO NativeMode = "vfio_pci"
+	NativeModeZeroCopy    NativeMode = "zero_copy"
+	NativeModeRDMADV      NativeMode = "rdma_dv"
+	NativeModeVMXNET3VFIO NativeMode = "vmxnet3_vfio"
+	NativeModeCopy        NativeMode = "copy"
+	NativeModeDPDKVFIO    NativeMode = "vfio_pci"
+	NativeModeDPDKUIO     NativeMode = "uio_pci_generic"
 )
 
 type DataplaneTier string
@@ -36,7 +39,9 @@ const (
 )
 
 func approvedNativeMode(hook NativeHook, mode NativeMode) bool {
-	return hook == NativeHookAFXDP && mode == NativeModeZeroCopy || hook == NativeHookRDMA && mode == NativeModeRDMADV
+	return hook == NativeHookAFXDP && mode == NativeModeZeroCopy ||
+		hook == NativeHookRDMA && mode == NativeModeRDMADV ||
+		hook == NativeHookVMXNET3 && mode == NativeModeVMXNET3VFIO
 }
 
 func proveNativeAttachment(attachment NativeAttachment) NativeAttachment {
@@ -56,12 +61,14 @@ type ProofSource string
 const (
 	ProofSourceRuntimeProbe          ProofSource = "runtime_probe"
 	ProofSourceActiveRuntimeReadback ProofSource = "active_runtime_readback"
+	ProofSourceHardwarePreflight     ProofSource = "hardware_preflight"
 )
 
 type CapabilityProof struct {
 	Tier                    DataplaneTier `json:"tier,omitempty"`
 	Hook                    NativeHook    `json:"hook"`
 	Mode                    NativeMode    `json:"mode"`
+	VPPInterface            string        `json:"vpp_interface,omitempty"`
 	Source                  ProofSource   `json:"source"`
 	RuntimeVerified         bool          `json:"runtime_verified"`
 	Native                  bool          `json:"native"`
@@ -74,6 +81,8 @@ type CapabilityProof struct {
 	IOMMUGroup              string        `json:"iommu_group,omitempty"`
 	IOMMUProtected          bool          `json:"iommu_protected,omitempty"`
 	VFIOAvailable           bool          `json:"vfio_available,omitempty"`
+	VFIONoIOMMUAvailable    bool          `json:"vfio_no_iommu_available,omitempty"`
+	UIOPCIAvailable         bool          `json:"uio_pci_available,omitempty"`
 	HugepagesAvailable      bool          `json:"hugepages_available,omitempty"`
 	DPDKPluginAvailable     bool          `json:"dpdk_plugin_available,omitempty"`
 	HQoSAvailable           bool          `json:"hqos_available,omitempty"`
@@ -188,7 +197,7 @@ func SelectNativePath(request NativePathRequest) (NativePath, error) {
 		proof := assignment.Proof
 		_, duplicate := seen[name]
 		seen[name] = struct{}{}
-		runtimeProof := proof.Source == ProofSourceRuntimeProbe && proof.RuntimeVerified && !proof.ObservedAt.IsZero()
+		runtimeProof := isRuntimeCapabilityProof(proof) && proof.RuntimeVerified && !proof.ObservedAt.IsZero()
 		freshProof := runtimeProof && !request.Now.IsZero() && !proof.ValidUntil.Before(request.Now) && !proof.ObservedAt.After(request.Now)
 		proofLifetime := proof.ValidUntil.Sub(proof.ObservedAt)
 		shortLivedProof := runtimeProof && proofLifetime > 0 && proofLifetime <= 10*time.Minute
@@ -208,7 +217,20 @@ func SelectNativePath(request NativePathRequest) (NativePath, error) {
 		)
 		// Preserve the legacy attachment payload shape until a multi-candidate
 		// report opts this interface into explicit tier negotiation.
-		attachments = append(attachments, proveNativeAttachment(NativeAttachment{LinuxInterface: name, VPPInterface: "lyroute-" + name, Hook: proof.Hook, Mode: proof.Mode}))
+		vppInterface := strings.TrimSpace(proof.VPPInterface)
+		if vppInterface == "" {
+			vppInterface = "lyroute-" + name
+		}
+		attachments = append(attachments, proveNativeAttachment(NativeAttachment{
+			LinuxInterface: name,
+			VPPInterface:   vppInterface,
+			Tier:           proof.Tier,
+			Hook:           proof.Hook,
+			Mode:           proof.Mode,
+			PCIAddress:     strings.TrimSpace(proof.PCIAddress),
+			KernelDriver:   strings.TrimSpace(proof.KernelDriver),
+			IOMMUGroup:     strings.TrimSpace(proof.IOMMUGroup),
+		}))
 	}
 	for _, result := range results {
 		if !result.Passed {
@@ -216,6 +238,17 @@ func SelectNativePath(request NativePathRequest) (NativePath, error) {
 		}
 	}
 	return NativePath{Tier: DataplaneTierNative, Attachments: attachments, Prerequisites: results}, nil
+}
+
+func isRuntimeCapabilityProof(proof CapabilityProof) bool {
+	switch proof.Source {
+	case ProofSourceRuntimeProbe, ProofSourceActiveRuntimeReadback:
+		return true
+	case ProofSourceHardwarePreflight:
+		return proof.Hook == NativeHookVMXNET3
+	default:
+		return false
+	}
 }
 
 func LoadNativePathRequest(path, management string, interfaces []string, now time.Time) NativePathRequest {

@@ -161,7 +161,7 @@ docker run -d --rm --name "$name" --network none --device /dev/net/tun --device 
   --cap-add NET_ADMIN --cap-add NET_RAW \
   -v "$smartdns_deb:/tmp/smartdns.deb:ro" \
   -v "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/dns-vpp-session-apply:/tmp/dns-vpp-session-apply:ro" \
-  --entrypoint sh "$image" -c 'printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table }\n" >/tmp/vpp.conf; vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1' >/dev/null
+  --entrypoint sh "$image" -c 'printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table use-app-socket-api }\n" >/tmp/vpp.conf; vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1' >/dev/null
 docker cp "$tmpdir/dns-packet-client" "$name:/tmp/dns-packet-client"
 docker cp "$tmpdir/dns-tcp-client" "$name:/tmp/dns-tcp-client"
 docker cp "$tmpdir/dns-tcp-packet-client" "$name:/tmp/dns-tcp-packet-client"
@@ -177,7 +177,7 @@ docker exec "$name" sh -c '
   vppctl "set ip neighbor tap0 192.0.2.10 02:00:00:00:00:02"
   vppctl "set ip neighbor tap0 2001:db8:1::10 02:00:00:00:00:02"
   dpkg-deb -x /tmp/smartdns.deb /opt/smartdns
-  printf "vcl { app-socket-api /run/vpp/app_ns_sockets/default app-scope-local app-scope-global app_original_dst }\n" >/tmp/vcl.conf
+  printf "vcl {\n  app-socket-api /run/vpp/app_ns_sockets/default\n  app-scope-local\n  app-scope-global\n  app_original_dst\n}\n" >/tmp/vcl.conf
   printf "bind 127.0.0.1:1053\nbind-tcp 127.0.0.1:1053\naddress /updates.example/203.0.113.53\n" >/tmp/smartdns.conf
   printf '%s\n' '# source-prefix match-kind domain smartdns-port' >/tmp/dns-source-routes.conf
   /opt/smartdns/usr/sbin/smartdns -f -x -p - -c /tmp/smartdns.conf >/tmp/smartdns.log 2>&1 &
@@ -189,7 +189,7 @@ docker exec "$name" sh -c '
   echo $! >/tmp/dns-vpp-proxy.pid
   sleep 2
   kill -0 "$(cat /tmp/dns-vpp-proxy.pid)"
-  if ! LY_ROUTE_DNS_ENABLE_IPV6=false LY_ROUTE_SMARTDNS_APP_PATTERN=dns-vpp-proxy.*ldp /tmp/dns-vpp-session-apply; then
+  if ! LY_ROUTE_DNS_ENABLE_IPV6=false LY_ROUTE_SMARTDNS_V4_NAMESPACE=default LY_ROUTE_SMARTDNS_APP_PATTERN=dns-vpp-proxy.*ldp /tmp/dns-vpp-session-apply; then
     cat /tmp/dns-vpp-proxy.log /tmp/smartdns.log /tmp/vpp.log >&2 || true
     vppctl show app >&2 || true
     exit 1

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,43 @@ import (
 	"ly-route/backend/internal/runtime/flow"
 	"ly-route/backend/internal/runtime/proxy"
 )
+
+func TestExecutorAppliesGatewayBeforeDependentHostServices(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, ctx)
+	clock := deterministicClock(time.Date(2026, 8, 5, 1, 0, 0, 0, time.UTC))
+	trace := []string{}
+	executor := Executor{
+		Store:   store,
+		Now:     clock,
+		Gateway: &orderedGatewayRunner{trace: &trace},
+		Apply: func(context.Context, Plan) error {
+			trace = append(trace, "services")
+			return nil
+		},
+		Receipt: func(_ context.Context, plan Plan) (ApplyReceipt, error) {
+			return ApplyReceipt{TransactionID: plan.Request.TransactionID, Status: ReceiptApplied, Capability: plan.Request.Resource, AppliedAt: clock()}, nil
+		},
+		Readback: func(_ context.Context, plan Plan) (Readback, error) {
+			return Readback{TransactionID: plan.Request.TransactionID, Capability: plan.Request.Resource, Timestamp: clock(), Fresh: true}, nil
+		},
+	}
+	if _, err := executor.Run(ctx, validRequest("txn-gateway-before-services")); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"gateway", "services"}; !reflect.DeepEqual(trace, want) {
+		t.Fatalf("apply order = %v, want %v", trace, want)
+	}
+}
+
+type orderedGatewayRunner struct{ trace *[]string }
+
+func (runner *orderedGatewayRunner) Run(context.Context, Plan) (GatewayTransactionResult, error) {
+	*runner.trace = append(*runner.trace, "gateway")
+	return GatewayTransactionResult{}, nil
+}
+
+func (*orderedGatewayRunner) Rollback(context.Context, Plan) error { return nil }
 
 func TestExecutorEmitsOrderedCommitAuditEvents(t *testing.T) {
 	ctx := context.Background()

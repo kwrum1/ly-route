@@ -13,6 +13,7 @@ Environment:
   LY_ROUTE_EXTRA_DEBS_DIR          Directory containing local .deb packages.
   LY_ROUTE_CONTROL_BINARY          Prebuilt product-specific control binary.
   LY_ROUTE_CONTROL_PRODUCT         Product ID for LY_ROUTE_CONTROL_BINARY.
+  LY_ROUTE_PPPOE_CLIENT_BINARY     Prebuilt native PPPoE client for gateway builds.
   LY_ROUTE_VPP_APPLY_BINARY        Prebuilt vpp-apply binary for fixture builds.
   LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY=1 Create an overlay-only fixture without mmdebstrap.
   LY_ROUTE_BUILD_TAR_ONLY=1        Leave the deterministic artifact uncompressed.
@@ -30,6 +31,7 @@ mirror=${LY_ROUTE_MIRROR:-http://deb.debian.org/debian}
 extra_packages=${LY_ROUTE_EXTRA_PACKAGES:-}
 extra_debs_dir=${LY_ROUTE_EXTRA_DEBS_DIR:-}
 control_binary=${LY_ROUTE_CONTROL_BINARY:-}
+pppoe_client_binary=${LY_ROUTE_PPPOE_CLIENT_BINARY:-}
 vpp_apply_binary=${LY_ROUTE_VPP_APPLY_BINARY:-}
 
 while [ "$#" -gt 0 ]; do
@@ -63,9 +65,14 @@ case "$arch" in
 esac
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+geodata_dir=${LY_ROUTE_GEODATA_DIR:-$repo_root/packaging/geodata}
 . "$repo_root/scripts/lib/product-build-profile.sh"
 load_product_build_profile "$repo_root" "$product" "$manifest"
 validate_prebuilt_control "$control_binary" "$product"
+if [ -n "$pppoe_client_binary" ]; then
+  [ "$product" = gateway ] || product_build_fail "LY_ROUTE_PPPOE_CLIENT_BINARY is only valid for gateway builds"
+  [ -x "$pppoe_client_binary" ] || product_build_fail "native PPPoE client is not executable: $pppoe_client_binary"
+fi
 validate_prebuilt_vpp_apply "$vpp_apply_binary"
 
 product_build_require_file "$repo_root/scripts/build-controller-shell.sh"
@@ -111,7 +118,7 @@ validate_extra_debs() {
   done
   if [ "${LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY:-0}" != 1 ]; then
 	  required_runtime_packages='libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply'
-	  [ "$product" != gateway ] || required_runtime_packages="$required_runtime_packages ly-route-vpp-smart-qos ly-route-vpp-security-guard ly-route-vpp-pppoe-client smartdns xray"
+	  [ "$product" != gateway ] || required_runtime_packages="$required_runtime_packages ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns xray"
 	  [ "$product" != orchestrator ] || required_runtime_packages="$required_runtime_packages ly-route-vpp-orchestrator"
     for required in $required_runtime_packages; do
       found=false
@@ -165,6 +172,19 @@ copy_payload() {
   copy_product_frontend "$target/opt/ly-route/admin" "$frontend_bundle" "$product"
   cp "$repo_root/packaging/nginx/ly-route-admin.conf" "$target/etc/nginx/conf.d/ly-route-admin.conf"
   rm -f "$target/etc/nginx/sites-enabled/default"
+  if [ "$product" = gateway ]; then
+    if [ "${LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY:-0}" != 1 ]; then
+      for geodata_file in geoip.dat geosite.dat china-list.txt manifest.json; do
+        product_build_require_file "$geodata_dir/$geodata_file"
+      done
+    fi
+    if [ -d "$geodata_dir" ]; then
+      mkdir -p "$target/usr/share/ly-route/geodata"
+      for geodata_file in geoip.dat geosite.dat china-list.txt manifest.json; do
+        [ -f "$geodata_dir/$geodata_file" ] && cp "$geodata_dir/$geodata_file" "$target/usr/share/ly-route/geodata/$geodata_file"
+      done
+    fi
+  fi
 }
 
 install_extra_debs() {
@@ -214,6 +234,25 @@ build_control_binary() {
   chmod 0755 "$target/usr/lib/ly-route/ly-route-control"
 }
 
+build_pppoe_client_binary() {
+  target=$1
+  [ "$product" = gateway ] || return 0
+  mkdir -p "$target/usr/lib/ly-route"
+  case "$arch" in
+    amd64) goarch=amd64 ;;
+    arm64) goarch=arm64 ;;
+    *) product_build_fail "native PPPoE client is not supported for rootfs architecture: $arch" ;;
+  esac
+  command -v go >/dev/null 2>&1 || product_build_fail "go is required to build the native PPPoE client"
+  if [ -n "${pppoe_client_binary:-}" ]; then
+    cp "$pppoe_client_binary" "$target/usr/lib/ly-route/ly-route-pppoe-client"
+  else
+    (cd "$repo_root/backend" && GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
+      -o "$target/usr/lib/ly-route/ly-route-pppoe-client" ./cmd/ly-route-pppoe-client)
+  fi
+  chmod 0755 "$target/usr/lib/ly-route/ly-route-pppoe-client"
+}
+
 configure_product() {
   target=$1
   mkdir -p "$target/etc/ly-route" "$target/usr/share/ly-route" "$target/var/lib/ly-route/$product"
@@ -242,10 +281,15 @@ EOF
     { print }
   ' "$service" >"$service.tmp"
   mv "$service.tmp" "$service"
-  if [ "$product" = orchestrator ]; then
+  if [ "$product" = gateway ]; then
+    # PPPoE is implemented by Ly Route's native VPP client. The legacy pppd
+    # unit must never enter a production gateway rootfs.
+    rm -f "$target/etc/systemd/system/pppd@.service"
+  elif [ "$product" = orchestrator ]; then
     rm -rf "$target/etc/kea" "$target/etc/smartdns" "$target/etc/xray" "$target/etc/ppp"
-    rm -f "$target/etc/systemd/system/ly-route-pppoe@.service" \
+    rm -f "$target/etc/systemd/system/pppd@.service" \
       "$target/etc/systemd/system/ly-route-pppoe.target" \
+      "$target/etc/systemd/system/ly-route-pppoe@.service" \
       "$target/etc/systemd/system/ly-route-policy-routing.service"
     rm -rf "$target/etc/systemd/system/kea-dhcp4-server.service.d"
     sed -i '/kea-dhcp4-server\.service/d; s/ with DHCP enabled//' "$target/usr/lib/ly-route/firstboot.sh"
@@ -273,13 +317,14 @@ enable_units() {
   ln -sf /lib/systemd/system/nginx.service "$wants/nginx.service"
   ln -sf /etc/systemd/system/ly-route-firstboot.service "$wants/ly-route-firstboot.service"
   if [ "$product" = gateway ]; then
+    ln -sf /etc/systemd/system/ly-route-pppoe.target "$wants/ly-route-pppoe.target"
     ln -sf /lib/systemd/system/kea-dhcp4-server.service "$wants/kea-dhcp4-server.service"
+    ln -sf /etc/systemd/system/ly-route-policy-routing.service "$wants/ly-route-policy-routing.service"
     [ ! -f "$target/lib/systemd/system/smartdns.service" ] || ln -sf /lib/systemd/system/smartdns.service "$wants/smartdns.service"
     [ ! -f "$target/lib/systemd/system/ly-route-dns-vpp-proxy.service" ] || ln -sf /lib/systemd/system/ly-route-dns-vpp-proxy.service "$wants/ly-route-dns-vpp-proxy.service"
     [ ! -f "$target/lib/systemd/system/ly-route-dns-vpp-proxy-v6.service" ] || ln -sf /lib/systemd/system/ly-route-dns-vpp-proxy-v6.service "$wants/ly-route-dns-vpp-proxy-v6.service"
     ln -sf /etc/systemd/system/ly-route-dns-vpp-v6-namespace.service "$wants/ly-route-dns-vpp-v6-namespace.service"
     ln -sf /etc/systemd/system/ly-route-dns-vpp-session.service "$wants/ly-route-dns-vpp-session.service"
-    ln -sf /etc/systemd/system/ly-route-pppoe.target "$wants/ly-route-pppoe.target"
     [ ! -f "$target/lib/systemd/system/xray.service" ] || ln -sf /lib/systemd/system/xray.service "$wants/xray.service"
     ln -sf /etc/systemd/system/ly-route-dns-ipset-sync.timer "$timer_wants/ly-route-dns-ipset-sync.timer"
   fi
@@ -303,6 +348,7 @@ fi
 cp -a "$overlay/." "$rootfs/"
 copy_payload "$rootfs"
 build_control_binary "$rootfs"
+build_pppoe_client_binary "$rootfs"
 install_extra_debs "$rootfs"
 if [ -n "$vpp_apply_binary" ]; then
   mkdir -p "$rootfs/usr/lib/ly-route"
@@ -323,7 +369,26 @@ if [ "$product" = gateway ]; then
 #!/bin/sh
 set -eu
 : "${LY_ROUTE_POLICY_ROUTING_SCRIPT:=/var/lib/ly-route/policy-routing/apply.sh}"
-if [ -x "$LY_ROUTE_POLICY_ROUTING_SCRIPT" ]; then exec "$LY_ROUTE_POLICY_ROUTING_SCRIPT"; fi
+if [ -x "$LY_ROUTE_POLICY_ROUTING_SCRIPT" ]; then
+  : "${LY_ROUTE_POLICY_ROUTING_READY_ATTEMPTS:=60}"
+  : "${LY_ROUTE_POLICY_ROUTING_READY_INTERVAL:=1}"
+  case "$LY_ROUTE_POLICY_ROUTING_READY_ATTEMPTS:$LY_ROUTE_POLICY_ROUTING_READY_INTERVAL" in
+    *[!0-9:]*|0:*|*:0)
+      echo "policy-routing readiness retry settings must be positive integers" >&2
+      exit 1
+      ;;
+  esac
+  attempt=1
+  while ! "$LY_ROUTE_POLICY_ROUTING_SCRIPT"; do
+    if [ "$attempt" -ge "$LY_ROUTE_POLICY_ROUTING_READY_ATTEMPTS" ]; then
+      echo "policy-routing runtime did not become ready" >&2
+      exit 1
+    fi
+    sleep "$LY_ROUTE_POLICY_ROUTING_READY_INTERVAL"
+    attempt=$((attempt + 1))
+  done
+  exit 0
+fi
 : "${LY_ROUTE_POLICY_ROUTING_RECEIPT:=/var/lib/ly-route/policy-routing-receipt.json}"
 mkdir -p "$(dirname "$LY_ROUTE_POLICY_ROUTING_RECEIPT")"
 printf '{"status":"no-policy-rendered","reason":"control plane has not rendered Linux policy routing operations yet"}\n' >"$LY_ROUTE_POLICY_ROUTING_RECEIPT"
@@ -345,7 +410,8 @@ printf '{"operations":[]}\n' >"$rootfs/var/lib/ly-route/vpp/operations.json"
 chmod 0755 "$rootfs/usr/lib/ly-route/firstboot.sh" "$rootfs/usr/lib/ly-route/tune-vpp.sh" \
   "$rootfs/usr/lib/ly-route/runtime-check.sh" "$rootfs/usr/lib/ly-route/recover-runtime.sh" \
   "$rootfs/usr/lib/ly-route/ly-route-control" "$rootfs/usr/lib/ly-route/vpp-apply-default" \
-  "$rootfs/usr/lib/ly-route/dns-ipset-sync.py" "$rootfs/usr/lib/ly-route/active-dpdk-state.py"
+  "$rootfs/usr/lib/ly-route/dns-ipset-sync.py" "$rootfs/usr/lib/ly-route/active-dpdk-state.py" \
+  "$rootfs/usr/lib/ly-route/ly-route-pppoe-client"
 
 printf 'ly-route\n' >"$rootfs/etc/hostname"
 mkdir -p "$rootfs/etc/systemd/resolved.conf.d"

@@ -38,10 +38,16 @@ type resourceStates[T any] struct {
 }
 
 type resourceContract[T any] struct {
-	kind          string
-	identity      func(T) string
-	equal         func(T, T) bool
-	repairInPlace func(observed, wanted T) (T, bool)
+	kind     string
+	identity func(T) string
+	equal    func(T, T) bool
+	// liveMatchesDesired permits a verified live snapshot to contain
+	// runtime-owned state that is intentionally absent from the persisted
+	// static plan.  It is deliberately separate from equal: prior/desired
+	// comparisons must remain exact, while live reconciliation may account for
+	// state owned by another runtime component.
+	liveMatchesDesired func(observed, wanted T) bool
+	repairInPlace      func(observed, wanted T) (T, bool)
 }
 
 type resourceDiff[T any] struct {
@@ -51,6 +57,13 @@ type resourceDiff[T any] struct {
 
 func ReconcileGatewayPlan(input GatewayReconciliationInput) (GatewayDiff, error) {
 	transactionID, prior, desired, live := input.TransactionID, input.Prior, input.Desired, input.Live
+	routeIngressVPPInterface := gatewayLANVPPInterface(desired)
+	if routeIngressVPPInterface == "" {
+		// A cleanup/recovery transaction can be built from a desired snapshot
+		// that predates logical LAN assignments. Reuse the prior configured
+		// LAN before allowing route deletion to emit an unresolved ABF attach.
+		routeIngressVPPInterface = gatewayLANVPPInterface(prior)
+	}
 	interfaces, err := diffResources(resourceStates[InterfaceState]{prior: prior.Interfaces, desired: desired.Interfaces, live: live.Interfaces}, interfaceContract(), input.RepairVerifiedDrift)
 	if err != nil {
 		return GatewayDiff{}, err
@@ -87,12 +100,21 @@ func ReconcileGatewayPlan(input GatewayReconciliationInput) (GatewayDiff, error)
 		Interfaces: InterfaceBondPlan{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, Interfaces: interfaces.apply, DeleteInterfaces: interfaces.delete},
 		Bonds:      InterfaceBondPlan{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, Bonds: bonds.apply, DeleteBonds: bonds.delete},
 		WANGroups:  RouteWANGroupPlan{TransactionID: transactionID, WANGroups: wanGroups.apply, DeleteWANGroups: wanGroups.delete},
-		Routes:     RouteWANGroupPlan{TransactionID: transactionID, Routes: routes.apply, DeleteRoutes: routes.delete},
+		Routes:     RouteWANGroupPlan{TransactionID: transactionID, IngressVPPInterface: routeIngressVPPInterface, Routes: routes.apply, RoutePolicyContext: append([]trafficpolicy.RoutePolicy(nil), desired.Policy.RoutePolicies...), DeleteRoutes: routes.delete},
 		ACLs:       ACLQoSPlan{TransactionID: transactionID, ACLs: acls.apply, DeleteACLs: acls.delete},
 		QoS:        ACLQoSPlan{TransactionID: transactionID, QoS: qos.apply, DeleteQoS: qos.delete},
 		NAT44:      NAT44Plan{TransactionID: transactionID, StaticMappings: staticMappings.apply, DeleteStaticMappings: staticMappings.delete},
 		PortMaps:   NAT44Plan{TransactionID: transactionID, PortMappings: portMappings.apply, DeletePortMappings: portMappings.delete},
 	}, nil
+}
+
+func gatewayLANVPPInterface(plan Plan) string {
+	for _, assignment := range plan.AddressAssignments {
+		if strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			return strings.TrimSpace(assignment.VPPInterface)
+		}
+	}
+	return ""
 }
 
 func diffResources[T any](states resourceStates[T], contract resourceContract[T], repairVerifiedDrift bool) (resourceDiff[T], error) {
@@ -155,7 +177,11 @@ func diffVerifiedLiveResources[T any](states resourceStates[T], desired, live ma
 			diff.delete = append(diff.delete, id)
 			continue
 		}
-		if !contract.equal(observed, wanted) {
+		matches := contract.equal(observed, wanted)
+		if !matches && contract.liveMatchesDesired != nil {
+			matches = contract.liveMatchesDesired(observed, wanted)
+		}
+		if !matches {
 			if contract.repairInPlace != nil {
 				if repair, ok := contract.repairInPlace(observed, wanted); ok {
 					diff.apply = append(diff.apply, repair)

@@ -9,9 +9,9 @@ import (
 
 func liveReadback(ctx context.Context, runner CommandRunner, service ServiceName, artifacts []RenderedArtifact) error {
 	var err error
-	// PPPoE uses one instantiated systemd unit per WAN. The live PPP interfaces
-	// are authoritative; checking the uninstantiated template is a false failure.
-	if service != PPPd {
+	// PPPoE uses one instantiated unit per WAN, while Linux routing is applied by
+	// a verified oneshot helper. Their live network state is authoritative.
+	if service != PPPoE && service != LinuxRouting {
 		health, healthErr := runner.Status(ctx, service)
 		if healthErr != nil {
 			return healthErr
@@ -28,7 +28,7 @@ func liveReadback(ctx context.Context, runner CommandRunner, service ServiceName
 		_, err = requiredOutput(ctx, runner, "kea-dhcp4", "-t", "/etc/kea/kea-dhcp4.conf")
 	case Xray:
 		_, err = requiredOutput(ctx, runner, "xray", "run", "-test", "-config", "/etc/xray/config.json")
-	case PPPd:
+	case PPPoE:
 		err = validatePPPoEReadback(ctx, runner, artifacts)
 	case Nftables:
 		err = validateNftablesReadback(ctx, runner, artifacts)
@@ -63,7 +63,7 @@ func serviceReadbackCommands(service ServiceName) ([][]string, error) {
 		return [][]string{{"kea-dhcp4", "-t", "/etc/kea/kea-dhcp4.conf"}}, nil
 	case Xray:
 		return [][]string{{"xray", "run", "-test", "-config", "/etc/xray/config.json"}}, nil
-	case PPPd:
+	case PPPoE:
 		return [][]string{{"ip", "-j", "address", "show", "dev", "ppp0"}}, nil
 	case IPv6RA:
 		return [][]string{{"radvdump"}}, nil

@@ -10,7 +10,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 docker run -d --rm --name "$name" --network none --entrypoint sh "$image" -c '
-  printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table }\n" >/tmp/vpp.conf
+  printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table use-app-socket-api }\n" >/tmp/vpp.conf
   exec vpp -c /tmp/vpp.conf
 ' >/dev/null
 

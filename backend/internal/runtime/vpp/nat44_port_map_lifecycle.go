@@ -97,14 +97,14 @@ func BuildNAT44Operations(plan NAT44Plan) ([]Operation, error) {
 		if !found {
 			return nil, fmt.Errorf("%w: prior NAT static mapping %q is required for deletion", ErrSnapshotIncomplete, id)
 		}
-		operations = append(operations, Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: transactionID, Resource: id, VPPCtlCommands: deleteNATStaticCommands(mapping)})
+		operations = append(operations, Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: transactionID, Resource: id, Payload: mapping, VPPCtlCommands: deleteNATStaticCommands(mapping)})
 	}
 	for _, id := range plan.DeletePortMappings {
 		mapping, found := portMappingByID(append(plan.ReadbackPortMappings, plan.PortMappings...), id)
 		if !found {
 			return nil, fmt.Errorf("%w: prior NAT port mapping %q is required for deletion", ErrSnapshotIncomplete, id)
 		}
-		operations = append(operations, Operation{Name: "vpp.nat44-ed.port-map", RequestID: transactionID, Resource: id, VPPCtlCommands: deleteNATPortCommands(mapping)})
+		operations = append(operations, Operation{Name: "vpp.nat44-ed.port-map", RequestID: transactionID, Resource: id, Payload: mapping, VPPCtlCommands: deleteNATPortCommands(mapping)})
 	}
 	return operations, nil
 }
@@ -127,12 +127,12 @@ func (a Adapter) nat44Failure(ctx context.Context, channel Channel, transactionI
 func cleanupNAT44(ctx context.Context, channel Channel, transactionID string, plan NAT44Plan) error {
 	var cleanup []error
 	for _, mapping := range plan.PortMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback-delete", RequestID: transactionID, Resource: mapping.ID, VPPCtlCommands: deleteNATPortCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback-delete", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: deleteNATPortCommands(mapping)}); err != nil {
 			cleanup = append(cleanup, err)
 		}
 	}
 	for _, mapping := range plan.StaticMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback-delete", RequestID: transactionID, Resource: mapping.ID, VPPCtlCommands: deleteNATStaticCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback-delete", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: deleteNATStaticCommands(mapping)}); err != nil {
 			cleanup = append(cleanup, err)
 		}
 	}
@@ -142,12 +142,12 @@ func cleanupNAT44(ctx context.Context, channel Channel, transactionID string, pl
 func applyNAT44Snapshot(ctx context.Context, channel Channel, transactionID string, snapshot Snapshot) error {
 	var replay []error
 	for _, mapping := range snapshot.NAT.StaticMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback", RequestID: transactionID, Resource: mapping.ID, VPPCtlCommands: natStaticMappingCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natStaticMappingCommands(mapping)}); err != nil {
 			replay = append(replay, err)
 		}
 	}
 	for _, mapping := range snapshot.NAT.PortMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback", RequestID: transactionID, Resource: mapping.ID, VPPCtlCommands: natPortMappingCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natPortMappingCommands(mapping)}); err != nil {
 			replay = append(replay, err)
 		}
 	}
@@ -155,7 +155,7 @@ func applyNAT44Snapshot(ctx context.Context, channel Channel, transactionID stri
 }
 
 func nat44SnapshotRequest(transactionID string, config nat.CompiledConfig) SnapshotRequest {
-	request := SnapshotRequest{TransactionID: transactionID, Capabilities: []SnapshotCapability{SnapshotCapabilityNAT44}}
+	request := SnapshotRequest{TransactionID: transactionID, Capabilities: []SnapshotCapability{SnapshotCapabilityNAT44}, VerifyNATReturnGuards: len(config.StaticMappings)+len(config.PortMappings) > 0}
 	for _, mapping := range config.StaticMappings {
 		request.NATStaticMappings = append(request.NATStaticMappings, mapping.ID)
 	}

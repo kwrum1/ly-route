@@ -32,15 +32,20 @@ type Config struct {
 }
 
 type Session struct {
-	ID            uint16 `json:"session_id"`
-	LocalAddress  string `json:"local_address"`
-	RemoteAddress string `json:"remote_address"`
-	ACMAC         MAC    `json:"ac_mac"`
-	ClientMAC     MAC    `json:"client_mac"`
-	AuthProtocol  uint16 `json:"auth_protocol,omitempty"`
-	LocalIPv6     string `json:"local_ipv6,omitempty"`
-	RemoteIPv6    string `json:"remote_ipv6,omitempty"`
-	IPv6Ready     bool   `json:"ipv6_ready"`
+	ID                      uint16 `json:"session_id"`
+	LocalAddress            string `json:"local_address"`
+	RemoteAddress           string `json:"remote_address"`
+	ACMAC                   MAC    `json:"ac_mac"`
+	ClientMAC               MAC    `json:"client_mac"`
+	AuthProtocol            uint16 `json:"auth_protocol,omitempty"`
+	LocalIPv6               string `json:"local_ipv6,omitempty"`
+	RemoteIPv6              string `json:"remote_ipv6,omitempty"`
+	IPv6Ready               bool   `json:"ipv6_ready"`
+	DelegatedPrefix         string `json:"delegated_prefix,omitempty"`
+	PrefixPreferredLifetime uint32 `json:"prefix_preferred_lifetime,omitempty"`
+	PrefixValidLifetime     uint32 `json:"prefix_valid_lifetime,omitempty"`
+	PrefixT1                uint32 `json:"prefix_t1,omitempty"`
+	PrefixT2                uint32 `json:"prefix_t2,omitempty"`
 }
 
 type Client struct {
@@ -190,31 +195,7 @@ func linkLocalFromIID(iid [8]byte) netip.Addr {
 // Serve keeps the negotiated control channel alive. IPv4 and IPv6 payloads do
 // not traverse this method; VPP's native pppoe_session interface owns them.
 func (client *Client) Serve(ctx context.Context) error {
-	for {
-		packet, err := client.receiveSession(ctx, time.Second)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			continue
-		}
-		if packet.Protocol != ProtocolLCP {
-			continue
-		}
-		code, id, body, err := DecodeControl(packet.Payload)
-		if err != nil {
-			continue
-		}
-		switch code {
-		case controlEchoRequest:
-			if err := client.sendControl(ctx, ProtocolLCP, controlEchoReply, id, append(client.magic[:], body[min(4, len(body)):]...)); err != nil {
-				return err
-			}
-		case controlTerminateRequest:
-			_ = client.sendControl(ctx, ProtocolLCP, controlTerminateAck, id, body)
-			return errors.New("PPPoE peer terminated the session")
-		}
-	}
+	return client.serveWithDelegatedPrefix(ctx, Session{}, DelegatedPrefixLease{}, nil)
 }
 
 func (client *Client) Disconnect(ctx context.Context) error {

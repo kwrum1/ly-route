@@ -9,7 +9,7 @@ import (
 )
 
 func GatewayDiffSnapshotRequest(transactionID string, prior, desired Plan) SnapshotRequest {
-	request := SnapshotRequest{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface}
+	request := SnapshotRequest{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, AllowMissing: true}
 	request.Interfaces = interfaceNames(prior.Interfaces)
 	request.Candidates.Interfaces = unionCandidates(prior.Interfaces, desired.Interfaces, interfaceContract())
 	request.Bonds = bondNames(prior.Bonds)
@@ -26,6 +26,7 @@ func GatewayDiffSnapshotRequest(transactionID string, prior, desired Plan) Snaps
 	request.Candidates.NATStaticMappings = unionCandidates(prior.NAT.StaticMappings, desired.NAT.StaticMappings, natStaticContract())
 	request.NATPortMappings = portMapIDs(prior.NAT.PortMappings)
 	request.Candidates.NATPortMappings = unionCandidates(prior.NAT.PortMappings, desired.NAT.PortMappings, portMapContract())
+	request.VerifyNATReturnGuards = len(request.Candidates.NATStaticMappings)+len(request.Candidates.NATPortMappings) > 0
 	if len(request.Interfaces) > 0 {
 		request.Capabilities = append(request.Capabilities, SnapshotCapabilityInterfaces)
 	}

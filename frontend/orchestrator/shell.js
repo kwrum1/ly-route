@@ -76,6 +76,7 @@
     function render() {
       renderMenu();
       workspace.innerHTML = renderPage(currentPage(), state);
+      document.dispatchEvent(new CustomEvent("lyroute:rendered"));
     }
 
     menuSearch.addEventListener("input", (event) => {

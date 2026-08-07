@@ -359,6 +359,12 @@ func compileRoutePolicy(item map[string]any, groups map[string]objectGroup, doma
 	}
 	if domainDestinations := expandDomainMatches(item, mapValue(item, "match"), domains); len(domainDestinations) > 0 {
 		match.Destinations = domainDestinations
+	} else if hasDomainMatch(item, mapValue(item, "match")) {
+		// A domain policy has no resolved addresses yet.  Keep it fail-closed
+		// until SmartDNS publishes an observation and the next runtime apply
+		// replaces this sentinel with the live address set; never turn it into
+		// an accidental any-destination rule.
+		match.Destinations = []string{"0.0.0.0/32"}
 	}
 	policy := RoutePolicy{
 		ID:       id,
@@ -616,6 +622,16 @@ func expandDomainMatches(item, match map[string]any, domains map[string][]string
 		ips = append(ips, domains[token]...)
 	}
 	return uniqueStrings(ips)
+}
+
+func hasDomainMatch(item, match map[string]any) bool {
+	tokens := append(splitTokens(stringValue(item, "domain", "domain_group", "dst_domain", "destination_domain")), splitTokens(stringValue(match, "domain", "domain_group", "dst_domain", "destination_domain"))...)
+	for _, token := range tokens {
+		if strings.TrimSpace(token) != "" && !strings.EqualFold(strings.TrimSpace(token), "any") {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUnique(values []string, value string) []string {
@@ -880,8 +896,12 @@ func normalizedAction(value string) string {
 
 func normalizedDirection(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "both", "bidirectional", "input_output", "inbound_outbound", "双向":
+		return "both"
 	case "egress", "output", "out", "lan_to_wan":
 		return "output"
+	case "ingress", "input", "in", "wan_to_lan":
+		return "input"
 	default:
 		return "input"
 	}
@@ -979,6 +999,13 @@ func stringSlice(value any) []string {
 func anySlice(value any) []any {
 	if items, ok := value.([]any); ok {
 		return items
+	}
+	if items, ok := value.([]string); ok {
+		converted := make([]any, 0, len(items))
+		for _, item := range items {
+			converted = append(converted, item)
+		}
+		return converted
 	}
 	return nil
 }

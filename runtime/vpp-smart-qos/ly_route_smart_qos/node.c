@@ -43,11 +43,24 @@ ly_sq_packet_hashes (vlib_main_t *vm, vlib_buffer_t *buffer,
     {
       ethernet_header_t *ethernet = (ethernet_header_t *) data;
       ethernet_type = clib_net_to_host_u16 (ethernet->type);
-      if (ethernet_type == ETHERNET_TYPE_IP4 ||
-          ethernet_type == ETHERNET_TYPE_IP6)
+      network += sizeof (*ethernet);
+      length -= sizeof (*ethernet);
+      while (ethernet_frame_is_tagged (ethernet_type) &&
+             length >= sizeof (ethernet_vlan_header_t))
         {
-          network += sizeof (*ethernet);
-          length -= sizeof (*ethernet);
+          ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) network;
+          ethernet_type = clib_net_to_host_u16 (vlan->type);
+          network += sizeof (*vlan);
+          length -= sizeof (*vlan);
+        }
+      if (ethernet_type == 0x8864 && length >= 8)
+        {
+          /* PPPoE session header (6 bytes) followed by the PPP protocol. */
+          u16 ppp_protocol = clib_net_to_host_u16 (*(u16 *) (network + 6));
+          network += 8;
+          length -= 8;
+          if (ppp_protocol != 0x0021 && ppp_protocol != 0x0057)
+            length = 0;
         }
     }
   if (length >= sizeof (ip4_header_t) && (network[0] >> 4) == 4)
@@ -295,6 +308,28 @@ ly_sq_codel_should_drop (ly_sq_flow_t *flow, ly_sq_entry_t *entry, f64 now)
   return 0;
 }
 
+typedef struct
+{
+  u32 phase;
+  u32 tx_before;
+  u32 tx_after;
+  u32 scheduler_if;
+  u32 next_index;
+  u32 config_index;
+} ly_sq_trace_t;
+
+static u8 *
+format_ly_sq_trace (u8 *s, va_list *args)
+{
+  CLIB_UNUSED (vlib_main_t *vm) = va_arg (*args, vlib_main_t *);
+  CLIB_UNUSED (vlib_node_t *node) = va_arg (*args, vlib_node_t *);
+  ly_sq_trace_t *trace = va_arg (*args, ly_sq_trace_t *);
+  return format (s, "phase %u tx-before %u tx-after %u scheduler-if %u "
+                 "next %u config %u", trace->phase, trace->tx_before,
+                 trace->tx_after, trace->scheduler_if, trace->next_index,
+                 trace->config_index);
+}
+
 static_always_inline u32
 ly_sq_enqueue_buffer (vlib_main_t *vm, ly_sq_scheduler_t *scheduler,
                       u32 buffer_index, f64 now)
@@ -362,22 +397,31 @@ VLIB_NODE_FN (ly_sq_feature_node) (vlib_main_t *vm,
     {
       u32 buffer_index = from[0];
       vlib_buffer_t *buffer = vlib_get_buffer (vm, buffer_index);
-      u32 sw_if_index = vnet_buffer (buffer)->sw_if_index[VLIB_TX];
+      u32 logical_sw_if_index =
+        vnet_buffer (buffer)->sw_if_index[VLIB_TX];
+      u32 sw_if_index = LY_SQ_INVALID_INDEX;
       ly_sq_scheduler_t *scheduler = 0;
       u32 next_index;
       from++;
-      vnet_get_config_data (&fcm->config_main,
-                            &buffer->current_config_index, &next_index, 0);
-      if (PREDICT_FALSE (buffer->flags & LY_SQ_REINJECT_FLAG))
+      ly_sq_feature_config_t *feature_config =
+        vnet_get_config_data (&fcm->config_main,
+                              &buffer->current_config_index, &next_index,
+                              sizeof (*feature_config));
+      if (feature_config->magic == LY_SQ_FEATURE_CONFIG_MAGIC)
+        sw_if_index = feature_config->sw_if_index;
+      if (PREDICT_FALSE (buffer->flags & VLIB_BUFFER_IS_TRACED))
         {
-          buffer->flags &= ~LY_SQ_REINJECT_FLAG;
-          forward[0] = buffer_index;
-          forward_next[0] = next_index;
-          forward++;
-          forward_next++;
-          continue;
+          ly_sq_trace_t *trace = vlib_add_trace (vm, node, buffer,
+                                                 sizeof (*trace));
+          trace->phase = 1;
+          trace->tx_before = logical_sw_if_index;
+          trace->tx_after = logical_sw_if_index;
+          trace->scheduler_if = ~0;
+          trace->next_index = next_index;
+          trace->config_index = buffer->current_config_index;
         }
-      if (sw_if_index >= vec_len (sqm->enabled_by_sw_if_index) ||
+      if (sw_if_index == LY_SQ_INVALID_INDEX ||
+          sw_if_index >= vec_len (sqm->enabled_by_sw_if_index) ||
           !sqm->enabled_by_sw_if_index[sw_if_index])
         {
           forward[0] = buffer_index;
@@ -386,6 +430,11 @@ VLIB_NODE_FN (ly_sq_feature_node) (vlib_main_t *vm,
           forward_next++;
           continue;
         }
+      scheduler =
+        &sqm->schedulers_by_thread[sqm->scheduler_thread_index][sw_if_index];
+      /* Set the carrier before a worker handoff.  The enqueue node uses this
+       * field to select the same scheduler on the target thread. */
+      vnet_buffer (buffer)->sw_if_index[VLIB_TX] = sw_if_index;
       if (vm->thread_index != sqm->scheduler_thread_index)
         {
           handoff_threads[handoff - handoffs] = sqm->scheduler_thread_index;
@@ -393,8 +442,17 @@ VLIB_NODE_FN (ly_sq_feature_node) (vlib_main_t *vm,
           handoff++;
           continue;
         }
-      scheduler =
-        &sqm->schedulers_by_thread[sqm->scheduler_thread_index][sw_if_index];
+      if (PREDICT_FALSE (buffer->flags & VLIB_BUFFER_IS_TRACED))
+        {
+          ly_sq_trace_t *trace = vlib_add_trace (vm, node, buffer,
+                                                 sizeof (*trace));
+          trace->phase = 2;
+          trace->tx_before = logical_sw_if_index;
+          trace->tx_after = vnet_buffer (buffer)->sw_if_index[VLIB_TX];
+          trace->scheduler_if = scheduler->sw_if_index;
+          trace->next_index = next_index;
+          trace->config_index = buffer->current_config_index;
+        }
       u32 victim_buffer =
         ly_sq_enqueue_buffer (vm, scheduler, buffer_index, now);
       if (victim_buffer != LY_SQ_INVALID_INDEX)
@@ -543,11 +601,25 @@ VLIB_NODE_FN (ly_sq_scheduler_node) (vlib_main_t *vm,
             }
           if (scheduler->tokens < entry->length)
             break;
+          if (PREDICT_FALSE (vlib_get_buffer (vm, entry->buffer_index)->flags &
+                             VLIB_BUFFER_IS_TRACED))
+            {
+              ly_sq_trace_t *trace = vlib_add_trace (
+                vm, node, vlib_get_buffer (vm, entry->buffer_index),
+                sizeof (*trace));
+              trace->phase = 3;
+              trace->tx_before =
+                vnet_buffer (vlib_get_buffer (vm, entry->buffer_index))
+                  ->sw_if_index[VLIB_TX];
+              trace->tx_after = trace->tx_before;
+              trace->scheduler_if = scheduler->sw_if_index;
+              trace->next_index = entry->output_next_index;
+              trace->config_index =
+                vlib_get_buffer (vm, entry->buffer_index)->current_config_index;
+            }
           u32 entry_index = ly_sq_release_head (scheduler, flow);
           buffers[n_tx] = entry->buffer_index;
           nexts[n_tx] = entry->output_next_index;
-          vlib_get_buffer (vm, entry->buffer_index)->flags |=
-            LY_SQ_REINJECT_FLAG;
           n_tx++;
           flow->deficit -= entry->length;
           host->deficit -= entry->length;
@@ -582,6 +654,8 @@ VLIB_REGISTER_NODE (ly_sq_feature_node) = {
   .name = "ly-route-smart-qos-output",
   .vector_size = sizeof (u32),
   .type = VLIB_NODE_TYPE_INTERNAL,
+  .flags = VLIB_NODE_FLAG_TRACE_SUPPORTED,
+  .format_trace = format_ly_sq_trace,
   .n_errors = LY_SQ_N_ERROR,
   .error_strings = ly_sq_error_strings,
 };
@@ -589,6 +663,8 @@ VLIB_REGISTER_NODE (ly_sq_feature_node) = {
 VLIB_REGISTER_NODE (ly_sq_scheduler_node) = {
   .name = "ly-route-smart-qos-scheduler",
   .type = VLIB_NODE_TYPE_INPUT,
+  .flags = VLIB_NODE_FLAG_TRACE_SUPPORTED,
+  .format_trace = format_ly_sq_trace,
   .state = VLIB_NODE_STATE_DISABLED,
   .n_errors = LY_SQ_N_ERROR,
   .error_strings = ly_sq_error_strings,

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -37,6 +36,8 @@ func TestRenderGatewayNftablesCaptureInterceptsTCPAndUDPDNSOnlyOnExplicitLAN(t *
 	}
 	content := artifacts[0].Content
 	for _, wanted := range []string{
+		"add table inet ly_route_dns_capture",
+		"flush table inet ly_route_dns_capture",
 		"table inet ly_route_dns_capture",
 		"type nat hook prerouting priority -100",
 		`iifname "lan0" udp dport 53 counter redirect to :53`,
@@ -50,11 +51,106 @@ func TestRenderGatewayNftablesCaptureInterceptsTCPAndUDPDNSOnlyOnExplicitLAN(t *
 	if strings.Count(content, `iifname "lan0" udp dport 53`) != 1 || strings.Contains(content, "0.0.0.0/0") {
 		t.Fatalf("DNS interception is duplicated or not LAN-scoped:\n%s", content)
 	}
+	if strings.Contains(content, "flush ruleset") || strings.Contains(content, "destroy table") {
+		t.Fatalf("nftables renderer used a destructive or unsupported command:\n%s", content)
+	}
 }
 
 func TestRenderGatewayNftablesCaptureRejectsUnsafeLANInterface(t *testing.T) {
 	if _, err := RenderGatewayNftablesCapture(proxy.NftablesCapturePlan{}, DNSInterceptionPlan{LANInterfaces: []string{"lan0; flush ruleset"}}); err == nil {
 		t.Fatal("unsafe LAN interface was accepted")
+	}
+}
+
+func TestExpectedNftablesRulesAllowsProxyOnlyCapture(t *testing.T) {
+	content := `table inet ly_route_proxy_capture {
+  chain proxy_prerouting {
+    iifname "proxy-in" meta l4proto tcp tproxy to :20001 meta mark set 0x101 accept
+    iifname "proxy-in" meta l4proto udp tproxy to :20001 meta mark set 0x101 accept
+  }
+}`
+	family, table, rules, err := expectedNftablesRules(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if family != "inet" || table != "ly_route_proxy_capture" || len(rules) != 2 {
+		t.Fatalf("expected nftables rules = %s %s %#v", family, table, rules)
+	}
+}
+
+func TestExpectedNftablesRulesRejectsDNSAfterTProxy(t *testing.T) {
+	content := `table inet ly_route_proxy_capture {
+  chain proxy_prerouting {
+    iifname "proxy-in" meta l4proto tcp tproxy to :20001 meta mark set 0x101 accept
+    iifname "proxy-in" meta l4proto udp tproxy to :20001 meta mark set 0x101 accept
+    iifname "lan0" udp dport 53 redirect to :53
+    iifname "lan0" tcp dport 53 redirect to :53
+  }
+}`
+	if _, _, _, err := expectedNftablesRules(content); err == nil || !strings.Contains(err.Error(), "DNS-before-TProxy") {
+		t.Fatalf("expected DNS-before-TProxy ordering failure, got %v", err)
+	}
+}
+
+func TestNormalizedNftablesCanonicalizesPaddedMarks(t *testing.T) {
+	want := normalizedNftables(`meta mark set 0x100475 accept`)
+	got := normalizedNftables(`meta mark set 0x00100475 accept`)
+	if got != want {
+		t.Fatalf("normalized mark = %q, want %q", got, want)
+	}
+}
+
+func TestRequirePolicyRuleAcceptsOmittedFullMask(t *testing.T) {
+	expected := policyRuleExpectation{Mark: "0x2006cc", Mask: "0xffffffff", Table: 30756, Priority: 2056}
+	output := `[{"priority":2056,"src":"all","fwmark":"0x2006cc","table":"30756"}]`
+	if err := requirePolicyRule(output, expected); err != nil {
+		t.Fatal(err)
+	}
+	expected.Mask = "0xffff"
+	if err := requirePolicyRule(output, expected); err == nil {
+		t.Fatal("omitted non-default policy mask was accepted")
+	}
+}
+
+func TestRequirePolicyRuleAcceptsBoundSource(t *testing.T) {
+	expected := policyRuleExpectation{Source: "198.19.28.18", Table: 50716, Priority: 18042}
+	output := "[{\"priority\":18042,\"src\":\"198.19.28.18\",\"table\":50716}]"
+	if err := requirePolicyRule(output, expected); err != nil {
+		t.Fatal(err)
+	}
+	expected.Source = "198.19.28.19"
+	if err := requirePolicyRule(output, expected); err == nil {
+		t.Fatal("incorrect source policy rule was accepted")
+	}
+}
+
+func TestParsePolicyRoutingExpectationKeepsEachRouteTable(t *testing.T) {
+	content := strings.Join([]string{
+		"ip rule add fwmark 0x100475/0xffffffff table 23653 priority 1253",
+		"ip route replace local 0.0.0.0/0 dev lo table 23653",
+		"ip rule add fwmark 0x2006cc/0xffffffff table 30756 priority 2056",
+		"ip route replace default via 198.18.17.217 dev proxy-out table 30756",
+		"ip route replace 10.1.18.0/24 via 198.18.17.213 dev proxy-in",
+	}, "\n")
+	expected, err := parsePolicyRoutingExpectation(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expected.Rules) != 2 || len(expected.Routes) != 3 {
+		t.Fatalf("expectation = %#v", expected)
+	}
+	if expected.Routes[0].Table != 23653 || expected.Routes[0].Type != "local" || expected.Routes[1].Table != 30756 || expected.Routes[2].Table != 254 {
+		t.Fatalf("route tables = %#v", expected.Routes)
+	}
+}
+
+func TestParsePolicyRoutingExpectationAcceptsExplicitReset(t *testing.T) {
+	expected, err := parsePolicyRoutingExpectation(LinuxRoutingResetArtifact().Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expected.Rules) != 0 || len(expected.Routes) != 0 {
+		t.Fatalf("reset expectation = %#v", expected)
 	}
 }
 
@@ -72,7 +168,7 @@ func TestRuntimeAppliesArtifactsInServiceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "smartdns,kea,xray,nftables,linux-routing,vpp"
+	want := "vpp,linux-routing,smartdns,kea,xray,nftables"
 	if got := strings.Join(controller.applied, ","); got != want {
 		t.Fatalf("apply order = %s, want %s", got, want)
 	}
@@ -91,7 +187,7 @@ func TestRuntimeRollsBackInReverseServiceOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := strings.Join(controller.rolledBack, ","), "vpp,linux-routing,nftables,xray,smartdns"; got != want {
+	if got, want := strings.Join(controller.rolledBack, ","), "nftables,xray,smartdns,linux-routing,vpp"; got != want {
 		t.Fatalf("rollback order = %s, want %s", got, want)
 	}
 }
@@ -113,7 +209,7 @@ func TestRuntimeRollbackContinuesAndJoinsFailures(t *testing.T) {
 	if !errors.Is(err, first) || !errors.Is(err, second) {
 		t.Fatalf("rollback error = %v, want both controller failures", err)
 	}
-	if got, want := strings.Join(controller.rolledBack, ","), "vpp,smartdns"; got != want {
+	if got, want := strings.Join(controller.rolledBack, ","), "smartdns,vpp"; got != want {
 		t.Fatalf("rollback order = %s, want %s", got, want)
 	}
 }
@@ -170,6 +266,16 @@ func TestRenderServiceArtifactsForRuntimeTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := proxy.BindServiceNetwork(&compiledProxy, "192.0.2.1 lyroute-wan0", []string{"192.168.88.0/24"}, 1460); err != nil {
+		t.Fatal(err)
+	}
+	dnsNetwork, err := vpp.DNSServiceNetworkForUpstreamID("dns-proxy", compiledProxy.ID, []string{"1.1.1.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vpp.BindDNSServiceNetwork(&dnsNetwork, compiledProxy.ServiceNetwork.IngressHostAddress+" "+compiledProxy.ServiceNetwork.IngressVPPInterface, 1460); err != nil {
+		t.Fatal(err)
+	}
 	xrayArtifacts, err := RenderXray(compiledProxy)
 	if err != nil {
 		t.Fatal(err)
@@ -181,8 +287,18 @@ func TestRenderServiceArtifactsForRuntimeTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(vppArtifacts) != 1 || vppArtifacts[0].Service != VPP || vppArtifacts[0].Path != "/var/lib/ly-route/vpp/operations.json" || !strings.Contains(vppArtifacts[0].Content, "vpp.abf.policy") {
+	if len(vppArtifacts) != 1 || vppArtifacts[0].Service != VPP || vppArtifacts[0].Path != "/var/lib/ly-route/vpp/operations.json" || !strings.Contains(vppArtifacts[0].Content, "vpp.proxy-service.network") {
 		t.Fatalf("vpp artifacts = %#v", vppArtifacts)
+	}
+	routingArtifacts, err := RenderLinuxPolicyRouting(compiledProxy.LinuxPolicyRouting, dnsNetwork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routingArtifacts) != 1 || !strings.Contains(routingArtifacts[0].Content, "ensure_tap") || !strings.Contains(routingArtifacts[0].Content, "wait_vpp_underlay lyroute-wan0") || !strings.Contains(routingArtifacts[0].Content, "set interface mtu packet 1460") || !strings.Contains(routingArtifacts[0].Content, "mtu 1460 up") || !strings.Contains(routingArtifacts[0].Content, "set interface ip address "+compiledProxy.ServiceNetwork.EgressVPPInterface+" "+compiledProxy.ServiceNetwork.EgressCIDR+" del") || !strings.Contains(routingArtifacts[0].Content, "set interface nat44 in "+compiledProxy.ServiceNetwork.EgressVPPInterface+" del") || !strings.Contains(routingArtifacts[0].Content, "ip route replace 192.168.88.0/24") || !strings.Contains(routingArtifacts[0].Content, "net.ipv4.conf."+compiledProxy.ServiceNetwork.IngressHostInterface+".accept_local=1") || !strings.Contains(routingArtifacts[0].Content, "ip route add "+dnsNetwork.HostAddress+"/32 via "+dnsNetwork.HostAddress+" "+dnsNetwork.VPPInterface) || !strings.Contains(routingArtifacts[0].Content, "vpp-return "+dnsNetwork.HostAddress+" "+dnsNetwork.VPPInterface) {
+		t.Fatalf("proxy service routing artifacts = %#v", routingArtifacts)
+	}
+	if strings.Contains(routingArtifacts[0].Content, "set interface nat44 in "+compiledProxy.ServiceNetwork.EgressVPPInterface+" 2>") {
+		t.Fatalf("proxy service TAP was configured as a NAT44 input: %s", routingArtifacts[0].Content)
 	}
 
 	pppoeArtifacts, err := RenderPPPoE(PPPoEPeer{ID: "wan", Interface: "eth0", Username: "user", Password: "secret"})
@@ -202,11 +318,8 @@ func TestRenderServiceArtifactsForRuntimeTargets(t *testing.T) {
 		t.Fatalf("pppoe peer content = %q", pppoeArtifacts[0].Content)
 	}
 
-	if got, want := compiledProxy.NftablesCapture, (proxy.NftablesCapturePlan{}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("legacy nftables capture must be empty: %#v", got)
-	}
-	if got, want := compiledProxy.LinuxPolicyRouting, (proxy.LinuxPolicyRoutingPlan{}); !reflect.DeepEqual(got, want) {
-		t.Fatalf("legacy Linux policy routing must be empty: %#v", got)
+	if compiledProxy.NftablesCapture.IngressInterface != compiledProxy.ServiceNetwork.IngressHostInterface || compiledProxy.LinuxPolicyRouting.Network.EgressID != compiledProxy.ID {
+		t.Fatalf("proxy service handoff plans are incomplete: %#v %#v", compiledProxy.NftablesCapture, compiledProxy.LinuxPolicyRouting)
 	}
 }
 
@@ -226,9 +339,43 @@ func TestRenderSmartDNSBundlePinsDNSPolicyToSelectedWANAndBoundsCache(t *testing
 		t.Fatal(err)
 	}
 	content := artifacts[0].Content
-	for _, required := range []string{"server 9.9.9.9 -group dns-wan-primary -exclude-default-group -interface wan0", "address /-.updates.example/-", "nameserver /-.updates.example/dns-wan-primary", "ipset /-.updates.example/lyroute_dns_fixed-wan", "cache-size 32768", "rr-ttl-min 60", "rr-ttl-max 600", "prefetch-domain yes"} {
+	for _, required := range []string{"server 9.9.9.9 -group dns-wan-primary -exclude-default-group -interface wan0", "address /-.updates.example/-", "nameserver /-.updates.example/dns-wan-primary", "ipset /-.updates.example/lyroute_dns_fixed-wan", "cache-persist no", "cache-size 32768", "rr-ttl-min 60", "rr-ttl-max 600", "prefetch-domain yes"} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("smartdns bundle missing %q: %s", required, content)
+		}
+	}
+}
+
+func TestRenderSmartDNSBundleSupportsDoHAndFixedWANMiss(t *testing.T) {
+	policy := dns.NewPolicy(dns.Outcome{Kind: dns.OutcomeDirect, UpstreamID: "dns-cf", WANEgressID: "proxy"}, []dns.Rule{{
+		ID:      "cn",
+		Domains: []string{"cn.example"},
+		Outcome: dns.Outcome{Kind: dns.OutcomeDirect, UpstreamID: "dns-ali", WANEgressID: "pppoe"},
+	}})
+	compiled, err := dns.CompilePolicy(policy, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := RenderSmartDNSBundle([]SmartDNSPlan{{
+		ID:     "active",
+		Render: compiled.RenderSmartDNS(),
+		Upstreams: []SmartDNSUpstream{
+			{ID: "dns-ali", Servers: []string{"https://dns.alidns.com/dns-query"}, Interface: "ppp0", WANEgressID: "pppoe"},
+			{ID: "dns-cf", Servers: []string{"https://cloudflare-dns.com/dns-query"}, Interface: "proxy0", WANEgressID: "proxy"},
+		},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := artifacts[0].Content
+	for _, required := range []string{
+		"server-https https://dns.alidns.com/dns-query -group dns-ali -exclude-default-group -interface ppp0",
+		"server-https https://cloudflare-dns.com/dns-query -group dns-cf -exclude-default-group -interface proxy0",
+		"nameserver /./dns-cf",
+		"ipset /-.cn.example/lyroute_dns_cn",
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("DoH/fixed-WAN SmartDNS output missing %q: %s", required, content)
 		}
 	}
 }
@@ -254,10 +401,27 @@ func TestRenderSmartDNSBundleScopesSourcePrefixWithoutBroadeningPolicy(t *testin
 		t.Fatalf("smartdns source routing artifacts = %#v", artifacts)
 	}
 	content := artifacts[0].Content
-	for _, required := range []string{"bind 127.0.0.1:12000 -group lyroute-client-", "bind-tcp 127.0.0.1:12000 -group lyroute-client-", "bind 127.0.0.1:12001 -group lyroute-client-", "bind-tcp 127.0.0.1:12001 -group lyroute-client-", "group-begin lyroute-client-", "-inherit none", "nameserver /-.updates.example/dns-wan-primary", "ipset /-.updates.example/lyroute_dns_scoped", "group-end"} {
+	for _, required := range []string{"cache-persist no", "bind 127.0.0.1:12000 -group lyroute-client-", "bind-tcp 127.0.0.1:12000 -group lyroute-client-", "bind 127.0.0.1:12001 -group lyroute-client-", "bind-tcp 127.0.0.1:12001 -group lyroute-client-", "group-begin lyroute-client-", "-inherit none", "nameserver /-.updates.example/dns-wan-primary", "ipset /-.updates.example/lyroute_dns_scoped", "group-end"} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("smartdns source-scoped bundle missing %q: %s", required, content)
 		}
+	}
+	udpLine := strings.SplitN(strings.SplitN(content, "bind 127.0.0.1:12000 -group ", 2)[1], "\n", 2)[0]
+	tcpLine := strings.SplitN(strings.SplitN(content, "bind-tcp 127.0.0.1:12000 -group ", 2)[1], "\n", 2)[0]
+	udpFields := strings.Fields(udpLine)
+	tcpFields := strings.Fields(tcpLine)
+	if len(udpFields) != 3 || len(tcpFields) != 3 || udpFields[0] != tcpFields[0] || udpFields[1] != "-no-cache" || tcpFields[1] != "-no-cache" || udpFields[2] != "-no-speed-check" || tcpFields[2] != "-no-speed-check" {
+		t.Fatalf("smartdns source-scoped listeners must bypass shared cache and speed selection: %s", content)
+	}
+	groupAt := strings.Index(content, "group-begin "+udpFields[0]+" -inherit none")
+	groupEndAt := -1
+	if groupAt >= 0 {
+		groupEndAt = strings.Index(content[groupAt:], "group-end\n") + groupAt
+	}
+	udpAt := strings.Index(content, "bind 127.0.0.1:12000 -group "+udpLine)
+	tcpAt := strings.Index(content, "bind-tcp 127.0.0.1:12000 -group "+tcpLine)
+	if groupAt < 0 || groupEndAt < groupAt || udpAt < groupEndAt || tcpAt < udpAt || strings.Contains(content, "client-rules ") {
+		t.Fatalf("smartdns UDP/TCP listeners are not explicitly bound to one policy group: %s", content)
 	}
 	if got, want := artifacts[1].Content, "# source-prefix match-kind domain smartdns-port\n192.0.2.0/24 exact updates.example 12000\n198.51.100.0/24 exact packages.example 12001\n"; got != want {
 		t.Fatalf("smartdns source route map = %q, want %q", got, want)
@@ -284,10 +448,14 @@ func TestRenderSmartDNSBundleExpandsSuffixesAndDomainSetsForSourceRouting(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"address /video.example/#", "address /-.portal.example/#", "address /updates.example/#"} {
+	setName := smartDNSDomainSetName("managed-domains")
+	for _, required := range []string{"domain-set -name " + setName + " -type list -file /etc/smartdns/domain-sets/" + setName + ".list", "address /video.example/#", "address /domain-set:" + setName + "/#"} {
 		if !strings.Contains(artifacts[0].Content, required) {
 			t.Fatalf("smartdns content missing %q: %s", required, artifacts[0].Content)
 		}
+	}
+	if strings.Contains(artifacts[0].Content, "portal.example/#") || strings.Contains(artifacts[0].Content, "updates.example/#") {
+		t.Fatalf("smartdns domain set was expanded into per-domain rules: %s", artifacts[0].Content)
 	}
 	wantRoutes := "# source-prefix match-kind domain smartdns-port\n" +
 		"192.0.2.0/24 suffix video.example 12000\n" +
@@ -295,6 +463,9 @@ func TestRenderSmartDNSBundleExpandsSuffixesAndDomainSetsForSourceRouting(t *tes
 		"192.0.2.0/24 suffix updates.example 12000\n"
 	if artifacts[1].Content != wantRoutes {
 		t.Fatalf("source routes = %q, want %q", artifacts[1].Content, wantRoutes)
+	}
+	if len(artifacts) != 3 || artifacts[2].Path != "/etc/smartdns/domain-sets/"+setName+".list" || artifacts[2].Content != "-.portal.example\nupdates.example\n" {
+		t.Fatalf("domain set artifact = %#v", artifacts)
 	}
 	if _, err := RenderSmartDNSBundle([]SmartDNSPlan{{ID: "missing-set", Render: compiled.RenderSmartDNS()}}); err == nil || !strings.Contains(err.Error(), "domain set \"managed-domains\" is unavailable") {
 		t.Fatalf("missing domain set error = %v", err)
@@ -369,7 +540,7 @@ func TestRenderPPPoERejectsUnsafeProductionConfig(t *testing.T) {
 
 func TestRenderPPPoEConfigCreatesIndependentMultiWANPeersAndNativeSecrets(t *testing.T) {
 	artifacts, err := RenderPPPoEConfig([]PPPoEPeer{
-		{ID: "wan-blue", Interface: "eth7", Username: "blue-user", Password: "blue-secret"},
+		{ID: "wan-blue", Interface: "eth7", Username: "blue-user", Password: "blue-secret", NATInsideInterfaces: []string{"lyroute-lan0"}},
 		{ID: "wan-green", Interface: "eth8", Username: "green-user", Password: "green-secret"},
 	})
 	if err != nil {
@@ -385,6 +556,12 @@ func TestRenderPPPoEConfigCreatesIndependentMultiWANPeersAndNativeSecrets(t *tes
 		if strings.Contains(artifact.AuditSummary, "blue-secret") || strings.Contains(artifact.AuditSummary, "green-secret") {
 			t.Fatalf("native client secret leaked through audit: %s", artifact.AuditSummary)
 		}
+		if !strings.Contains(artifact.Content, `"vppctl": "vppctl"`) || strings.Contains(artifact.Content, "/usr/local/bin/ly-route-vppctl") {
+			t.Fatalf("native client config does not use the production VPP CLI from PATH: %s", artifact.Content)
+		}
+	}
+	if !strings.Contains(artifacts[0].Content, "nat_inside_interfaces") || !strings.Contains(artifacts[0].Content, "lyroute-lan0") {
+		t.Fatalf("PPPoE artifact omitted NAT inside interfaces: %s", artifacts[0].Content)
 	}
 	units := applyUnits(PPPd, artifacts)
 	if got, want := strings.Join(units, ","), "ly-route-pppoe@ly-route-wan-blue.service,ly-route-pppoe@ly-route-wan-green.service"; got != want {
@@ -494,6 +671,29 @@ func TestFilesystemControllerWritesArtifactsAndRunsServiceCommand(t *testing.T) 
 	}
 	if got, want := strings.Join(runner.commands, " "), "systemctl reload-or-restart smartdns.service systemctl show smartdns.service --property=ActiveEnterTimestampMonotonic --value"; got != want {
 		t.Fatalf("commands = %q, want %q", got, want)
+	}
+}
+
+func TestFilesystemControllerKeaRestartRemovesStaleLeaseCleanupLock(t *testing.T) {
+	root := t.TempDir()
+	pidPath := filepath.Join(root, "var/lib/kea/kea-leases4.csv.pid")
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath, nil, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	controller := FilesystemController{RootDir: root, Runner: runner}
+
+	if err := controller.runApplyCommand(context.Background(), Kea, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale Kea lease cleanup lock error = %v, want not exist", err)
+	}
+	if got, want := strings.Join(runner.commands, ","), "systemctl stop kea-dhcp4-server.service,systemctl start kea-dhcp4-server.service"; got != want {
+		t.Fatalf("Kea restart commands = %q, want %q", got, want)
 	}
 }
 

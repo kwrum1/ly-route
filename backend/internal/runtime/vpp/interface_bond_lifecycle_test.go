@@ -81,8 +81,8 @@ func TestGatewayInterfaceBondUsesVPP2510CLIAndStableLogicalName(t *testing.T) {
 func TestGatewayInterfaceBondDeleteExecutesThroughChannelAndReadsBack(t *testing.T) {
 	// Given
 	client := &lifecycleClient{replies: map[string]Reply{
-		"vpp.interface.snapshot":      {Payload: InterfaceReadback{Interfaces: []InterfaceState{{Name: "lyroute-eth2", AdminState: "up", LinkState: "up"}}}},
-		"vpp.interface-bond.snapshot": {Payload: BondReadback{Bonds: []BondState{{Name: "bond1", Mode: "active-backup", Members: []string{"lyroute-eth2"}}}}},
+		"vpp.interface.snapshot":      {Payload: InterfaceReadback{}},
+		"vpp.interface-bond.snapshot": {Payload: BondReadback{}},
 	}}
 
 	// When
@@ -102,8 +102,8 @@ func TestGatewayInterfaceBondDeleteExecutesThroughChannelAndReadsBack(t *testing
 	if client.operations[0].Name != "vpp.interface.address" || client.operations[1].Name != "vpp.interface-bond" || client.operations[2].Name != "vpp.interface.snapshot" || client.operations[3].Name != "vpp.interface-bond.snapshot" {
 		t.Fatalf("operations = %#v, want delete/readback sequence", client.operations)
 	}
-	if result.Readback.Interfaces[0].Name != "lyroute-eth2" || result.Readback.Bonds[0].Name != "bond1" {
-		t.Fatalf("readback = %#v, want post-delete state", result.Readback)
+	if len(result.Readback.Interfaces) != 0 || len(result.Readback.Bonds) != 0 {
+		t.Fatalf("readback = %#v, want deleted interface configuration and bond absent", result.Readback)
 	}
 }
 

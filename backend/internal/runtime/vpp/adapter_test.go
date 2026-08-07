@@ -43,7 +43,7 @@ func TestConsumeMultipartStopsAtControlPing(t *testing.T) {
 func TestBuildOperationsUsesCompiledProxyAndFlowTargets(t *testing.T) {
 	plan := validPlan(t, "req-plan")
 	operations := mustBuildOperations(t, plan)
-	for _, required := range []string{"vpp.dataplane.attach", "vpp.interface.address", "vpp.abf.policy", "vpp.pbr.policy", "vpp.service-chain.egress-binding", "vpp.acl.drop", "vpp.behavior.rate", "vpp.qos.classify", "vpp.qos.record", "vpp.qos.store", "vpp.qos.egress-map", "vpp.qos.mark", "vpp.policer"} {
+	for _, required := range []string{"vpp.dataplane.attach", "vpp.interface.address", "vpp.proxy-service.network", "vpp.acl.drop", "vpp.behavior.rate", "vpp.qos.classify", "vpp.qos.record", "vpp.qos.store", "vpp.qos.egress-map", "vpp.qos.mark", "vpp.policer"} {
 		if !hasOperation(operations, required) {
 			t.Fatalf("operations missing %q: %#v", required, operations)
 		}
@@ -56,10 +56,20 @@ func TestBuildOperationsUsesCompiledProxyAndFlowTargets(t *testing.T) {
 			t.Fatalf("operation %s has no vppctl commands: %#v", operation.Name, operation)
 		}
 	}
-	assertOperationCommand(t, operations, "vpp.abf.policy", "abf policy add")
 	assertOperationCommand(t, operations, "vpp.interface.address", "set interface ip address lyroute-enp2s0 10.10.10.2/24")
-	assertOperationCommand(t, operations, "vpp.pbr.policy", "ip table add")
-	assertOperationCommand(t, operations, "vpp.pbr.policy", "ip route add table")
+	assertOperationCommand(t, operations, "vpp.proxy-service.network", "create tap id")
+	assertOperationCommand(t, operations, "vpp.proxy-service.network", "set interface mtu packet 1500")
+	assertOperationCommand(t, operations, "vpp.proxy-service.network", "set interface nat44 in")
+	for _, operation := range operations {
+		if operation.Name != "vpp.proxy-service.network" {
+			continue
+		}
+		for _, command := range operation.VPPCtlCommands {
+			if strings.Contains(command, "set interface nat44 in") && !strings.HasSuffix(command, " del") {
+				t.Fatalf("proxy service TAP enables duplicate input NAT: %q", command)
+			}
+		}
+	}
 	assertOperationCommand(t, operations, "vpp.acl.drop", "deny src 192.168.20.0/24 dst 10.0.0.0/8 proto 6 sport 0-65535 dport 443-443")
 	assertOperationCommand(t, operations, "vpp.acl.drop", "set acl-plugin interface lyroute-enp2s0 input acl")
 	assertOperationCommand(t, operations, "vpp.behavior.rate", "permit src any dst 203.0.113.10 proto 17 sport 0-65535 dport 0-65535")
@@ -73,10 +83,68 @@ func TestBuildOperationsUsesCompiledProxyAndFlowTargets(t *testing.T) {
 	assertOperationCommand(t, operations, "vpp.policer", "violate-action drop")
 }
 
+func TestProxyServiceNetworkReadbackRejectsDuplicateInputNAT(t *testing.T) {
+	network := proxy.ServiceNetworkForEgressID("proxy-media")
+	steering := proxy.VPPSteeringInstruction{EgressID: network.EgressID, TargetKind: "vpp.proxy-service.network", ServiceNetwork: network}
+	results := []VPPCTLCommandResult{
+		{Command: "show interface address " + network.IngressVPPInterface, Stdout: network.IngressVPPInterface + " " + network.IngressVPPAddress},
+		{Command: "show interface address " + network.EgressVPPInterface, Stdout: network.EgressVPPInterface + " " + network.EgressVPPAddress},
+		{Command: fmt.Sprintf("show ip fib table %d", network.OutboundTableID), Stdout: fmt.Sprintf("table %d", network.OutboundTableID)},
+		{Command: "show nat44 interfaces", Stdout: network.EgressVPPInterface + " in"},
+		{Command: "show tap", Stdout: network.IngressVPPInterface},
+	}
+	if err := verifyProxySteeringReadback(steering, results); err == nil || !strings.Contains(err.Error(), "must not be a NAT44 input") {
+		t.Fatalf("duplicate input NAT readback error = %v", err)
+	}
+	results[3].Stdout = "pppoe_session0 output-feature in out"
+	if err := verifyProxySteeringReadback(steering, results); err != nil {
+		t.Fatalf("output-only WAN NAT readback rejected: %v", err)
+	}
+}
+
 func TestBuildOperationsIncludesDHCPInterfaceAssignment(t *testing.T) {
 	operations := mustBuildOperations(t, provenPlan(Plan{RequestID: "req", AddressAssignments: []AddressAssignment{{ID: "wan", LinuxInterface: "enp4s0", VPPInterface: "lyroute-enp4s0", Mode: "dhcp4", RemoveCIDRs: []string{"10.10.10.6/24"}}}}, "enp4s0"))
 	assertOperationCommand(t, operations, "vpp.interface.address", "set interface ip address lyroute-enp4s0 10.10.10.6/24 del")
 	assertOperationCommand(t, operations, "vpp.interface.address", "set dhcp client intfc lyroute-enp4s0")
+}
+
+func TestBuildOperationsCreatesLANLinuxControlPlaneBeforeAddressAssignment(t *testing.T) {
+	operations := mustBuildOperations(t, provenPlan(Plan{RequestID: "req-lan-lcp", AddressAssignments: []AddressAssignment{{ID: "lan", LinuxInterface: "ens192", VPPInterface: "lyroute-ens192", CIDR: "10.1.18.1/24", Role: "lan"}}}, "ens192"))
+	if !hasOperation(operations, "vpp.lan-control-lcp") {
+		t.Fatalf("operations missing LAN control-plane LCP: %#v", operations)
+	}
+	if operationIndex(operations, "vpp.lan-control-lcp") > operationIndex(operations, "vpp.interface.address") {
+		t.Fatalf("LAN control-plane LCP must precede address assignment: %#v", operations)
+	}
+	assertOperationCommand(t, operations, "vpp.lan-control-lcp", "lcp lcp-sync on")
+	assertOperationCommand(t, operations, "vpp.lan-control-lcp", "lcp create lyroute-ens192 host-if lylan-ens192")
+	assertOperationCommand(t, operations, "vpp.lan-control-lcp", "ip route add 255.255.255.255/32 via local")
+	for _, operation := range operations {
+		if operation.Name != "vpp.lan-control-lcp" {
+			continue
+		}
+		management, ok := operation.Payload.(ManagementLCP)
+		if !ok || !management.IPv4DHCPBroadcastBypass {
+			t.Fatalf("LAN control-plane must enable DHCP broadcast bypass: %#v", operation.Payload)
+		}
+		return
+	}
+	t.Fatal("LAN control-plane payload is missing")
+}
+
+func TestLANControlPlaneHostInterfaceIsStableAndLinuxSafe(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{input: "ens192", want: "lylan-ens192"},
+		{input: "Bond LAN 生产聚合接口", want: "lylan-3b387679"},
+	} {
+		got := LANControlPlaneHostInterface(test.input)
+		if got != test.want {
+			t.Fatalf("LANControlPlaneHostInterface(%q) = %q, want %q", test.input, got, test.want)
+		}
+		if len(got) > 15 {
+			t.Fatalf("host interface %q exceeds Linux IFNAMSIZ", got)
+		}
+	}
 }
 
 func TestBuildOperationsIncludesNAT44Mappings(t *testing.T) {
@@ -90,7 +158,8 @@ func TestBuildOperationsIncludesNAT44Mappings(t *testing.T) {
 	if !hasOperation(operations, "vpp.nat44-ed.static-mapping") {
 		t.Fatalf("operations missing nat44 mapping: %#v", operations)
 	}
-	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 out wan0")
+	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 out wan0 del")
+	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 out wan0 output-feature")
 	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 plugin enable")
 	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 add address 203.0.113.10")
 	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 add static mapping local 192.168.88.10 external 203.0.113.10")
@@ -124,6 +193,16 @@ func TestBuildOperationsIncludesRoutePolicyAndSecurityACL(t *testing.T) {
 	}
 }
 
+func TestSecurityACLCommandsAttachBidirectionalACL(t *testing.T) {
+	commands := strings.Join(securityACLCommands(trafficpolicy.SecurityACL{
+		ID: "bidirectional", Action: "deny",
+		Match: trafficpolicy.Match{Sources: []string{"192.0.2.0/24"}, Destinations: []string{"0.0.0.0/0"}, Protocols: []string{"any"}, Direction: "both"},
+	}), "\n")
+	if !strings.Contains(commands, "set interface input acl intfc lyroute-$LY_ROUTE_LAN_INTERFACE") || !strings.Contains(commands, "set interface output acl intfc lyroute-$LY_ROUTE_LAN_INTERFACE") {
+		t.Fatalf("bidirectional ACL commands = %s", commands)
+	}
+}
+
 func TestRoutePolicyCommandsUseResolvedDirectWANPath(t *testing.T) {
 	path := trafficpolicy.WANPath{VPPInterface: "lyroute-eth1", NextHop: "198.51.100.1"}
 	commands := strings.Join(routePolicyCommands(trafficpolicy.RoutePolicy{
@@ -131,6 +210,23 @@ func TestRoutePolicyCommandsUseResolvedDirectWANPath(t *testing.T) {
 	}, nil), "\n")
 	if !strings.Contains(commands, "via 198.51.100.1 lyroute-eth1") || strings.Contains(commands, "via wan-resource") || !strings.Contains(commands, "show abf attach lyroute-$LY_ROUTE_LAN_INTERFACE") {
 		t.Fatalf("direct WAN route commands = %s", commands)
+	}
+}
+
+func TestRoutePolicyCommandsUseInterfaceOnlyNextHopForPPPoESession(t *testing.T) {
+	path := trafficpolicy.WANPath{VPPInterface: "pppoe_session0"}
+	commands := strings.Join(routePolicyCommands(trafficpolicy.RoutePolicy{
+		ID: "pppoe-wan", Priority: 10, Action: "route", Egress: "wan-pppoe", Path: &path,
+	}, nil), "\n")
+	if !strings.Contains(commands, "via pppoe_session0") || strings.Contains(commands, "via 0.0.0.0 pppoe_session0") {
+		t.Fatalf("PPPoE route commands = %s", commands)
+	}
+	groupCommands := strings.Join(wanGroupCommands(trafficpolicy.WANGroup{
+		ID: "pppoe-group", Mode: trafficpolicy.WANGroupPrimaryBackup, Members: []string{"wan-pppoe"},
+		Paths: map[string]trafficpolicy.WANPath{"wan-pppoe": path},
+	}), "\n")
+	if !strings.Contains(groupCommands, "via pppoe_session0") || strings.Contains(groupCommands, "via 0.0.0.0 pppoe_session0") {
+		t.Fatalf("PPPoE WAN-group commands = %s", groupCommands)
 	}
 }
 
@@ -341,9 +437,14 @@ func TestBuildOperationsAddsGatewayDNSTransparentInterception(t *testing.T) {
 			break
 		}
 	}
-	for _, required := range []string{"dport 53-53", "abf attach ip4", "abf attach ip6", "via local", "ip6-lookup-in-table 101", "2001:db8:88::1/64 via lyroute-enp2s0"} {
+	for _, required := range []string{"dport 53-53", "ip table add 100", "0.0.0.0/0 via local", "192.168.88.1/24 via lyroute-enp2s0", "abf attach ip4", "abf attach ip6", "ip4-lookup-in-table 100", "ip6-lookup-in-table 101", "2001:db8:88::1/64 via lyroute-enp2s0"} {
 		if !strings.Contains(commands, required) {
 			t.Fatalf("transparent DNS commands are missing %q:\n%s", required, commands)
+		}
+	}
+	for _, command := range strings.Split(commands, "\n") {
+		if strings.HasPrefix(command, "abf policy add") && strings.HasSuffix(command, "via local") {
+			t.Fatalf("transparent DNS must not attach a direct local DPO to ABF: %s", command)
 		}
 	}
 }

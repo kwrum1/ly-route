@@ -69,8 +69,9 @@ func TestGatewayProductionComposition_literalHTTPSuccessAndFailurePreserveGenera
 	if strings.Count(string(trace), "apply wan-groups\n") != 1 {
 		t.Fatalf("WAN-group apply count = %d, want one", strings.Count(string(trace), "apply wan-groups\n"))
 	}
-	if len(controller.rolledBackArtifacts[serviceRuntime.VPP]) != 0 {
-		t.Fatalf("service rollback received VPP artifacts: %#v", controller.rolledBackArtifacts[serviceRuntime.VPP])
+	vppRollback := controller.rolledBackArtifacts[serviceRuntime.VPP]
+	if len(vppRollback) != 1 || vppRollback[0].ReloadMode != serviceRuntime.ReloadModePersistOnly {
+		t.Fatalf("service rollback VPP persistence artifacts = %#v, want one persist-only recovery plan", vppRollback)
 	}
 }
 
@@ -98,8 +99,12 @@ func TestConfigApplySnapshotsBeforeSingleVPPMutation(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("config apply = %d: %s", response.Code, response.Body.String())
 	}
-	if len(controller.appliedArtifacts[serviceRuntime.VPP]) != 0 || len(controller.receiptArtifacts) != 0 && hasServiceArtifact(controller.receiptArtifacts, serviceRuntime.VPP) || len(controller.readbackArtifacts) != 0 && hasServiceArtifact(controller.readbackArtifacts, serviceRuntime.VPP) {
-		t.Fatalf("service VPP ownership leaked: applied=%#v receipt=%#v readback=%#v", controller.appliedArtifacts, controller.receiptArtifacts, controller.readbackArtifacts)
+	persistedVPP := controller.appliedArtifacts[serviceRuntime.VPP]
+	if len(persistedVPP) != 1 || persistedVPP[0].ReloadMode != serviceRuntime.ReloadModePersistOnly {
+		t.Fatalf("persisted VPP recovery plan = %#v, want one persist-only artifact", persistedVPP)
+	}
+	if !hasServiceArtifact(controller.receiptArtifacts, serviceRuntime.VPP) || !hasServiceArtifact(controller.readbackArtifacts, serviceRuntime.VPP) {
+		t.Fatalf("VPP recovery plan missing from transaction evidence: receipt=%#v readback=%#v", controller.receiptArtifacts, controller.readbackArtifacts)
 	}
 	if len(trace) < 2 || trace[0] != "snapshot" || trace[1] != "mutate" {
 		t.Fatalf("VPP trace = %#v, want snapshot before mutation", trace)

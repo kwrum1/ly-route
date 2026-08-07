@@ -49,7 +49,20 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 			return NAT44Readback{}, snapshotDecodeError("NAT44 static mapping %q is ambiguous", matches[0].ID)
 		}
 		matchedStatic[matches[0].ID] = struct{}{}
-		readback.StaticMappings = append(readback.StaticMappings, matches[0])
+		observed := matches[0]
+		if request.VerifyNATReturnGuards {
+			guardErr := verifyNATReturnGuardReadback(results, natReturnGuardForStaticMapping(matches[0]))
+			if guardErr != nil {
+				if request.AllowMissing && isNATReturnGuardDrift(guardErr) {
+					observed.ReturnPathGuard = false
+					readback.StaticMappings = append(readback.StaticMappings, observed)
+					continue
+				}
+				return NAT44Readback{}, guardErr
+			}
+			observed.ReturnPathGuard = true
+		}
+		readback.StaticMappings = append(readback.StaticMappings, observed)
 	}
 	matchedPorts := make(map[string]struct{})
 	for _, row := range ports {
@@ -66,13 +79,28 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 			return NAT44Readback{}, snapshotDecodeError("NAT44 port mapping %q is ambiguous", matches[0].ID)
 		}
 		matchedPorts[matches[0].ID] = struct{}{}
-		readback.PortMappings = append(readback.PortMappings, matches[0])
+		observed := matches[0]
+		if request.VerifyNATReturnGuards {
+			guardErr := verifyNATReturnGuardReadback(results, natReturnGuardForPortMapping(matches[0]))
+			if guardErr != nil {
+				if request.AllowMissing && isNATReturnGuardDrift(guardErr) {
+					observed.ReturnPathGuard = false
+					readback.PortMappings = append(readback.PortMappings, observed)
+					continue
+				}
+				return NAT44Readback{}, guardErr
+			}
+			observed.ReturnPathGuard = true
+		}
+		readback.PortMappings = append(readback.PortMappings, observed)
 	}
-	if err := requireMatchedNAT(request.NATStaticMappings, matchedStatic, "static mapping"); err != nil {
-		return NAT44Readback{}, err
-	}
-	if err := requireMatchedNAT(request.NATPortMappings, matchedPorts, "port mapping"); err != nil {
-		return NAT44Readback{}, err
+	if !request.AllowMissing {
+		if err := requireMatchedNAT(request.NATStaticMappings, matchedStatic, "static mapping"); err != nil {
+			return NAT44Readback{}, err
+		}
+		if err := requireMatchedNAT(request.NATPortMappings, matchedPorts, "port mapping"); err != nil {
+			return NAT44Readback{}, err
+		}
 	}
 	if err := requireAbsentNAT(request.AbsentNATStatic, matchedStatic, "static mapping"); err != nil {
 		return NAT44Readback{}, err
@@ -92,6 +120,10 @@ func parseNAT44Rows(output string) ([]liveNATStatic, []liveNATPort, error) {
 	var ports []liveNATPort
 	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
+		protocol := ""
+		if len(fields) > 0 {
+			protocol = strings.ToLower(fields[0])
+		}
 		switch {
 		case len(fields) == 6 && fields[0] == "local" && fields[2] == "external" && fields[4] == "vrf" && fields[5] == "0":
 			if err := validNATAddress(fields[1]); err != nil {
@@ -101,7 +133,7 @@ func parseNAT44Rows(output string) ([]liveNATStatic, []liveNATPort, error) {
 				return nil, nil, err
 			}
 			statics = append(statics, liveNATStatic{internal: fields[1], external: fields[3]})
-		case len(fields) == 7 && (fields[0] == "tcp" || fields[0] == "udp") && fields[1] == "local" && fields[3] == "external" && fields[5] == "vrf" && fields[6] == "0":
+		case len(fields) == 7 && (protocol == "tcp" || protocol == "udp") && fields[1] == "local" && fields[3] == "external" && fields[5] == "vrf" && fields[6] == "0":
 			internalHost, internalPort, err := parseNATEndpoint(fields[2])
 			if err != nil {
 				return nil, nil, err
@@ -110,7 +142,7 @@ func parseNAT44Rows(output string) ([]liveNATStatic, []liveNATPort, error) {
 			if err != nil {
 				return nil, nil, err
 			}
-			ports = append(ports, liveNATPort{protocol: fields[0], internalHost: internalHost, internalPort: internalPort, external: external, externalPort: externalPort})
+			ports = append(ports, liveNATPort{protocol: protocol, internalHost: internalHost, internalPort: internalPort, external: external, externalPort: externalPort})
 		default:
 			return nil, nil, snapshotDecodeError("unknown NAT44 mapping grammar %q", line)
 		}

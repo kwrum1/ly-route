@@ -33,6 +33,41 @@ func TestCompileSecurityGenerationPreservesPriorityAndTerminalSemantics(t *testi
 	}
 }
 
+func TestCompileSecurityGenerationExpandsBidirectionalACL(t *testing.T) {
+	generation, err := CompileSecurityGeneration("generation-both", "lan0", []trafficpolicy.SecurityACL{{
+		ID: "bidirectional", Priority: 10, Action: "deny",
+		Match: trafficpolicy.Match{Sources: []string{"192.0.2.0/24"}, Destinations: []string{"0.0.0.0/0"}, Protocols: []string{"any"}, Direction: "both"},
+	}}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(generation.ACLs) != 2 {
+		t.Fatalf("ACL groups = %#v", generation.ACLs)
+	}
+	seen := map[string]bool{}
+	for _, group := range generation.ACLs {
+		seen[group.Direction] = true
+		if len(group.Rules) != 1 || group.Rules[0].Match.Direction != group.Direction {
+			t.Fatalf("group = %#v", group)
+		}
+	}
+	if !seen["input"] || !seen["output"] {
+		t.Fatalf("directions = %#v", seen)
+	}
+}
+
+func TestSecurityDirectionsExpandsOnlyBoth(t *testing.T) {
+	if got := strings.Join(securityDirections("both"), ","); got != "input,output" {
+		t.Fatalf("both directions = %q", got)
+	}
+	if got := strings.Join(securityDirections("input"), ","); got != "input" {
+		t.Fatalf("input directions = %q", got)
+	}
+	if got := strings.Join(securityDirections("output"), ","); got != "output" {
+		t.Fatalf("output directions = %q", got)
+	}
+}
+
 func TestSecurityGenerationExpandsEveryPortAndBothAddressFamilies(t *testing.T) {
 	rules, err := securityInterfaceACLRules([]trafficpolicy.SecurityACL{{ID: "dual-stack", Action: "permit", Match: trafficpolicy.Match{
 		Sources: []string{"192.0.2.1", "2001:db8::1"}, Protocols: []string{"tcp", "icmp"}, SourcePorts: []string{"1000", "2000-2001"}, DestPorts: []string{"80", "443"},

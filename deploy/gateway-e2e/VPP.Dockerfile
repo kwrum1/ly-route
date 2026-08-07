@@ -2,7 +2,7 @@ FROM ly-route-gateway-vpp-demo:latest
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        iproute2 ppp pppoe procps \
+        iproute2 ppp pppoe procps kea-dhcp4-server \
     && rm -rf /var/lib/apt/lists/*
 
 COPY deploy/gateway-demo/artifacts/ly-route-control /usr/local/bin/ly-route-control

@@ -96,7 +96,7 @@ vppctl set interface ip address "$lan_interface" 192.168.88.1/24
 vppctl set interface ip address "$wan_interface" 203.0.113.2/24
 vppctl nat44 plugin enable
 vppctl set interface nat44 in "$lan_interface"
-vppctl set interface nat44 out "$wan_interface"
+vppctl set interface nat44 out "$wan_interface" output-feature
 vppctl nat44 add address 203.0.113.3
 vppctl nat44 add static mapping tcp local 192.168.88.20 8080 external 203.0.113.3 8080
 vppctl nat44 add static mapping local 192.168.88.20 external 203.0.113.4

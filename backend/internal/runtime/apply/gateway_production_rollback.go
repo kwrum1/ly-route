@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"ly-route/backend/internal/runtime/trafficpolicy"
 	"ly-route/backend/internal/runtime/vpp"
 )
 
@@ -36,7 +37,7 @@ func (adapter *productionGatewayAdapter) runPrior(ctx context.Context, input pro
 		result, err := adapter.reconciler.adapter.ApplyInterfaceBond(ctx, vpp.InterfaceBondPlan{TransactionID: transactionID, ManagementInterface: gateway.NativePath.ManagementInterface, Bonds: gateway.Bonds}, prior, attempted.Bonds)
 		return result.Readback, err
 	case "routes":
-		result, err := adapter.reconciler.adapter.ApplyRouteWANGroup(ctx, vpp.RouteWANGroupPlan{TransactionID: transactionID, Routes: gateway.Policy.RoutePolicies, WANGroupsContext: adapter.routeWANGroupsContext()}, prior, attempted.Routes)
+		result, err := adapter.reconciler.adapter.ApplyRouteWANGroup(ctx, vpp.RouteWANGroupPlan{TransactionID: transactionID, IngressVPPInterface: attempted.Routes.IngressVPPInterface, Routes: gateway.Policy.RoutePolicies, RoutePolicyContext: append([]trafficpolicy.RoutePolicy(nil), gateway.Policy.RoutePolicies...), WANGroupsContext: adapter.routeWANGroupsContext()}, prior, attempted.Routes)
 		return result.Readback, err
 	case "wan-groups":
 		result, err := adapter.reconciler.adapter.ApplyRouteWANGroup(ctx, vpp.RouteWANGroupPlan{TransactionID: transactionID, WANGroups: gateway.Policy.WANGroups}, prior, attempted.WANGroups)

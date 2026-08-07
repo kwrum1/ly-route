@@ -20,62 +20,6 @@ type abfCandidateProof struct {
 	via      string
 }
 
-func decodeVPPCTLRoutes(request SnapshotRequest, results []VPPCTLCommandResult) (RoutePolicyReadback, error) {
-	candidates, err := routeCandidates(request)
-	if err != nil {
-		return RoutePolicyReadback{}, err
-	}
-	policies := make([]trafficpolicy.RoutePolicy, 0, len(request.RoutePolicies))
-	for _, id := range request.RoutePolicies {
-		candidate := candidates[strings.TrimSpace(id)]
-		policyID := stableID("route-abf:"+candidate.ID, 10000, 8999)
-		tableID := stableID("route-table:"+candidate.ID, 50000, 49999)
-		aclOutput, aclID, found, err := taggedACLOutput(results, "ly-route-"+safeTag(candidate.ID))
-		if err != nil {
-			return RoutePolicyReadback{}, err
-		}
-		if !found {
-			aclID = stableID("route-acl:"+candidate.ID, 10000, 49999)
-			aclOutput, err = commandOutput(results, fmt.Sprintf("show acl-plugin acl index %d", aclID))
-			if err != nil {
-				return RoutePolicyReadback{}, snapshotDecodeError("route policy %q tagged ACL is missing: %v", candidate.ID, err)
-			}
-			found = true
-		}
-		aclProof := aclCandidateProof{numericID: aclID, id: candidate.ID, action: routeACLAction(candidate.Action), match: candidate.Match}
-		if err := verifyACLOutput(aclOutput, aclProof); err != nil {
-			return RoutePolicyReadback{}, err
-		}
-		via := routeNextHop(candidate)
-		for _, group := range request.Candidates.WANGroups {
-			if group.ID == candidate.Egress {
-				via = fmt.Sprintf("table %d", wanGroupTableID(group.ID))
-			}
-		}
-		if err := verifyABFPolicy(results, abfCandidateProof{policyID: policyID, aclID: aclID, via: via}); err != nil {
-			return RoutePolicyReadback{}, err
-		}
-		paths, err := parseFIBResult(results, tableID)
-		if err != nil {
-			return RoutePolicyReadback{}, err
-		}
-		if candidate.Action == "deny" {
-			if len(paths) != 0 {
-				return RoutePolicyReadback{}, snapshotDecodeError("denied route policy %q has a live route", candidate.ID)
-			}
-		} else if len(paths) != 1 || !strings.HasPrefix(paths[0].via, via) {
-			return RoutePolicyReadback{}, snapshotDecodeError("route policy %q FIB path does not match candidate", candidate.ID)
-		}
-		policies = append(policies, candidate)
-	}
-	for _, id := range request.AbsentRoutePolicies {
-		if err := verifyRoutePolicyAbsence(results, strings.TrimSpace(id)); err != nil {
-			return RoutePolicyReadback{}, err
-		}
-	}
-	return RoutePolicyReadback{Policies: policies}, nil
-}
-
 func verifyRoutePolicyAbsence(results []VPPCTLCommandResult, id string) error {
 	if _, _, found, err := taggedACLOutput(results, "ly-route-"+safeTag(id)); err != nil {
 		return err

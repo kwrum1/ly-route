@@ -97,6 +97,9 @@ if [ "$fixture" != 1 ]; then
   ./scripts/build-runtime-debs.sh xray
   ./scripts/build-runtime-debs.sh vpp-apply
   ./scripts/build-runtime-debs.sh vpp-fdio
+  ./scripts/build-runtime-debs.sh vpp-smart-qos
+  ./scripts/build-runtime-debs.sh vpp-security-guard
+  ./scripts/build-runtime-debs.sh vpp-orchestrator
   export LY_ROUTE_EXTRA_DEBS_DIR="$source_dir/runtime-debs"
 fi
 

@@ -1,7 +1,9 @@
 [Unit]
 Description=Ly Route VPP operation apply
-After=vpp.service
+After=vpp.service ly-route-pppoe.target
 Requires=vpp.service
+Wants=ly-route-pppoe.target
+PartOf=vpp.service
 
 [Service]
 Type=oneshot
@@ -9,6 +11,8 @@ EnvironmentFile=-/etc/ly-route/runtime.env
 EnvironmentFile=-/etc/ly-route/control-api.env
 ExecStart=/usr/lib/ly-route/vpp-apply-default
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=1s
 
 [Install]
 WantedBy=multi-user.target

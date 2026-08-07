@@ -31,8 +31,10 @@ func BuildServiceChainOperations(requestID string, chain orchestrator.ServiceCha
 	}
 	interfaces := make(map[string]string, len(attachments))
 	for _, attachment := range attachments {
+		dpdkIdentityApproved := attachment.Mode == NativeModeDPDKVFIO && (decimalIdentifierSafe(attachment.IOMMUGroup) || attachment.IOMMUGroup == "noiommu") ||
+			attachment.Mode == NativeModeDPDKUIO && attachment.IOMMUGroup == "none"
 		approvedTier := (attachment.Tier == "" || attachment.Tier == DataplaneTierNative) && approvedNativeMode(attachment.Hook, attachment.Mode) ||
-			attachment.Tier == DataplaneTierDPDK && attachment.Hook == NativeHookDPDK && attachment.Mode == NativeModeDPDKVFIO && pciAddressSafe(attachment.PCIAddress) && decimalIdentifierSafe(attachment.IOMMUGroup)
+			attachment.Tier == DataplaneTierDPDK && attachment.Hook == NativeHookDPDK && pciAddressSafe(attachment.PCIAddress) && dpdkIdentityApproved
 		if attachment.capabilityFingerprint == "" || attachment.capabilityFingerprint != nativeAttachmentFingerprint(attachment) || !approvedTier {
 			return nil, fmt.Errorf("%w: interface %q lacks approved high-performance dataplane proof", ErrServiceChainCapability, strings.TrimSpace(attachment.LinuxInterface))
 		}

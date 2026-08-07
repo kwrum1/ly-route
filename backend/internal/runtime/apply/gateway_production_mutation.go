@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"ly-route/backend/internal/runtime/trafficpolicy"
 	"ly-route/backend/internal/runtime/vpp"
 )
 
@@ -79,6 +80,7 @@ func (adapter *productionGatewayAdapter) applyDiff(ctx context.Context, diff vpp
 		plan := diff.Routes
 		plan.DeleteRoutes = nil
 		plan.WANGroupsContext = adapter.routeWANGroupsContext()
+		plan.RoutePolicyContext = append([]trafficpolicy.RoutePolicy(nil), desired.Policy.RoutePolicies...)
 		result, err := adapter.reconciler.adapter.ApplyRouteWANGroup(ctx, plan, prior)
 		return result.Readback, err
 	case "acls":

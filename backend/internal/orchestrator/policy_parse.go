@@ -155,7 +155,7 @@ func parsePolicyGroups(inputs []PolicyGroupInput, objects map[string]policyIPObj
 	targetOwners := make(map[string]string)
 	for _, input := range inputs {
 		id, err := parsePolicyName(input.ID)
-		if err != nil || len(input.Rules) == 0 {
+		if err != nil {
 			return nil, fmt.Errorf("%w: %q", ErrInvalidPolicyGroup, input.ID)
 		}
 		if _, exists := ids[id.String()]; exists {
@@ -224,9 +224,9 @@ func parsePolicyRules(inputs []PolicyRuleInput, objects map[string]policyIPObjec
 }
 
 func parsePolicyName(raw string) (policyName, error) {
-	name, err := parseName(raw)
-	if err != nil {
-		return policyName{}, err
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return policyName{}, ErrInvalidName
 	}
-	return policyName{value: name.String()}, nil
+	return policyName{value: value}, nil
 }

@@ -58,13 +58,13 @@ func (transaction *productionGatewayWithDataplane) Run(ctx context.Context, plan
 	plan.GatewayPlan.DataplanePrepared = true
 	result, applyErr := transaction.inner.Run(ctx, plan)
 	if applyErr != nil {
-		if path.Tier == vpp.DataplaneTierDPDK && dataplaneReceipt.Changed {
+		if dataplaneReceipt.Changed {
 			_, rollbackErr := transaction.dataplane.Rollback(ctx, request.TransactionID)
 			applyErr = errors.Join(applyErr, rollbackErr)
 		}
 		return result, applyErr
 	}
-	if path.Tier == vpp.DataplaneTierDPDK && dataplaneReceipt.Changed {
+	if dataplaneReceipt.Changed {
 		transaction.mu.Lock()
 		transaction.dpdkActive[request.TransactionID] = true
 		transaction.mu.Unlock()

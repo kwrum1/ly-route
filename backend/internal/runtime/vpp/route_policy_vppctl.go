@@ -3,7 +3,9 @@ package vpp
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -27,9 +29,14 @@ func (channel vppctlChannel) doRoutePolicyLifecycle(ctx context.Context, operati
 	if err != nil {
 		return Reply{}, err
 	}
-	results, err := channel.removeRoutePolicyState(ctx, operation, spec)
-	if err != nil || !spec.apply {
-		return routePolicyLifecycleReply(operation, results), err
+	var results []VPPCTLCommandResult
+	if !strings.HasSuffix(operation.Name, ".replay") {
+		results, err = channel.removeRoutePolicyState(ctx, operation, spec)
+		if err != nil || !spec.apply {
+			return routePolicyLifecycleReply(operation, results), err
+		}
+	} else if !spec.apply {
+		return routePolicyLifecycleReply(operation, nil), nil
 	}
 	created, err := channel.runServiceChainCommands(ctx, operation, routePolicyCreateACLCommand(spec))
 	if err != nil {
@@ -79,29 +86,55 @@ func (channel vppctlChannel) doRoutePolicyLifecycle(ctx context.Context, operati
 }
 
 func (channel vppctlChannel) removeRoutePolicyState(ctx context.Context, operation Operation, spec routePolicyVPPCTLSpec) ([]VPPCTLCommandResult, error) {
-	results, err := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("show abf policy %d", spec.policyID), "show acl-plugin acl")
+	results, err := channel.runServiceChainCommands(ctx, operation,
+		fmt.Sprintf("show abf policy %d", spec.policyID),
+		"show ip fib summary")
 	if err != nil {
 		return nil, err
 	}
 	policyOutput := resultStdout(results, fmt.Sprintf("show abf policy %d", spec.policyID))
 	if actualACLID, present := observedABFACLID(policyOutput); present {
-		via := observedABFDeleteVia(policyOutput)
-		if via == "" {
-			via = spec.via
-		}
+		via := routePolicyABFDeleteVia(spec, policyOutput, resultStdout(results, "show ip fib summary"))
 		if via == "" {
 			return nil, snapshotDecodeError("route policy %q live ABF path cannot be removed safely", operation.Resource)
 		}
-		removed, removeErr := channel.runServiceChainCommands(ctx, operation,
+		detached, detachErr := channel.runServiceChainCommands(ctx, operation,
 			fmt.Sprintf("abf attach ip4 del policy %d %s", spec.policyID, spec.ingress),
+			"show abf attach "+spec.ingress)
+		if detachErr != nil {
+			return nil, detachErr
+		}
+		results = append(results, detached...)
+		if routePolicyAttached(resultStdoutLast(results, "show abf attach "+spec.ingress), spec.policyID) {
+			return nil, snapshotDecodeError("route policy %q remains attached; refusing unsafe policy deletion", operation.Resource)
+		}
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation,
 			fmt.Sprintf("abf policy del id %d acl %d via %s", spec.policyID, actualACLID, via),
-			fmt.Sprintf("delete acl-plugin acl index %d", actualACLID))
+			fmt.Sprintf("show abf policy %d", spec.policyID))
 		if removeErr != nil {
 			return nil, removeErr
 		}
 		results = append(results, removed...)
+		if _, present := observedABFACLID(resultStdoutLast(results, fmt.Sprintf("show abf policy %d", spec.policyID))); present {
+			return nil, snapshotDecodeError("route policy %q remains after deletion; refusing referenced ACL deletion", operation.Resource)
+		}
+		aclRemoved, aclErr := channel.runServiceChainCommands(ctx, operation,
+			fmt.Sprintf("delete acl-plugin acl index %d", actualACLID),
+			fmt.Sprintf("show acl-plugin acl index %d", actualACLID))
+		if aclErr != nil {
+			return nil, aclErr
+		}
+		results = append(results, aclRemoved...)
+		if strings.TrimSpace(resultStdoutLast(results, fmt.Sprintf("show acl-plugin acl index %d", actualACLID))) != "" {
+			return nil, snapshotDecodeError("route policy %q ACL %d remains after deletion", operation.Resource, actualACLID)
+		}
 	}
-	for _, id := range taggedServiceChainACLIDs(resultStdout(results, "show acl-plugin acl"), spec.tag) {
+	inventory, err := channel.runServiceChainCommands(ctx, operation, "show acl-plugin acl")
+	if err != nil {
+		return nil, err
+	}
+	results = append(results, inventory...)
+	for _, id := range taggedServiceChainACLIDs(resultStdoutLast(results, "show acl-plugin acl"), spec.tag) {
 		removed, removeErr := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("delete acl-plugin acl index %d", id))
 		if removeErr != nil {
 			return nil, removeErr
@@ -109,7 +142,13 @@ func (channel vppctlChannel) removeRoutePolicyState(ctx context.Context, operati
 		results = append(results, removed...)
 	}
 	cleaned, err := channel.runServiceChainCommands(ctx, operation,
-		fmt.Sprintf("ip table del %d", spec.tableID),
+		// VPP 25.x can retain a recursive-resolution lock when a private FIB
+		// still owns its default/sentinel paths.  Remove those owned paths
+		// explicitly before asking VPP to destroy the table; otherwise an
+		// apparently successful `ip table del` leaves a ghost FIB behind.
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", spec.tableID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/32", spec.tableID),
+		fmt.Sprintf("?ip table del %d", spec.tableID),
 		fmt.Sprintf("show abf policy %d", spec.policyID),
 		"show acl-plugin acl",
 		"show abf attach "+spec.ingress,
@@ -131,6 +170,69 @@ func (channel vppctlChannel) removeRoutePolicyState(ctx context.Context, operati
 		return nil, snapshotDecodeError("route policy %q private FIB remains after deletion", operation.Resource)
 	}
 	return results, nil
+}
+
+func routePolicyABFDeleteVia(spec routePolicyVPPCTLSpec, policyOutput, fibSummary string) string {
+	if via := observedABFDeleteVia(policyOutput); via != "" {
+		return via
+	}
+	// VPP 25.x normally prints only the internal fib-index for a recursive
+	// ABF path. Resolve that index against the live FIB inventory. Never fall
+	// back to the declarative table ID: a partial rollback can remove that
+	// table while leaving an ABF object behind, and asking VPP to delete the
+	// policy through a nonexistent table can crash the 25.10 ABF plugin.
+	if fibIndex, ok := observedABFFibIndex(policyOutput); ok {
+		if tableID, ok := ipv4TableIDForFibIndex(fibSummary, fibIndex); ok {
+			return fmt.Sprintf("ip4-lookup-in-table %d", tableID)
+		}
+		return ""
+	}
+	if tableID, ok := routePolicyLookupTableID(spec.via); ok && ipv4FibSummaryContainsTable(fibSummary, tableID) {
+		return strings.TrimSpace(spec.via)
+	}
+	return ""
+}
+
+var routePolicyFibIndexPattern = regexp.MustCompile("\\bfib-index:\\s*([0-9]+)\\b")
+var ipv4FibSummaryPattern = regexp.MustCompile("(?m)^ipv4-VRF:([0-9]+),\\s*fib_index:([0-9]+),")
+
+func observedABFFibIndex(output string) (int, bool) {
+	match := routePolicyFibIndexPattern.FindStringSubmatch(output)
+	if len(match) != 2 {
+		return 0, false
+	}
+	index, err := strconv.Atoi(match[1])
+	return index, err == nil
+}
+
+func ipv4TableIDForFibIndex(summary string, wanted int) (int, bool) {
+	for _, match := range ipv4FibSummaryPattern.FindAllStringSubmatch(summary, -1) {
+		tableID, tableErr := strconv.Atoi(match[1])
+		fibIndex, fibErr := strconv.Atoi(match[2])
+		if tableErr == nil && fibErr == nil && fibIndex == wanted {
+			return tableID, true
+		}
+	}
+	return 0, false
+}
+
+func ipv4FibSummaryContainsTable(summary string, wanted int) bool {
+	for _, match := range ipv4FibSummaryPattern.FindAllStringSubmatch(summary, -1) {
+		tableID, err := strconv.Atoi(match[1])
+		if err == nil && tableID == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func routePolicyLookupTableID(via string) (int, bool) {
+	fields := strings.Fields(strings.TrimSpace(via))
+	if len(fields) != 2 || fields[0] != "ip4-lookup-in-table" {
+		return 0, false
+	}
+	tableID, err := strconv.Atoi(fields[1])
+	return tableID, err == nil
 }
 
 func parseRoutePolicyVPPCTLSpec(operation Operation) (routePolicyVPPCTLSpec, error) {
@@ -169,7 +271,16 @@ func parseRoutePolicyVPPCTLSpec(operation Operation) (routePolicyVPPCTLSpec, err
 	if spec.apply && spec.acl == "" {
 		return routePolicyVPPCTLSpec{}, snapshotDecodeError("route policy %q has no ACL command", id)
 	}
+	// New production plans rewrite the placeholder before execution.  Older
+	// persisted cleanup operations may still carry it, so resolve both the
+	// legacy Linux-interface variable and the explicit VPP-interface variable.
+	if vppIngress := strings.TrimSpace(os.Getenv("LY_ROUTE_LAN_VPP_INTERFACE")); vppIngress != "" {
+		spec.ingress = strings.ReplaceAll(spec.ingress, "lyroute-$LY_ROUTE_LAN_INTERFACE", vppIngress)
+	}
 	spec.ingress = strings.ReplaceAll(spec.ingress, "$LY_ROUTE_LAN_INTERFACE", strings.TrimSpace(os.Getenv("LY_ROUTE_LAN_INTERFACE")))
+	if spec.ingress == "" || spec.ingress == "lyroute-" || strings.Contains(spec.ingress, "$LY_ROUTE_LAN_INTERFACE") {
+		return routePolicyVPPCTLSpec{}, snapshotDecodeError("route policy %q has no resolved LAN VPP ingress interface", id)
+	}
 	return spec, nil
 }
 
@@ -206,12 +317,28 @@ func observedABFACLID(output string) (int, bool) {
 }
 
 func observedABFDeleteVia(output string) string {
+	attachedNextHop := false
 	for _, line := range nonBlankLines(output) {
 		fields := strings.Fields(line)
+		if attachedNextHop {
+			attachedNextHop = false
+			if len(fields) >= 2 {
+				nextHop := strings.TrimRight(fields[0], ",:")
+				interfaceName := strings.TrimRight(fields[1], ",:")
+				address, err := netip.ParseAddr(nextHop)
+				if err == nil && address.Is4() && interfaceNameSafe(interfaceName) {
+					return address.String() + " " + interfaceName
+				}
+			}
+		}
 		if len(fields) >= 5 && strings.HasPrefix(fields[0], "[@") && fields[2] == "via" {
 			return fields[3] + " " + strings.TrimRight(fields[4], ",:")
 		}
 		lower := strings.ToLower(line)
+		if strings.Contains(lower, "attached-nexthop:") {
+			attachedNextHop = true
+			continue
+		}
 		if strings.Contains(lower, "lookup") && strings.Contains(lower, "table:") {
 			for _, field := range fields {
 				if strings.HasPrefix(field, "table:") {

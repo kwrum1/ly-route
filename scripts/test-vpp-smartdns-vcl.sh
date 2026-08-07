@@ -12,7 +12,7 @@ trap cleanup EXIT INT TERM
 docker run -d --rm --name "$name" --network none -v "$smartdns_deb:/tmp/smartdns.deb:ro" --entrypoint sh "$image" -c '
   set -eu
   dpkg-deb -x /tmp/smartdns.deb /opt/smartdns
-  printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table }\n" >/tmp/vpp.conf
+  printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table use-app-socket-api }\n" >/tmp/vpp.conf
   vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1 &
   echo $! >/tmp/vpp.pid
   for i in $(seq 1 30); do test -S /run/vpp/cli.sock && break; sleep 1; done

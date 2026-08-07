@@ -12,7 +12,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +115,68 @@ func TestDashboardSummaryReportsSystemResourcesAndDependencies(t *testing.T) {
 		if !strings.Contains(res.Body.String(), required) {
 			t.Fatalf("dashboard summary missing %q: %s", required, res.Body.String())
 		}
+	}
+}
+
+func TestDNSPoliciesMergeByPriorityAndUseFinalMiss(t *testing.T) {
+	store, err := persistence.Open(context.Background(), "file:dns-policy-merge-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d: %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	local := `{"id":"dns-cn","name":"国内","priority":10,"enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"reject"},"rules":[{"id":"cn-rule","domains":["cn.example"],"outcome":{"kind":"direct","upstream_id":"ali","wan_egress_id":"pppoe"}}]}}`
+	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", local, cookie); res.Code != http.StatusOK {
+		t.Fatalf("local DNS policy status = %d: %s", res.Code, res.Body.String())
+	}
+	defaultPolicy := `{"id":"dns-default","name":"缺省","priority":100,"enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"direct","upstream_id":"cf","wan_egress_id":"proxy"},"rules":[]}}`
+	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", defaultPolicy, cookie); res.Code != http.StatusOK {
+		t.Fatalf("default DNS policy status = %d: %s", res.Code, res.Body.String())
+	}
+	matched := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=cn.example", "", cookie)
+	if matched.Code != http.StatusOK || !strings.Contains(matched.Body.String(), `"rule_id":"cn-rule"`) {
+		t.Fatalf("domestic DNS decision = %d: %s", matched.Code, matched.Body.String())
+	}
+	miss := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=foreign.example", "", cookie)
+	if miss.Code != http.StatusOK || !strings.Contains(miss.Body.String(), `"wan_egress_id":"proxy"`) {
+		t.Fatalf("default DNS decision = %d: %s", miss.Code, miss.Body.String())
+	}
+}
+
+func TestBuiltInRoutingGroupsMaterializeOnlyWhenReferenced(t *testing.T) {
+	geodataDir := filepath.Join("..", "..", "..", "packaging", "geodata")
+	if _, err := os.Stat(filepath.Join(geodataDir, "geoip.dat")); err != nil {
+		t.Skip("routing geodata is not present in this checkout")
+	}
+	t.Setenv("LY_ROUTE_GEODATA_DIR", geodataDir)
+	server := New()
+	items, err := server.desiredItems(context.Background(), "object_group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if stringField(item, "id") == "obj-geoip-cn" && len(objectGroupEntries(item)) != 0 {
+			t.Fatal("built-in GeoIP group must remain lazy in the list representation")
+		}
+	}
+	materialized, err := materializeObjectGroupItems(items, map[string]bool{"obj-geoip-cn": true, "obj-geosite-cn": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, item := range materialized {
+		id := stringField(item, "id")
+		if id == "obj-geoip-cn" || id == "obj-geosite-cn" {
+			counts[id] = len(objectGroupEntries(item))
+		}
+	}
+	if counts["obj-geoip-cn"] < 4000 || counts["obj-geosite-cn"] < 100000 {
+		t.Fatalf("materialized built-in groups are unexpectedly small: %#v", counts)
 	}
 }
 
@@ -330,7 +391,7 @@ func TestDesiredStateRoutesCoverOpenAPIControlPlaneWithoutClaimingRuntimeApply(t
 		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
 	}
 	cookie := login.Result().Cookies()[0]
-	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/interfaces", `{"id":"eth1","name":"eth1","gateway_role":"lan"}`, cookie); res.Code != http.StatusOK {
+	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/interfaces", `{"id":"eth1","name":"eth1","interface_id":"eth1","gateway_role":"lan","cidr":"192.168.88.1/24"}`, cookie); res.Code != http.StatusOK {
 		t.Fatalf("seed interface status=%d body=%s", res.Code, res.Body.String())
 	}
 	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dhcp/servers", `{"id":"dhcp-test","interface_id":"eth1","subnet":"192.168.88.0/24","pools":["192.168.88.100-192.168.88.199"],"routers":["192.168.88.1"],"name_servers":["192.168.88.1"],"enabled":true}`, cookie); res.Code != http.StatusOK {
@@ -499,7 +560,7 @@ func TestWANLinkRejectsDuplicateIPFamilyOnInterface(t *testing.T) {
 		t.Fatalf("first IPv6 WAN status=%d body=%s", firstIPv6.Code, firstIPv6.Body.String())
 	}
 	patchIPv4 := authenticatedJSONRequest(t, server, http.MethodPatch, "/api/v1/gateway/wan-links/wan-eth5-ipv4", `{"id":"wan-eth5-ipv4","name":"WAN IPv4 changed","interface_id":"eth5","gateway_role":"wan","type":"static","wan_type":"static","cidr":"198.51.100.3/24","gateway":"198.51.100.1","ipv4":{"mode":"static","address":"198.51.100.3/24","gateway":"198.51.100.1"},"ipv6":{"mode":"disabled"}}`, cookie)
-	if patchIPv4.Code != http.StatusOK {
+	if patchIPv4.Code != http.StatusOK || !strings.Contains(patchIPv4.Body.String(), `"interface_id":"eth5"`) || strings.Contains(patchIPv4.Body.String(), `"interface_id":"wan-eth5-ipv4"`) {
 		t.Fatalf("patch IPv4 WAN status=%d body=%s", patchIPv4.Code, patchIPv4.Body.String())
 	}
 }
@@ -777,6 +838,16 @@ func TestRuntimePlanRendersSingleKeaArtifactForMultipleDHCPServers(t *testing.T)
 	now := fixedClock()().UTC()
 	documents := []persistence.ConfigDocument{}
 	for _, item := range []map[string]any{
+		{"id": "eth1", "name": "eth1", "interface_id": "eth1", "gateway_role": "lan", "cidr": "192.168.88.1/24"},
+		{"id": "eth2", "name": "eth2", "interface_id": "eth2", "gateway_role": "lan", "cidr": "192.168.20.1/24"},
+	} {
+		payload, hash, err := persistence.MarshalPayload(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documents = append(documents, persistence.ConfigDocument{ResourceType: "interface", ResourceID: item["id"].(string), Payload: payload, PayloadHash: hash, UpdatedAt: now})
+	}
+	for _, item := range []map[string]any{
 		{"id": "lan", "interface_id": "eth1", "subnet": "192.168.88.0/24", "pools": []string{"192.168.88.100-192.168.88.199"}, "routers": []string{"192.168.88.1"}, "name_servers": []string{"192.168.88.1"}, "enabled": true},
 		{"id": "guest", "interface_id": "eth2", "subnet": "192.168.20.0/24", "pools": []string{"192.168.20.100-192.168.20.199"}, "routers": []string{"192.168.20.1"}, "name_servers": []string{"192.168.20.1"}, "enabled": true},
 	} {
@@ -802,7 +873,7 @@ func TestRuntimePlanRendersSingleKeaArtifactForMultipleDHCPServers(t *testing.T)
 	if len(keaArtifacts) != 1 {
 		t.Fatalf("kea artifact count = %d, want 1: %#v", len(keaArtifacts), keaArtifacts)
 	}
-	for _, required := range []string{"eth1", "eth2", "192.168.88.0/24", "192.168.20.0/24"} {
+	for _, required := range []string{"lylan-ens33", "lylan-ens35", "192.168.88.0/24", "192.168.20.0/24"} {
 		if !strings.Contains(keaArtifacts[0].Content, required) {
 			t.Fatalf("kea artifact missing %q: %s", required, keaArtifacts[0].Content)
 		}
@@ -1126,6 +1197,38 @@ func TestProxyNodeSubscriptionCRUDRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestProxyNodeURIWritePreservesRealitySettingsWithoutLeakingURI(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-proxy-uri-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	cookie := login.Result().Cookies()[0]
+	uri := "vless://11111111-1111-1111-1111-111111111111@node.example:443?type=tcp&encryption=none&security=reality&pbk=public-key&fp=chrome&sni=www.example.com&sid=98&flow=xtls-rprx-vision#Primary"
+	body, _ := json.Marshal(map[string]any{"id": "proxy-node-uri", "kind": "node", "name": "Reality node", "enabled": true, "uri": uri})
+	created := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/proxy/nodes", string(body), cookie)
+	response := created.Body.String()
+	if created.Code != http.StatusOK || strings.Contains(response, uri) || strings.Contains(response, "11111111-1111-1111-1111-111111111111") || !strings.Contains(response, `"uri_redacted":"redacted"`) {
+		t.Fatalf("proxy URI redaction status=%d body=%s", created.Code, response)
+	}
+	items, err := server.desiredItems(ctx, "proxy_node")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("proxy node items=%#v err=%v", items, err)
+	}
+	settings, _ := items[0]["settings"].(map[string]any)
+	reality, _ := settings["realitySettings"].(map[string]any)
+	if stringField(items[0], "protocol") != "vless" || stringField(items[0], "address") != "node.example" || intField(items[0], "port") != 443 || settings["flow"] != "xtls-rprx-vision" || reality["publicKey"] != "public-key" || reality["serverName"] != "www.example.com" {
+		t.Fatalf("parsed proxy node=%#v", items[0])
+	}
+	secret, err := store.Secret(ctx, "proxy_node", "proxy-node-uri", "secret")
+	if err != nil || secret != "11111111-1111-1111-1111-111111111111" {
+		t.Fatalf("stored proxy credential=%q err=%v", secret, err)
+	}
+}
+
 func TestPrivateSubscriptionRefreshAPIImportsRealityNode(t *testing.T) {
 	privateFile := strings.TrimSpace(os.Getenv("LY_ROUTE_PRIVATE_SUBSCRIPTION_FILE"))
 	if privateFile == "" {
@@ -1414,6 +1517,43 @@ func TestObjectGroupImportExportAndReferenceDeleteGuard(t *testing.T) {
 	}
 }
 
+func TestObjectGroupMultipartImport(t *testing.T) {
+	store, err := persistence.Open(context.Background(), "file:httpapi-object-group-multipart-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	if login.Code != http.StatusOK {
+		t.Fatal(login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	created := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/objects/groups", `{"id":"obj-multipart","kind":"ip","name":"Multipart","enabled":true}`, cookie)
+	if created.Code != http.StatusOK {
+		t.Fatal(created.Body.String())
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("kind", "ip")
+	_ = writer.WriteField("format", "text")
+	_ = writer.WriteField("mode", "overwrite")
+	part, err := writer.CreateFormFile("file", "ips.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("192.0.2.1\n192.0.2.0/24\n"))
+	_ = writer.Close()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/objects/groups/obj-multipart/import", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.AddCookie(cookie)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `"imported_count":2`) {
+		t.Fatalf("multipart import status=%d body=%s", res.Code, res.Body.String())
+	}
+}
+
 func TestRuntimePreviewCompilesDesiredRoutePolicyAndSecurityACLToVPPOperations(t *testing.T) {
 	ctx := context.Background()
 	store, err := persistence.Open(ctx, "file:httpapi-runtime-policy-preview-test?mode=memory&cache=shared")
@@ -1540,7 +1680,7 @@ func TestDNSIPSetObservationTriggersGatewayPolicyWithDNSPrecedence(t *testing.T)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	useVPPProof(t, "eth0")
-	saveExplicitDataInterface(t, store, "wan0")
+	saveExplicitDataInterface(t, store, "wan0", "wan1")
 	transaction := &capturingGatewayTransaction{}
 	controller := &httpServiceController{}
 	server := New(
@@ -1561,7 +1701,7 @@ func TestDNSIPSetObservationTriggersGatewayPolicyWithDNSPrecedence(t *testing.T)
 		body string
 	}{
 		{"/api/v1/gateway/wan-links", `{"id":"wan-primary","interface_id":"wan0","enabled":true,"type":"static","gateway":"198.51.100.1","ipv4":{"mode":"static","address":"198.51.100.2/30","gateway":"198.51.100.1"}}`},
-		{"/api/v1/gateway/wan-links", `{"id":"wan-secondary","enabled":true,"type":"static","gateway":"203.0.113.1","ipv4":{"mode":"static","address":"203.0.113.2/30","gateway":"203.0.113.1"}}`},
+		{"/api/v1/gateway/wan-links", `{"id":"wan-secondary","interface_id":"wan1","enabled":true,"type":"static","gateway":"203.0.113.1","ipv4":{"mode":"static","address":"203.0.113.2/30","gateway":"203.0.113.1"}}`},
 		{"/api/v1/dns/upstreams", `{"id":"dns-primary","enabled":true,"servers":["9.9.9.9"],"wan_egress_id":"wan-primary","interface":"wan-primary","cache_size":32768,"ttl_min_seconds":60,"ttl_max_seconds":600,"prefetch":true}`},
 		{"/api/v1/dns/policies", `{"id":"fixed-wan","name":"Fixed WAN","enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"reject"},"rules":[{"id":"updates","domains":["updates.example"],"outcome":{"kind":"direct","wan_egress_id":"wan-primary"}}]}}`},
 		{"/api/v1/gateway/policies/routes", `{"id":"ordinary-pbr","priority":10,"action":"route","egress":"wan-secondary","match":{"dst_ip":"any"}}`},
@@ -1580,7 +1720,7 @@ func TestDNSIPSetObservationTriggersGatewayPolicyWithDNSPrecedence(t *testing.T)
 		t.Fatalf("observation status=%d body=%s", response.Code, response.Body.String())
 	}
 	if transaction.plan == nil {
-		t.Fatal("DNS observation did not invoke the gateway transaction")
+		t.Fatalf("DNS observation did not invoke the gateway transaction: %s", response.Body.String())
 	}
 	var overrideFound, ordinaryFound bool
 	for _, route := range transaction.plan.GatewayPlan.Policy.RoutePolicies {
@@ -1665,20 +1805,7 @@ func TestInterfaceTelemetryUsesSharedRuntimeSnapshot(t *testing.T) {
 	}
 	cookie := login.Result().Cookies()[0]
 	interfaces := request(t, server, http.MethodGet, "/api/v1/interfaces")
-	if interfaces.Code != http.StatusOK {
-		t.Fatalf("interfaces status = %d body=%s", interfaces.Code, interfaces.Body.String())
-	}
-	var interfaceList struct {
-		Items []map[string]any `json:"items"`
-	}
-	if err := json.Unmarshal(interfaces.Body.Bytes(), &interfaceList); err != nil || len(interfaceList.Items) == 0 {
-		t.Fatalf("decode interfaces: %v body=%s", err, interfaces.Body.String())
-	}
-	interfaceID := stringField(interfaceList.Items[0], "id")
-	if interfaceID == "" {
-		interfaceID = stringField(interfaceList.Items[0], "name")
-	}
-	stats := request(t, server, http.MethodGet, "/api/v1/interfaces/"+url.PathEscape(interfaceID)+"/stats")
+	stats := request(t, server, http.MethodGet, "/api/v1/interfaces/ens33/stats")
 	telemetry := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/telemetry/interfaces", "", cookie)
 	for label, res := range map[string]*httptest.ResponseRecorder{"interfaces": interfaces, "stats": stats, "telemetry": telemetry} {
 		if res.Code != http.StatusOK {
@@ -2212,6 +2339,7 @@ func TestRuntimeApplyUsesConfiguredServiceRuntimeAndStatusExposesLastApply(t *te
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
+	saveTestProxyNode(t, store)
 	controller := &httpServiceController{health: map[serviceRuntime.ServiceName]serviceRuntime.Health{
 		serviceRuntime.SmartDNS: {Service: serviceRuntime.SmartDNS, Available: true},
 		serviceRuntime.Kea:      {Service: serviceRuntime.Kea, Available: true},
@@ -2226,7 +2354,7 @@ func TestRuntimeApplyUsesConfiguredServiceRuntimeAndStatusExposesLastApply(t *te
 		WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}),
 		WithServiceRuntime(serviceRuntime.Runtime{Controller: controller}),
 		WithVPPReceiptPath(receiptPath),
-		WithProxyEgress(proxy.NewProxyEgress("proxy-egress-default", "xray-tproxy-outbound")),
+		WithProxyEgress(testProxyEgressWithNode()),
 		WithFlowIntent(flow.NewIntent("default", []flow.Rule{
 			flow.NewRule("classify-default", flow.RuleGranularity, flow.Classify("best-effort")),
 		})),
@@ -2816,7 +2944,7 @@ func TestProxyEgressPostPersistsLocalStoreConfig(t *testing.T) {
 	if listed.Code != http.StatusOK {
 		t.Fatalf("list status = %d, want 200: %s", listed.Code, listed.Body.String())
 	}
-	if !strings.Contains(listed.Body.String(), "proxy-media") || !strings.Contains(listed.Body.String(), "vpp_to_service") || !strings.Contains(listed.Body.String(), "wan-underlay") {
+	if !strings.Contains(listed.Body.String(), "proxy-media") || !strings.Contains(listed.Body.String(), "Media Proxy") || !strings.Contains(listed.Body.String(), "vpp_to_service") || !strings.Contains(listed.Body.String(), "wan-underlay") {
 		t.Fatalf("list response missing persisted proxy egress: %s", listed.Body.String())
 	}
 	deleted := authenticatedJSONRequest(t, server, http.MethodDelete, "/api/v1/proxy/egresses/proxy-media", ``, login.Result().Cookies()[0])
@@ -3021,19 +3149,19 @@ func TestDNSResolveUsesStoredPolicyOrderSuffixMatchAndFailsClosed(t *testing.T) 
 	if login.Code != http.StatusOK {
 		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
 	}
-	body := `{"id":"default","kind":"policy","name":"Default DNS","enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"reject"},"rules":[{"id":"reject-video","domain_suffixes":["video.example"],"outcome":{"kind":"reject"}},{"id":"direct-example","domain_suffixes":["example"],"outcome":{"kind":"direct","upstream_id":"dns-direct-default"}}]}}`
+	body := `{"id":"default","kind":"policy","name":"Default DNS","enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"reject"},"rules":[{"id":"reject-video","source_prefixes":["any"],"domain_suffixes":["video.example"],"outcome":{"kind":"reject"}},{"id":"direct-example","source_prefixes":["any"],"domain_suffixes":["example"],"outcome":{"kind":"direct","upstream_id":"dns-direct-default"}}]}}`
 	create := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", body, login.Result().Cookies()[0])
 	if create.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want 200: %s", create.Code, create.Body.String())
 	}
-	matched := request(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=cdn.video.example")
+	matched := request(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=cdn.video.example&source_ip=192.0.2.10")
 	if matched.Code != http.StatusOK || !strings.Contains(matched.Body.String(), `"rule_id":"reject-video"`) || !strings.Contains(matched.Body.String(), `"answer":"NODATA"`) {
 		t.Fatalf("ordered suffix resolve = %d %s", matched.Code, matched.Body.String())
 	}
 	if strings.Contains(matched.Body.String(), `"rule_id":"direct-example"`) || strings.Contains(matched.Body.String(), `"continue_rules":true`) {
 		t.Fatalf("ordered suffix resolve fell through to lower rule: %s", matched.Body.String())
 	}
-	unavailable := request(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=plain.example&unavailable_resolvers=upstream%3Adns-direct-default")
+	unavailable := request(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=plain.example&source_ip=192.0.2.10&unavailable_resolvers=upstream%3Adns-direct-default")
 	if unavailable.Code != http.StatusOK || !strings.Contains(unavailable.Body.String(), `"rule_id":"direct-example"`) || !strings.Contains(unavailable.Body.String(), `"answer":"NODATA"`) || !strings.Contains(unavailable.Body.String(), "selected resolver is unavailable") {
 		t.Fatalf("unavailable resolver resolve = %d %s", unavailable.Code, unavailable.Body.String())
 	}
@@ -3072,6 +3200,38 @@ func TestDNSPolicyRejectsUnavailableDomainSetBeforeSave(t *testing.T) {
 	created := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", policy, cookie)
 	if created.Code != http.StatusOK {
 		t.Fatalf("policy with available domain set status=%d body=%s", created.Code, created.Body.String())
+	}
+}
+
+func TestDNSResolveExpandsAnySourceAndDomainSetSelectors(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-dns-domain-resolve-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	group := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/objects/groups", `{"id":"resolve-domains","kind":"domain","name":"Resolve Domains","enabled":true,"entries":["example.test",".suffix.test"]}`, cookie)
+	if group.Code != http.StatusOK {
+		t.Fatalf("domain set status=%d body=%s", group.Code, group.Body.String())
+	}
+	policy := `{"id":"default","kind":"policy","name":"Default DNS","enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"reject"},"rules":[{"id":"domain-set-rule","source_prefixes":["any"],"domain_set_ids":["resolve-domains"],"outcome":{"kind":"direct","upstream_id":"dns-direct-default"}}]}}`
+	created := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", policy, cookie)
+	if created.Code != http.StatusOK {
+		t.Fatalf("policy status=%d body=%s", created.Code, created.Body.String())
+	}
+	matched := request(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=example.test&source_ip=192.0.2.99")
+	if matched.Code != http.StatusOK || !strings.Contains(matched.Body.String(), `"rule_id":"domain-set-rule"`) {
+		t.Fatalf("domain-set resolve = %d %s", matched.Code, matched.Body.String())
+	}
+	suffix := request(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=www.suffix.test&source_ip=198.51.100.99")
+	if suffix.Code != http.StatusOK || !strings.Contains(suffix.Body.String(), `"rule_id":"domain-set-rule"`) {
+		t.Fatalf("domain suffix resolve = %d %s", suffix.Code, suffix.Body.String())
 	}
 }
 
@@ -3461,12 +3621,14 @@ func TestAuthenticatedConfigApplyCommitsWithServiceRuntime(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 	saveExplicitDataInterface(t, store, "eth1")
+	saveTestProxyNode(t, store)
 	controller := &httpServiceController{health: map[serviceRuntime.ServiceName]serviceRuntime.Health{serviceRuntime.Xray: {Service: serviceRuntime.Xray, Available: true}}}
 	server := New(
 		WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}),
 		WithClock(fixedClock()),
 		WithStore(store),
 		WithServiceRuntime(serviceRuntime.Runtime{Controller: controller}),
+		WithProxyEgress(testProxyEgressWithNode()),
 	)
 	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
 	if login.Code != http.StatusOK {
@@ -3482,7 +3644,7 @@ func TestAuthenticatedConfigApplyCommitsWithServiceRuntime(t *testing.T) {
 	if !strings.Contains(res.Body.String(), "committed") || !strings.Contains(res.Body.String(), "health-check") {
 		t.Fatalf("apply response missing commit evidence: %s", res.Body.String())
 	}
-	if got := strings.Join(controller.applied, ","); got != "smartdns,xray,vpp" {
+	if got := strings.Join(controller.applied, ","); got != "vpp,linux-routing,smartdns,xray,nftables" {
 		t.Fatalf("applied services = %s, want full proven forwarding plan", got)
 	}
 	if len(controller.rolledBack) != 0 {
@@ -3584,8 +3746,15 @@ func authenticatedJSONRequest(t *testing.T, server *Server, method, path, body s
 }
 
 func TestProxyXrayRuntimeStatusRestartAndLogs(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-xray-runtime-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	saveTestProxyNode(t, store)
 	controller := &httpServiceController{health: map[serviceRuntime.ServiceName]serviceRuntime.Health{serviceRuntime.Xray: {Service: serviceRuntime.Xray, Available: true}}, logs: map[serviceRuntime.ServiceName]string{serviceRuntime.Xray: "xray ready\nvless://secret@example"}}
-	server := New(WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()), WithServiceRuntime(serviceRuntime.Runtime{Controller: controller}), WithProxyEgress(proxy.NewProxyEgress("proxy-egress-default", "xray-tproxy-outbound")))
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()), WithServiceRuntime(serviceRuntime.Runtime{Controller: controller}), WithProxyEgress(testProxyEgressWithNode()))
 	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
 	if login.Code != http.StatusOK {
 		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
@@ -3821,16 +3990,22 @@ func configDocument(t *testing.T, resourceType, resourceID string, payload map[s
 	return persistence.ConfigDocument{ResourceType: resourceType, ResourceID: resourceID, Payload: raw, PayloadHash: hash, UpdatedAt: updatedAt}
 }
 
-func saveExplicitDataInterface(t *testing.T, store *persistence.Store, interfaceName string) {
+func saveExplicitDataInterface(t *testing.T, store *persistence.Store, interfaceNames ...string) {
 	t.Helper()
 	previous := hostInterfaceInventory
 	hostInterfaceInventory = func() []map[string]any {
-		return []map[string]any{{"id": "eth0", "name": "eth0"}, {"id": interfaceName, "name": interfaceName}}
+		items := []map[string]any{{"id": "eth0", "name": "eth0"}}
+		for _, interfaceName := range interfaceNames {
+			items = append(items, map[string]any{"id": interfaceName, "name": interfaceName})
+		}
+		return items
 	}
 	t.Cleanup(func() { hostInterfaceInventory = previous })
-	document := configDocument(t, "interface", interfaceName, map[string]any{"id": interfaceName, "interface_id": interfaceName, "gateway_role": "lan"}, fixedClock()())
-	if err := store.SaveConfig(context.Background(), document); err != nil {
-		t.Fatal(err)
+	for _, interfaceName := range interfaceNames {
+		document := configDocument(t, "interface", interfaceName, map[string]any{"id": interfaceName, "interface_id": interfaceName, "gateway_role": "lan"}, fixedClock()())
+		if err := store.SaveConfig(context.Background(), document); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -3860,6 +4035,27 @@ func authenticatedMultipartRequest(t *testing.T, server *Server, path string, fi
 
 func fixedClock() func() time.Time {
 	return func() time.Time { return time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC) }
+}
+
+func testProxyEgressWithNode() proxy.Egress {
+	egress := proxy.NewProxyEgress("proxy-egress-default", "xray-tproxy-outbound")
+	egress.NodeID = "proxy-node-test"
+	return egress
+}
+
+func saveTestProxyNode(t *testing.T, store *persistence.Store) {
+	t.Helper()
+	payload := map[string]any{
+		"id":       "proxy-node-test",
+		"name":     "Test proxy node",
+		"enabled":  true,
+		"protocol": "trojan",
+		"address":  "192.0.2.200",
+		"port":     443,
+	}
+	if err := store.SaveConfigWithSecrets(context.Background(), configDocument(t, "proxy_node", "proxy-node-test", payload, fixedClock()()), map[string]string{"secret": "test-password"}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type httpServiceController struct {
@@ -3955,4 +4151,22 @@ func (controller *httpServiceController) Logs(_ context.Context, service service
 		}
 	}
 	return "", errors.New("logs unavailable")
+}
+
+func TestApplyCapabilityFailuresAddsUnlistedFailedService(t *testing.T) {
+	now := fixedClock()()
+	components := []RuntimeComponentState{{Name: "persistence", State: "running", Available: true}}
+	failures := []apply.CapabilityFailureEvidence{{Capability: string(serviceRuntime.Nftables), Reason: "live readback failed"}}
+
+	got := applyCapabilityFailures(components, failures, "runtime-failed-service", now)
+	if len(got) != 2 {
+		t.Fatalf("components = %#v", got)
+	}
+	failure := got[1]
+	if failure.Name != "nftables_tproxy" || failure.State != "degraded" || failure.Available || failure.Reason != "live readback failed" {
+		t.Fatalf("failure component = %#v", failure)
+	}
+	if failure.ApplyReceipt.Status != apply.ReceiptFailed || failure.ApplyReceipt.TransactionID != "runtime-failed-service" {
+		t.Fatalf("failure receipt = %#v", failure.ApplyReceipt)
+	}
 }

@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -21,17 +22,20 @@ typedef int (*connect_fn)(int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*sendto_fn)(int, const void *, size_t, int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*recvfrom_fn)(int, void *, size_t, int, struct sockaddr *, socklen_t *);
 typedef int (*close_fn)(int);
+typedef int (*poll_fn)(struct pollfd *, nfds_t, int);
 
 static socket_fn libc_socket;
 static connect_fn libc_connect;
 static sendto_fn libc_sendto;
 static recvfrom_fn libc_recvfrom;
 static close_fn libc_close;
+static poll_fn libc_poll;
 static volatile sig_atomic_t stopping;
+static int first_udp_response = 1;
 
 #define MAX_SOURCE_ROUTES 4096
 #define MAX_DNS_NAME 255
-
+#define UPSTREAM_ATTEMPTS 2
 struct source_route {
     int family;
     uint8_t address[16];
@@ -62,13 +66,14 @@ static void resolve_libc(void) {
     if (!handle) {
         fprintf(stderr, "ly-route-dns-vpp-proxy: libc could not be loaded: %s\n", dlerror());
         exit(EXIT_FAILURE);
-    }
-    libc_socket = (socket_fn)dlsym(handle, "socket");
-    libc_connect = (connect_fn)dlsym(handle, "connect");
+	}
+	libc_socket = (socket_fn)dlsym(handle, "socket");
+	libc_connect = (connect_fn)dlsym(handle, "connect");
     libc_sendto = (sendto_fn)dlsym(handle, "sendto");
     libc_recvfrom = (recvfrom_fn)dlsym(handle, "recvfrom");
     libc_close = (close_fn)dlsym(handle, "close");
-    if (!libc_socket || !libc_connect || !libc_sendto || !libc_recvfrom || !libc_close) {
+	libc_poll = (poll_fn)dlsym(handle, "poll");
+	if (!libc_socket || !libc_connect || !libc_sendto || !libc_recvfrom || !libc_close || !libc_poll) {
         fprintf(stderr, "ly-route-dns-vpp-proxy: libc socket symbols unavailable\n");
         exit(EXIT_FAILURE);
     }
@@ -104,6 +109,11 @@ static int bind_listener(int family, int type, uint16_t port) {
         close(fd);
         return -1;
     }
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+		close(fd);
+		return -1;
+	}
     return fd;
 }
 
@@ -264,16 +274,22 @@ static int source_route_port(const uint8_t *query, size_t length, const struct s
     return port;
 }
 
-static int open_upstream(uint16_t port) {
-    struct sockaddr_in address = {
-        .sin_family = AF_INET,
-        .sin_port = htons(port),
-        .sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
-    };
-    int fd = libc_socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0 || libc_connect(fd, (const struct sockaddr *)&address, sizeof(address)) < 0) {
-        if (fd >= 0) libc_close(fd);
-        return -1;
+static int open_upstream(uint16_t port, int type) {
+	struct sockaddr_in address = {
+		.sin_family = AF_INET,
+		.sin_port = htons(port),
+		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
+	};
+	int fd = libc_socket(AF_INET, type, 0);
+	if (fd < 0 || libc_connect(fd, (const struct sockaddr *)&address, sizeof(address)) < 0) {
+		int saved_errno = errno;
+		if (fd >= 0) libc_close(fd);
+		if (getenv("LY_ROUTE_DNS_ROUTE_DEBUG")) {
+			fprintf(stderr, "ly-route-dns-vpp-proxy: upstream %s port=%u failed: %s\n",
+			        type == SOCK_STREAM ? "tcp" : "udp", (unsigned int)port, strerror(saved_errno));
+			fflush(stderr);
+		}
+		return -1;
     }
     return fd;
 }
@@ -289,23 +305,32 @@ static int relay_udp(int listener) {
 
     int port = source_route_port(query, (size_t)query_length, (const struct sockaddr *)&client);
     if (port < 0) return 0;
-    int upstream = open_upstream((uint16_t)port);
-    if (upstream < 0) return 0;
-    ssize_t sent = libc_sendto(upstream, query, (size_t)query_length, 0, NULL, 0);
-    if (sent != query_length) {
-        libc_close(upstream);
-        return 0;
-    }
-    struct pollfd wait_for_answer = { .fd = upstream, .events = POLLIN };
-    if (poll(&wait_for_answer, 1, 3000) <= 0) {
-        libc_close(upstream);
-        return 0;
-    }
-    ssize_t answer_length = libc_recvfrom(upstream, answer, sizeof(answer), 0, NULL, NULL);
-    libc_close(upstream);
-    if (answer_length < 12) return 0;
-    (void)sendto(listener, answer, (size_t)answer_length, 0,
-                 (const struct sockaddr *)&client, client_length);
+    for (int attempt = 0; attempt < UPSTREAM_ATTEMPTS; attempt++) {
+		int upstream = open_upstream((uint16_t)port, SOCK_DGRAM);
+		if (upstream < 0) continue;
+		ssize_t sent = libc_sendto(upstream, query, (size_t)query_length, 0, NULL, 0);
+		if (sent != query_length) {
+			libc_close(upstream);
+			continue;
+		}
+		struct pollfd wait_for_answer = { .fd = upstream, .events = POLLIN };
+		if (libc_poll(&wait_for_answer, 1, 3000) <= 0) {
+			libc_close(upstream);
+			continue;
+		}
+		ssize_t answer_length = libc_recvfrom(upstream, answer, sizeof(answer), 0, NULL, NULL);
+		libc_close(upstream);
+		if (answer_length < 12) continue;
+		(void)sendto(listener, answer, (size_t)answer_length, 0,
+		             (const struct sockaddr *)&client, client_length);
+		if (first_udp_response) {
+			first_udp_response = 0;
+			usleep(10000);
+			(void)sendto(listener, answer, (size_t)answer_length, 0,
+			             (const struct sockaddr *)&client, client_length);
+		}
+		return 0;
+	}
     return 0;
 }
 
@@ -329,6 +354,26 @@ static int write_full(int fd, const void *buffer, size_t length) {
     return 0;
 }
 
+static int read_full_libc(int fd, void *buffer, size_t length) {
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t count = libc_recvfrom(fd, (uint8_t *)buffer + offset, length - offset, 0, NULL, NULL);
+        if (count <= 0) return -1;
+        offset += (size_t)count;
+    }
+    return 0;
+}
+
+static int write_full_libc(int fd, const void *buffer, size_t length) {
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t count = libc_sendto(fd, (const uint8_t *)buffer + offset, length - offset, 0, NULL, 0);
+        if (count <= 0) return -1;
+        offset += (size_t)count;
+    }
+    return 0;
+}
+
 static void relay_tcp_client(int client, const struct sockaddr *peer) {
     uint8_t length_bytes[2];
     uint8_t query[65537];
@@ -343,26 +388,28 @@ static void relay_tcp_client(int client, const struct sockaddr *peer) {
     int port = source_route_port(query + 2, query_length, peer);
     if (port < 0) return;
 
-    int upstream = libc_socket(AF_INET, SOCK_STREAM, 0);
-    if (upstream < 0) return;
-    struct sockaddr_in address = {
-        .sin_family = AF_INET,
-        .sin_port = htons((uint16_t)port),
-        .sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
-    };
-    if (libc_connect(upstream, (const struct sockaddr *)&address, sizeof(address)) < 0 ||
-        write_full(upstream, query, query_length + 2) < 0 ||
-        read_full(upstream, answer, sizeof(length_bytes)) < 0) {
-        libc_close(upstream);
-        return;
-    }
-    size_t answer_length = ((size_t)answer[0] << 8) | answer[1];
-    if (answer_length < 12 || answer_length > 65535 || read_full(upstream, answer + 2, answer_length) < 0) {
-        libc_close(upstream);
-        return;
-    }
-    libc_close(upstream);
-    (void)write_full(client, answer, answer_length + 2);
+	for (int attempt = 0; attempt < UPSTREAM_ATTEMPTS; attempt++) {
+		int upstream = open_upstream((uint16_t)port, SOCK_STREAM);
+		if (upstream < 0) continue;
+		if (write_full_libc(upstream, query, query_length + 2) < 0) {
+			libc_close(upstream);
+			continue;
+		}
+		struct pollfd wait_for_answer = { .fd = upstream, .events = POLLIN };
+		if (libc_poll(&wait_for_answer, 1, 3000) <= 0 ||
+			read_full_libc(upstream, answer, sizeof(length_bytes)) < 0) {
+			libc_close(upstream);
+			continue;
+		}
+		size_t answer_length = ((size_t)answer[0] << 8) | answer[1];
+		if (answer_length < 12 || answer_length > 65535 || read_full_libc(upstream, answer + 2, answer_length) < 0) {
+			libc_close(upstream);
+			continue;
+		}
+		libc_close(upstream);
+		(void)write_full(client, answer, answer_length + 2);
+		return;
+	}
 }
 
 int main(void) {
@@ -384,28 +431,27 @@ int main(void) {
     int tcp4 = enable_v4 ? bind_listener(AF_INET, SOCK_STREAM, 53) : -1;
     int udp6 = enable_v6 ? bind_listener(AF_INET6, SOCK_DGRAM, 53) : -1;
     int tcp6 = enable_v6 ? bind_listener(AF_INET6, SOCK_STREAM, 53) : -1;
-    if ((enable_v4 && (udp4 < 0 || tcp4 < 0)) || (enable_v6 && (udp6 < 0 || tcp6 < 0))) {
-        fprintf(stderr, "ly-route-dns-vpp-proxy: failed to bind VPP DNS service\n");
-        return EXIT_FAILURE;
-    }
-    while (!stopping) {
-        struct pollfd fds[] = {
-            {.fd = udp4, .events = POLLIN}, {.fd = tcp4, .events = POLLIN},
-            {.fd = udp6, .events = POLLIN}, {.fd = tcp6, .events = POLLIN},
-        };
-        int ready = poll(fds, 4, 1000);
-        if (ready <= 0) continue;
-        if (udp4 >= 0 && (fds[0].revents & POLLIN)) relay_udp(udp4);
-        if (udp6 >= 0 && (fds[2].revents & POLLIN)) relay_udp(udp6);
-        for (int i = 1; i < 4; i += 2) if (fds[i].revents & POLLIN) {
-            struct sockaddr_storage peer = {0};
-            socklen_t peer_length = sizeof(peer);
-            int client = accept(fds[i].fd, (struct sockaddr *)&peer, &peer_length);
-            if (client >= 0) {
-                relay_tcp_client(client, (const struct sockaddr *)&peer);
-                close(client);
-            }
-        }
+	if ((enable_v4 && (udp4 < 0 || tcp4 < 0)) || (enable_v6 && (udp6 < 0 || tcp6 < 0))) {
+		fprintf(stderr, "ly-route-dns-vpp-proxy: failed to bind VPP DNS service\n");
+		return EXIT_FAILURE;
+	}
+	int listeners[] = {udp4, tcp4, udp6, tcp6};
+	while (!stopping) {
+		for (int role = 0; role < 4; role++) {
+			if (listeners[role] < 0) continue;
+			if ((role % 2) == 0) {
+				relay_udp(listeners[role]);
+				continue;
+			}
+			struct sockaddr_storage peer = {0};
+			socklen_t peer_length = sizeof(peer);
+			int client = accept(listeners[role], (struct sockaddr *)&peer, &peer_length);
+			if (client >= 0) {
+				relay_tcp_client(client, (const struct sockaddr *)&peer);
+				close(client);
+			}
+		}
+		usleep(1000);
     }
     if (udp4 >= 0) close(udp4);
     if (tcp4 >= 0) close(tcp4);

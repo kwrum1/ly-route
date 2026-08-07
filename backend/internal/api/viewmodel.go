@@ -41,6 +41,8 @@ type ProxyEgressResource struct {
 	DisplayList    string                 `json:"display_list,omitempty"`
 	ProxyProfileID string                 `json:"proxy_profile_id,omitempty"`
 	UnderlayWANID  string                 `json:"underlay_wan_id,omitempty"`
+	NodeID         string                 `json:"node_id,omitempty"`
+	SubscriptionID string                 `json:"subscription_id,omitempty"`
 	RuntimeProfile proxy.RuntimeProfile   `json:"runtime_profile,omitempty"`
 	CapturePath    proxy.CapturePath      `json:"capture_path,omitempty"`
 	Engine         proxy.Engine           `json:"engine,omitempty"`
@@ -89,6 +91,9 @@ func ProxyEgressWANRow(egress proxy.Egress, name string, enabled bool, capabilit
 		SemanticType:   row.SemanticType,
 		DisplayList:    row.DisplayList,
 		ProxyProfileID: string(row.RuntimeProfile),
+		UnderlayWANID:  row.UnderlayWANID,
+		NodeID:         row.NodeID,
+		SubscriptionID: row.SubscriptionID,
 		RuntimeProfile: row.RuntimeProfile,
 		CapturePath:    row.CapturePath,
 		Engine:         row.Engine,

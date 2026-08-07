@@ -12,7 +12,10 @@ import (
 	"ly-route/backend/internal/runtime/proxy"
 )
 
-func (server *Server) compileProxySubscription(ctx context.Context, compiled *proxy.CompiledEgress) string {
+func (server *Server) compileProxySubscription(ctx context.Context, egress proxy.Egress, compiled *proxy.CompiledEgress) string {
+	if compiled == nil {
+		return "proxy runtime compilation requires a compiled egress"
+	}
 	subscriptions, err := server.desiredItems(ctx, "proxy_subscription")
 	if err != nil {
 		return fmt.Sprintf("proxy subscription read failed: %v", err)
@@ -23,6 +26,9 @@ func (server *Server) compileProxySubscription(ctx context.Context, compiled *pr
 	}
 	proxyNodes := make([]proxy.Node, 0, len(nodes))
 	for _, item := range nodes {
+		if enabled, exists := item["enabled"].(bool); exists && !enabled {
+			continue
+		}
 		secret := stringField(item, "secret")
 		if secret == "" && server.store != nil {
 			secret, _ = server.store.Secret(ctx, "proxy_node", stringField(item, "id"), "secret")
@@ -38,11 +44,60 @@ func (server *Server) compileProxySubscription(ctx context.Context, compiled *pr
 			Settings: settings,
 		})
 	}
+
+	compileDirectNode := func(nodeID string) string {
+		for _, node := range proxyNodes {
+			if node.ID != strings.TrimSpace(nodeID) {
+				continue
+			}
+			runtimeNodes := prepareProxyNodeTLS(ctx, []proxy.Node{node}, []string{node.ID})
+			if len(runtimeNodes) != 1 {
+				return fmt.Sprintf("proxy node %q could not be prepared", node.ID)
+			}
+			outbound, compileErr := proxy.CompileNodeOutbound(runtimeNodes[0])
+			if compileErr != nil {
+				return compileErr.Error()
+			}
+			compiled.XrayRuntime.ConfigPayload.Outbounds = []proxy.XrayOutbound{outbound}
+			compiled.XrayRuntime.ConfigPayload.Routing = nil
+			compiled.XrayRuntime.ConfigPayload.Observatory = nil
+			compiled.XrayRuntime.ConfigPayload.API = nil
+			compiled.XrayRuntime.OutboundTag = outbound.Tag
+			return ""
+		}
+		return fmt.Sprintf("configured proxy node %q is missing or disabled", strings.TrimSpace(nodeID))
+	}
+
+	if selectedNodeID := strings.TrimSpace(egress.NodeID); selectedNodeID != "" {
+		return compileDirectNode(selectedNodeID)
+	}
+
+	selectedSubscriptionID := strings.TrimSpace(egress.SubscriptionID)
+	activeSubscriptions := make([]map[string]any, 0, len(subscriptions))
 	for _, item := range subscriptions {
 		enabled, exists := item["enabled"].(bool)
 		if exists && !enabled {
 			continue
 		}
+		if selectedSubscriptionID != "" && stringField(item, "id") != selectedSubscriptionID {
+			continue
+		}
+		activeSubscriptions = append(activeSubscriptions, item)
+	}
+	if selectedSubscriptionID != "" && len(activeSubscriptions) == 0 {
+		return fmt.Sprintf("configured proxy subscription %q is missing or disabled", selectedSubscriptionID)
+	}
+	if selectedSubscriptionID == "" && len(activeSubscriptions) > 1 {
+		return "multiple enabled proxy subscriptions require subscription_id on the proxy egress"
+	}
+	if len(activeSubscriptions) == 0 {
+		if len(proxyNodes) == 1 {
+			return compileDirectNode(proxyNodes[0].ID)
+		}
+		return "proxy egress requires node_id or subscription_id"
+	}
+
+	for _, item := range activeSubscriptions {
 		subscriptionURL := stringField(item, "url")
 		if subscriptionURL == "" && server.store != nil {
 			subscriptionURL, _ = server.store.Secret(ctx, "proxy_subscription", stringField(item, "id"), "url")
@@ -82,7 +137,7 @@ func (server *Server) compileProxySubscription(ctx context.Context, compiled *pr
 		compiled.XrayRuntime.ConfigPayload.Outbounds = []proxy.XrayOutbound{outbound}
 		return ""
 	}
-	return ""
+	return "proxy egress requires a usable proxy node or subscription"
 }
 
 func prepareProxyNodeTLS(ctx context.Context, nodes []proxy.Node, selected []string) []proxy.Node {

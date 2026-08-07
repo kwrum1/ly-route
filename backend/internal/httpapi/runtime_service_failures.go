@@ -35,6 +35,32 @@ func applyCapabilityFailures(components []RuntimeComponentState, failures []appl
 			AppliedAt:     now,
 			Cause:         failure.Reason,
 		}
+		delete(byName, components[index].Name)
+	}
+	for _, failure := range failures {
+		name := failure.Capability
+		switch serviceRuntime.ServiceName(failure.Capability) {
+		case serviceRuntime.Nftables:
+			name = "nftables_tproxy"
+		case serviceRuntime.LinuxRouting:
+			name = "linux_routing"
+		}
+		if _, exists := byName[name]; !exists {
+			continue
+		}
+		components = append(components, RuntimeComponentState{
+			Name:   name,
+			State:  "degraded",
+			Reason: failure.Reason,
+			ApplyReceipt: apply.ApplyReceipt{
+				TransactionID: transactionID,
+				Capability:    name,
+				Status:        apply.ReceiptFailed,
+				AppliedAt:     now,
+				Cause:         failure.Reason,
+			},
+		})
+		delete(byName, name)
 	}
 	return components
 }

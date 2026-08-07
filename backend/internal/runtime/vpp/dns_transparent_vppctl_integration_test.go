@@ -11,7 +11,11 @@ func TestDNSTransparentVPPCTLIntegration(t *testing.T) {
 	if binary == "" {
 		t.Skip("LY_ROUTE_VPPCTL_INTEGRATION_BINARY is not set")
 	}
-	interception := DNSTransparentInterception{LANInterface: "tap0", IPv6Prefixes: []string{"2001:db8:1::/64"}}
+	interception := DNSTransparentInterception{
+		LANInterface: "tap0",
+		IPv4Prefixes: []string{"192.0.2.0/24"},
+		IPv6Prefixes: []string{"2001:db8:1::/64"},
+	}
 	operation := Operation{
 		Name:           "vpp.dns-transparent-interception",
 		RequestID:      "dns-transparent-integration",

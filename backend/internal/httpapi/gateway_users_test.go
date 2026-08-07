@@ -37,7 +37,7 @@ func TestGatewayCollectorsBackTopConnectionsAndDHCPNeighborOnlineUsers(t *testin
 	domains := api.telemetryData(t, "/api/v1/telemetry/top-domains")
 
 	connectionItems := mapItems(t, connections["items"])
-	if len(connectionItems) != 1 || connectionItems[0]["src_ip"] != "192.168.88.10" || connectionItems[0]["bytes"] != float64(4096) {
+	if len(connectionItems) != 1 || connectionItems[0]["src_ip"] != "192.168.88.10" || connectionItems[0]["source_ip"] != "192.168.88.10" || connectionItems[0]["destination_ip"] != "8.8.8.8" || connectionItems[0]["bytes"] != float64(4096) {
 		t.Fatalf("top connections = %#v, want live gateway session", connectionItems)
 	}
 	userItems := mapItems(t, users["items"])
@@ -46,6 +46,46 @@ func TestGatewayCollectorsBackTopConnectionsAndDHCPNeighborOnlineUsers(t *testin
 	}
 	if domains["state"] != "unavailable" || domains["degraded"] != true || len(mapItems(t, domains["items"])) != 0 {
 		t.Fatalf("Gateway top domains = %#v, want unavailable until SmartDNS collector exists", domains)
+	}
+}
+
+func TestGatewayOnlineUsersIncludesStaticIPNeighborsWithoutDHCPLease(t *testing.T) {
+	observedAt := time.Date(2026, 8, 6, 8, 0, 0, 0, time.UTC)
+	server := New(
+		WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}),
+		WithClock(func() time.Time { return observedAt }),
+		WithGatewayTelemetry(&scriptedGatewayTelemetry{snapshots: []GatewayTelemetrySnapshot{{
+			ObservedAt: observedAt,
+			Neighbors:  []GatewayNeighbor{{IP: "192.168.88.20", MAC: "00:11:22:33:44:66", LastSeen: observedAt, DownloadBytes: 2048, UploadBytes: 1024}},
+		}}}),
+		WithDHCPLeases(fakeDHCPLeases{items: []map[string]any{}}),
+	)
+	api := authenticatedHTTPClient(t, server)
+
+	result := api.telemetryData(t, "/api/v1/telemetry/online-users")
+	items := mapItems(t, result["items"])
+	if len(items) != 1 || items[0]["ip"] != "192.168.88.20" || items[0]["online_status"] != "online" || items[0]["rx_bytes"] != float64(2048) {
+		t.Fatalf("static neighbor online users = %#v", items)
+	}
+}
+
+func TestGatewayDashboardUsesLocalGatewayTelemetry(t *testing.T) {
+	observedAt := time.Date(2026, 8, 6, 8, 0, 0, 0, time.UTC)
+	server := New(
+		WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}),
+		WithClock(func() time.Time { return observedAt }),
+		WithGatewayTelemetry(&scriptedGatewayTelemetry{snapshots: []GatewayTelemetrySnapshot{{
+			ObservedAt: observedAt,
+			Connections: []GatewayConnection{{
+				SourceIP: "192.168.88.20", DestinationIP: "203.0.113.20", Protocol: "tcp", SourcePort: 50000, DestinationPort: 443, Bytes: 4096,
+			}},
+		}}}),
+	)
+	api := authenticatedHTTPClient(t, server)
+
+	result := api.telemetryData(t, "/api/v1/telemetry/dashboard")
+	if result["sessions"] != float64(1) || result["degraded"] != false || result["active_path"] != "vpp" {
+		t.Fatalf("gateway dashboard telemetry = %#v", result)
 	}
 }
 

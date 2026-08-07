@@ -1,12 +1,17 @@
 [Unit]
-Description=Ly Route legacy Linux policy routing apply (disabled for VPP-native production path)
-After=network-online.target
+Description=Ly Route proxy service handoff and policy routing
+After=network-online.target vpp.service ly-route-vpp-apply.service
 Wants=network-online.target
+Requires=vpp.service ly-route-vpp-apply.service
+PartOf=vpp.service
+Before=smartdns.service ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/ly-route/policy-routing-apply-default
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=2s
 
 [Install]
 WantedBy=multi-user.target

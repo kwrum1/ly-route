@@ -142,12 +142,13 @@ async function createRoutePolicy(page, groupID, wanGroupID) {
   await saveModal(page);
 }
 
-async function createDNSPolicy(page, ipGroupID, domainGroupID) {
+async function createDNSPolicy(page, ipGroupID, domainGroupID, wanID) {
   await openPage(page, 'route/dnspolicy_main');
   await page.locator('[data-action=add]').click();
   await page.locator('[data-dns-name]').fill('dns-e2e');
   await setAddressGroup(page, 'dns-src', ipGroupID);
   await page.locator('[data-dns-domain-group]').selectOption(domainGroupID);
+  await page.locator('[data-dns-line]').selectOption(wanID);
   await page.locator('[data-dns-upstream]').fill('223.5.5.5');
   await page.locator('[data-dns-action]').selectOption({ label: '解析' });
   await saveModal(page);
@@ -219,18 +220,25 @@ async function main() {
     const wanGroup = wanGroups.find((item) => item.name === 'wan-group-e2e');
     assert.ok(wanGroup, JSON.stringify(wanGroups));
     await createRoutePolicy(page, ipGroup.id, wanGroup.id);
-    await createDNSPolicy(page, ipGroup.id, domainGroup.id);
+    await createDNSPolicy(page, ipGroup.id, domainGroup.id, wanA.id);
     await createDHCP(page);
     await createTrafficControl(page, ipGroup.id);
     await createReadonlyUser(page);
 
     const routes = await items(page, '/api/v1/gateway/policies/routes');
     const dnsPolicies = await items(page, '/api/v1/dns/policies');
+    const dnsUpstreams = await items(page, '/api/v1/dns/upstreams');
     const dhcp = await items(page, '/api/v1/dhcp/servers');
     const traffic = await items(page, '/api/v1/gateway/traffic-control');
     const users = await items(page, '/api/v1/auth/users');
     assert.ok(routes.some((item) => item.name === 'route-e2e' && item.match?.sources?.includes(ipGroup.id)), JSON.stringify(routes));
-    assert.ok(dnsPolicies.some((item) => item.name === 'dns-e2e' && item.policy?.rules?.[0]?.domain_set_ids?.includes(domainGroup.id)), JSON.stringify(dnsPolicies));
+    const dnsPolicy = dnsPolicies.find((item) => item.name === 'dns-e2e');
+    const dnsOutcome = dnsPolicy?.policy?.rules?.[0]?.outcome;
+    const dnsUpstream = dnsUpstreams.find((item) => item.id === dnsOutcome?.upstream_id);
+    assert.ok(dnsPolicy?.policy?.rules?.[0]?.domain_set_ids?.includes(domainGroup.id), JSON.stringify(dnsPolicies));
+    assert.equal(dnsOutcome?.kind, 'direct', JSON.stringify(dnsPolicy));
+    assert.deepEqual(dnsUpstream?.servers, ['223.5.5.5'], JSON.stringify(dnsUpstreams));
+    assert.equal(dnsUpstream?.wan_egress_id, wanA.id, JSON.stringify(dnsUpstream));
     assert.ok(dhcp.some((item) => item.interface_id === 'lan-e2e' && item.subnet === '192.168.88.0/24'), JSON.stringify(dhcp));
     assert.ok(traffic.some((item) => item.rules?.[0]?.match?.sources?.includes(ipGroup.id)), JSON.stringify(traffic));
     assert.ok(users.some((item) => item.username === 'ui-readonly' && item.role === 'readonly'), JSON.stringify(users));

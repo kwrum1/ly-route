@@ -7,14 +7,20 @@ import (
 	"strings"
 )
 
-const dnsIPv6TableID = 101
+const (
+	dnsIPv4TableID = 100
+	dnsIPv6TableID = 101
+)
 
 func (channel vppctlChannel) doDNSTransparentLifecycle(ctx context.Context, operation Operation, interception DNSTransparentInterception) (Reply, error) {
 	v4Policy := stableID("dns-transparent-v4", 9000, 999)
 	v6Policy := stableID("dns-transparent-v6", 9000, 999)
-	initial, err := channel.runServiceChainCommands(ctx, operation, "show abf attach", fmt.Sprintf("show abf policy %d", v4Policy), fmt.Sprintf("show abf policy %d", v6Policy), "show acl-plugin acl")
+	initial, err := channel.runServiceChainCommands(ctx, operation, "show abf attach", fmt.Sprintf("show abf policy %d", v4Policy), fmt.Sprintf("show abf policy %d", v6Policy), fmt.Sprintf("show abf attach %s", interception.LANInterface), "show acl-plugin acl", fmt.Sprintf("show ip fib table %d", dnsIPv4TableID), fmt.Sprintf("show ip6 fib table %d", dnsIPv6TableID))
 	if err != nil {
 		return Reply{}, err
+	}
+	if verifyDNSTransparentReadback(interception, initial) == nil {
+		return routePolicyLifecycleReply(operation, initial), nil
 	}
 	results := append([]VPPCTLCommandResult(nil), initial...)
 	attachOutput := resultStdout(initial, "show abf attach")
@@ -45,7 +51,10 @@ func (channel vppctlChannel) doDNSTransparentLifecycle(ctx context.Context, oper
 		results = append(results, removed...)
 	}
 	if v4Present {
-		removed, removeErr := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("abf policy del id %d acl %d via local", v4Policy, v4ACLID))
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation,
+			fmt.Sprintf("?abf policy del id %d acl %d via ip4-lookup-in-table %d", v4Policy, v4ACLID, dnsIPv4TableID),
+			fmt.Sprintf("?abf policy del id %d acl %d via local", v4Policy, v4ACLID),
+		)
 		if removeErr != nil {
 			return Reply{}, removeErr
 		}
@@ -78,10 +87,15 @@ func (channel vppctlChannel) doDNSTransparentLifecycle(ctx context.Context, oper
 	}
 	results = append(results, v4Created...)
 	baseCommands := []string{
-		fmt.Sprintf("abf policy add id %d acl %d via local", v4Policy, v4ACL),
+		fmt.Sprintf("ip table add %d", dnsIPv4TableID),
+		fmt.Sprintf("ip route add table %d 0.0.0.0/0 via local", dnsIPv4TableID),
+		fmt.Sprintf("abf policy add id %d acl %d via ip4-lookup-in-table %d", v4Policy, v4ACL, dnsIPv4TableID),
 		fmt.Sprintf("abf attach ip4 policy %d priority 0 %s", v4Policy, interception.LANInterface),
 		fmt.Sprintf("ip6 table add %d", dnsIPv6TableID),
 		fmt.Sprintf("ip route add table %d ::/0 via local", dnsIPv6TableID),
+	}
+	for _, prefix := range interception.IPv4Prefixes {
+		baseCommands = append(baseCommands, fmt.Sprintf("ip route add table %d %s via %s", dnsIPv4TableID, prefix, interception.LANInterface))
 	}
 	for _, prefix := range interception.IPv6Prefixes {
 		baseCommands = append(baseCommands, fmt.Sprintf("ip route add table %d %s via %s", dnsIPv6TableID, prefix, interception.LANInterface))
@@ -105,7 +119,8 @@ func (channel vppctlChannel) doDNSTransparentLifecycle(ctx context.Context, oper
 		fmt.Sprintf("abf policy add id %d acl %d via ip6-lookup-in-table %d", v6Policy, v6ACL, dnsIPv6TableID),
 		fmt.Sprintf("abf attach ip6 policy %d priority 0 %s", v6Policy, interception.LANInterface),
 		fmt.Sprintf("show abf policy %d", v4Policy), fmt.Sprintf("show abf policy %d", v6Policy),
-		fmt.Sprintf("show abf attach %s", interception.LANInterface), "show acl-plugin acl", fmt.Sprintf("show ip fib table %d", dnsIPv6TableID))
+		fmt.Sprintf("show abf attach %s", interception.LANInterface), "show acl-plugin acl",
+		fmt.Sprintf("show ip fib table %d", dnsIPv4TableID), fmt.Sprintf("show ip6 fib table %d", dnsIPv6TableID))
 	if err != nil {
 		return Reply{}, err
 	}
@@ -119,6 +134,73 @@ func (channel vppctlChannel) doDNSTransparentLifecycle(ctx context.Context, oper
 	attachReadback := resultStdoutLast(results, fmt.Sprintf("show abf attach %s", interception.LANInterface))
 	if !routePolicyAttached(attachReadback, v4Policy) || !routePolicyAttached(attachReadback, v6Policy) {
 		return Reply{}, snapshotDecodeError("transparent DNS ABF attachment readback is incomplete")
+	}
+	return routePolicyLifecycleReply(operation, results), nil
+}
+
+func (channel vppctlChannel) doDNSTransparentDeleteLifecycle(ctx context.Context, operation Operation, interception DNSTransparentInterception) (Reply, error) {
+	v4Policy := stableID("dns-transparent-v4", 9000, 999)
+	v6Policy := stableID("dns-transparent-v6", 9000, 999)
+	initial, err := channel.runServiceChainCommands(ctx, operation, "show abf attach", fmt.Sprintf("show abf policy %d", v4Policy), fmt.Sprintf("show abf policy %d", v6Policy), "show acl-plugin acl")
+	if err != nil {
+		return Reply{}, err
+	}
+	results := append([]VPPCTLCommandResult(nil), initial...)
+	attachOutput := resultStdout(initial, "show abf attach")
+	v4Output := resultStdout(initial, fmt.Sprintf("show abf policy %d", v4Policy))
+	v6Output := resultStdout(initial, fmt.Sprintf("show abf policy %d", v6Policy))
+	v4ACL, v4Present := observedABFACLID(v4Output)
+	v6ACL, v6Present := observedABFACLID(v6Output)
+	for _, attachment := range dnsPolicyAttachments(attachOutput, v4Policy, "ip4") {
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("abf attach ip4 del policy %d %s", v4Policy, attachment))
+		if removeErr != nil {
+			return Reply{}, removeErr
+		}
+		results = append(results, removed...)
+	}
+	for _, attachment := range dnsPolicyAttachments(attachOutput, v6Policy, "ip6") {
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("abf attach ip6 del policy %d %s", v6Policy, attachment))
+		if removeErr != nil {
+			return Reply{}, removeErr
+		}
+		results = append(results, removed...)
+	}
+	if v4Present {
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation,
+			fmt.Sprintf("?abf policy del id %d acl %d via ip4-lookup-in-table %d", v4Policy, v4ACL, dnsIPv4TableID),
+			fmt.Sprintf("?abf policy del id %d acl %d via local", v4Policy, v4ACL),
+		)
+		if removeErr != nil {
+			return Reply{}, removeErr
+		}
+		results = append(results, removed...)
+	}
+	if v6Present {
+		removed, removeErr := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("abf policy del id %d acl %d via ip6-lookup-in-table %d", v6Policy, v6ACL, dnsIPv6TableID))
+		if removeErr != nil {
+			return Reply{}, removeErr
+		}
+		results = append(results, removed...)
+	}
+	for _, tag := range []string{"ly-route-dns-transparent-v4", "ly-route-dns-transparent-v6"} {
+		for _, id := range taggedServiceChainACLIDs(resultStdout(initial, "show acl-plugin acl"), tag) {
+			removed, removeErr := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("delete acl-plugin acl index %d", id))
+			if removeErr != nil {
+				return Reply{}, removeErr
+			}
+			results = append(results, removed...)
+		}
+	}
+	verified, err := channel.runServiceChainCommands(ctx, operation, fmt.Sprintf("show abf policy %d", v4Policy), fmt.Sprintf("show abf policy %d", v6Policy), fmt.Sprintf("show abf attach %s", interception.LANInterface), "show acl-plugin acl")
+	if err != nil {
+		return Reply{}, err
+	}
+	results = append(results, verified...)
+	if _, present := observedABFACLID(resultStdoutLast(results, fmt.Sprintf("show abf policy %d", v4Policy))); present {
+		return Reply{}, snapshotDecodeError("transparent DNS IPv4 ABF policy %d remains after delete", v4Policy)
+	}
+	if _, present := observedABFACLID(resultStdoutLast(results, fmt.Sprintf("show abf policy %d", v6Policy))); present {
+		return Reply{}, snapshotDecodeError("transparent DNS IPv6 ABF policy %d remains after delete", v6Policy)
 	}
 	return routePolicyLifecycleReply(operation, results), nil
 }
