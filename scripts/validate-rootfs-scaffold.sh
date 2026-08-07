@@ -47,6 +47,12 @@ $repo_root/backend/gateway/main.go
 $repo_root/backend/orchestrator/main.go
 $repo_root/backend/internal/httpapi/server.go
 $repo_root/backend/internal/httpapi/auth.go
+$repo_root/frontend/gateway/index.html
+$repo_root/frontend/gateway/styles.css
+$repo_root/frontend/gateway/app.js
+$repo_root/frontend/orchestrator/index.html
+$repo_root/frontend/orchestrator/styles.css
+$repo_root/frontend/orchestrator/app.js
 $repo_root/.github/workflows/gateway-release.yml
 $repo_root/docs/rootfs-image.md
 "
@@ -87,9 +93,8 @@ sh -n "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/recover-runtime.sh"
 
 for token in Panabit "assets/" VRRP vrrp login-logo admin-logo login-background "--pa-"; do
   if grep -R --line-number --fixed-strings -- "$token" \
-    "$repo_root/index.html" \
-    "$repo_root/styles.css" \
-    "$repo_root/app.js" \
+    "$repo_root/frontend/gateway" \
+    "$repo_root/frontend/orchestrator" \
     "$repo_root/Dockerfile" \
     "$repo_root/docker-compose.yml" \
     "$repo_root/packaging" \
