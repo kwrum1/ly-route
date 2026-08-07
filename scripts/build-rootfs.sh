@@ -350,6 +350,12 @@ copy_payload "$rootfs"
 build_control_binary "$rootfs"
 build_pppoe_client_binary "$rootfs"
 install_extra_debs "$rootfs"
+# Runtime packages can replace the shared Ly Route library directory while
+# being configured. Reassert the native PPPoE client after package install so
+# the gateway image always contains the client required by its systemd unit.
+if [ "$product" = gateway ] && [ ! -x "$rootfs/usr/lib/ly-route/ly-route-pppoe-client" ]; then
+  build_pppoe_client_binary "$rootfs"
+fi
 if [ -n "$vpp_apply_binary" ]; then
   mkdir -p "$rootfs/usr/lib/ly-route"
   cp "$vpp_apply_binary" "$rootfs/usr/lib/ly-route/vpp-apply"
