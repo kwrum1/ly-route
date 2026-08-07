@@ -47,7 +47,7 @@ $repo_root/backend/gateway/main.go
 $repo_root/backend/orchestrator/main.go
 $repo_root/backend/internal/httpapi/server.go
 $repo_root/backend/internal/httpapi/auth.go
-$repo_root/.github/workflows/firmware.yml
+$repo_root/.github/workflows/gateway-release.yml
 $repo_root/docs/rootfs-image.md
 "
 
@@ -89,7 +89,7 @@ for token in Panabit "assets/" VRRP vrrp login-logo admin-logo login-background 
     "$repo_root/Dockerfile" \
     "$repo_root/docker-compose.yml" \
     "$repo_root/packaging" \
-    "$repo_root/.github/workflows/firmware.yml" >/tmp/ly-route-rootfs-grep.txt; then
+    "$repo_root/.github/workflows/gateway-release.yml" >/tmp/ly-route-rootfs-grep.txt; then
     cat /tmp/ly-route-rootfs-grep.txt >&2
     exit 1
   fi
@@ -120,7 +120,7 @@ if ! grep -q '192.168.88.100 - 192.168.88.199' "$repo_root/packaging/rootfs-over
   exit 1
 fi
 
-if ! grep -q 'build-runtime-debs.sh smartdns' "$repo_root/.github/workflows/firmware.yml" || ! grep -q 'build-runtime-debs.sh xray' "$repo_root/.github/workflows/firmware.yml"; then
+if ! grep -q 'build-runtime-debs.sh smartdns' "$repo_root/.github/workflows/gateway-release.yml" || ! grep -q 'build-runtime-debs.sh xray' "$repo_root/.github/workflows/gateway-release.yml"; then
   echo "GitHub x86 firmware workflow does not package SmartDNS and xray runtime services" >&2
   exit 1
 fi
@@ -224,12 +224,12 @@ if ! grep -q '^runtime-debs:' "$repo_root/Makefile"; then
   exit 1
 fi
 
-if ! grep -q 'build-runtime-debs.sh vpp-apply' "$repo_root/.github/workflows/firmware.yml"; then
+if ! grep -q 'build-runtime-debs.sh vpp-apply' "$repo_root/.github/workflows/gateway-release.yml"; then
   echo "rootfs image workflow does not build the local runtime adapter package" >&2
   exit 1
 fi
 
-if ! grep -q 'LY_ROUTE_EXTRA_DEBS_DIR' "$repo_root/.github/workflows/firmware.yml"; then
+if ! grep -q 'LY_ROUTE_EXTRA_DEBS_DIR' "$repo_root/.github/workflows/gateway-release.yml"; then
   echo "rootfs image workflow does not inject local runtime .deb packages" >&2
   exit 1
 fi
