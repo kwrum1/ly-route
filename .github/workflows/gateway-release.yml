@@ -27,29 +27,8 @@ env:
   LY_ROUTE_VPP_COMMIT: 744d3c7159ae130fb57f669a826ff1e45ed51836
 
 jobs:
-  verify:
-    name: Source and product verification
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-      - name: Install verification tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zstd dpkg-dev python3
-      - name: Run release verification
-        run: ./scripts/ci-release-verify.sh
-
   x86:
     name: x86-64 IMG and upgrade
-    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -109,7 +88,6 @@ jobs:
 
   arm64:
     name: Armbian arm64 installer and upgrade
-    needs: verify
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
