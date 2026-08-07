@@ -416,8 +416,10 @@ printf '{"operations":[]}\n' >"$rootfs/var/lib/ly-route/vpp/operations.json"
 chmod 0755 "$rootfs/usr/lib/ly-route/firstboot.sh" "$rootfs/usr/lib/ly-route/tune-vpp.sh" \
   "$rootfs/usr/lib/ly-route/runtime-check.sh" "$rootfs/usr/lib/ly-route/recover-runtime.sh" \
   "$rootfs/usr/lib/ly-route/ly-route-control" "$rootfs/usr/lib/ly-route/vpp-apply-default" \
-  "$rootfs/usr/lib/ly-route/dns-ipset-sync.py" "$rootfs/usr/lib/ly-route/active-dpdk-state.py" \
-  "$rootfs/usr/lib/ly-route/ly-route-pppoe-client"
+  "$rootfs/usr/lib/ly-route/dns-ipset-sync.py" "$rootfs/usr/lib/ly-route/active-dpdk-state.py"
+if [ "$product" = gateway ]; then
+  chmod 0755 "$rootfs/usr/lib/ly-route/ly-route-pppoe-client"
+fi
 
 printf 'ly-route\n' >"$rootfs/etc/hostname"
 mkdir -p "$rootfs/etc/systemd/resolved.conf.d"
