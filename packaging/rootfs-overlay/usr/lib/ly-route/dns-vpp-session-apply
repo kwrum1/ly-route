@@ -12,7 +12,13 @@ umask 077
 : "${LY_ROUTE_DNS_APP_READY_INTERVAL:=1}"
 
 case "$LY_ROUTE_DNS_APP_READY_ATTEMPTS:$LY_ROUTE_DNS_APP_READY_INTERVAL" in
-  *[!0-9:]*|0:*|*:0)
+  *[!0123456789:]* )
+    echo "DNS application readiness retry settings must be positive integers" >&2
+    exit 1
+    ;;
+esac
+case "$LY_ROUTE_DNS_APP_READY_ATTEMPTS:$LY_ROUTE_DNS_APP_READY_INTERVAL" in
+  0:*|*:0)
     echo "DNS application readiness retry settings must be positive integers" >&2
     exit 1
     ;;
