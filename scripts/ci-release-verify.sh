@@ -28,6 +28,9 @@ test -s "$tmp/gateway-ui/capabilities.json"
 # covers compilation of every package, product build contracts, and the
 # data-plane policy semantics exercised by the shipped image.
 (cd backend && go test -run '^$' ./...)
+# Keep the release gate focused on contracts that are independent of a live
+# VPP/VPPCTL fixture. HTTP/runtime characterization tests remain available for
+# VM acceptance; several still describe the retired pppd/mock readback model.
 (cd backend && go test -count=1 \
   ./cmd/... \
   ./gateway \
