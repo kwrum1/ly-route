@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,30 +34,52 @@ func (controller FilesystemController) applyWithRecovery(ctx context.Context, se
 	if err := controller.writeArtifacts(service, artifacts); err != nil {
 		return errors.Join(err, controller.restoreArtifacts(snapshot))
 	}
-	if err := controller.runApplyCommand(ctx, service, artifacts); err != nil {
-		restoreErr := controller.restoreArtifacts(snapshot)
-		if restoreErr == nil {
-			restoreErr = controller.runApplyCommand(ctx, service, artifacts)
+	persistOnly := artifactsArePersistOnly(artifacts)
+	// An unchanged native PPPoE plan must not tear down a live session. A
+	// needless stop/start races the AC and makes policy routing observe a
+	// missing pppoe_session. Restart only after a plan change or loss of the
+	// native session.
+	skipPPPoEApply := service == PPPoE && artifactsMatchSnapshot(controller, snapshot, artifacts) && nativePPPoEArtifactsReady(ctx, controller.Runner, artifacts)
+	if persistOnly {
+		if err := controller.verifyPersistedArtifacts(artifacts); err != nil {
+			return errors.Join(err, controller.restoreArtifacts(snapshot))
 		}
-		return errors.Join(err, restoreErr)
+	} else {
+		if !skipPPPoEApply {
+			if err := controller.runApplyCommand(ctx, service, artifacts); err != nil {
+				restoreErr := controller.restoreArtifacts(snapshot)
+				if restoreErr == nil {
+					restoreErr = controller.restoreServiceFromSnapshot(ctx, service, snapshot, artifacts)
+				}
+				return errors.Join(err, restoreErr)
+			}
+		} else {
+			// The peer can remain connected while its target unit is inactive
+			// (for example after a manual recovery). Activate the target without
+			// restarting the live native session so readback reports a healthy
+			// service and boot ordering is repaired.
+			if err := controller.Runner.Run(ctx, "systemctl", "start", applyUnit(service)); err != nil {
+				return err
+			}
+		}
+		if err := liveReadback(ctx, controller.Runner, service, artifacts); err != nil {
+			restoreErr := controller.restoreArtifacts(snapshot)
+			if service == PPPoE {
+				// A failed PPPoE readback must not leave a retrying or stale session.
+				// Stop all rendered peers and verify VPP has no residual session.
+				stopErr := controller.Stop(ctx, service, artifacts)
+				return errors.Join(fmt.Errorf("%s live readback: %w", service, err), restoreErr, stopErr)
+			}
+			if restoreErr == nil {
+				restoreErr = controller.restoreServiceFromSnapshot(ctx, service, snapshot, artifacts)
+			}
+			return errors.Join(fmt.Errorf("%s live readback: %w", service, err), restoreErr)
+		}
 	}
-	if err := liveReadback(ctx, controller.Runner, service, artifacts); err != nil {
+	if err := controller.saveApplyRecord(service, artifacts, transactionIDFromContext(ctx)); err != nil {
 		restoreErr := controller.restoreArtifacts(snapshot)
-		if service == PPPd {
-			// A failed PPPoE readback must not leave a retrying or stale session.
-			// Stop all rendered peers and verify VPP has no residual session.
-			stopErr := controller.Stop(ctx, service, artifacts)
-			return errors.Join(fmt.Errorf("%s live readback: %w", service, err), restoreErr, stopErr)
-		}
-		if restoreErr == nil {
-			restoreErr = controller.runApplyCommand(ctx, service, artifacts)
-		}
-		return errors.Join(fmt.Errorf("%s live readback: %w", service, err), restoreErr)
-	}
-	if err := controller.saveApplyRecord(service, artifacts); err != nil {
-		restoreErr := controller.restoreArtifacts(snapshot)
-		if restoreErr == nil {
-			restoreErr = controller.runApplyCommand(ctx, service, artifacts)
+		if restoreErr == nil && !persistOnly {
+			restoreErr = controller.restoreServiceFromSnapshot(ctx, service, snapshot, artifacts)
 		}
 		return errors.Join(err, restoreErr)
 	}
@@ -78,8 +101,10 @@ func (controller FilesystemController) rollbackWithSnapshot(ctx context.Context,
 	} else if err := controller.restoreArtifacts(snapshot); err != nil {
 		return err
 	}
-	if err := controller.runApplyCommand(ctx, service, artifacts); err != nil {
-		return err
+	if !artifactsArePersistOnly(artifacts) {
+		if err := controller.runApplyCommand(ctx, service, artifacts); err != nil {
+			return err
+		}
 	}
 	for _, path := range []string{controller.rollbackSnapshotPath(service), controller.applyRecordPath(service)} {
 		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
@@ -89,9 +114,57 @@ func (controller FilesystemController) rollbackWithSnapshot(ctx context.Context,
 	return nil
 }
 
+func (controller FilesystemController) verifyPersistedArtifacts(artifacts []RenderedArtifact) error {
+	for _, artifact := range artifacts {
+		path, err := controller.resolvePath(artifact.Path)
+		if err != nil {
+			return err
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read persisted artifact %s: %w", artifact.Path, err)
+		}
+		if string(content) != artifact.Content {
+			return fmt.Errorf("persisted artifact %s does not match the committed runtime plan", artifact.Path)
+		}
+	}
+	return nil
+}
+
 func (controller FilesystemController) runApplyCommand(ctx context.Context, service ServiceName, artifacts []RenderedArtifact) error {
 	if helper := directApplyHelper(service); helper != "" {
 		return controller.Runner.Run(ctx, helper)
+	}
+	if service == Kea {
+		unit := applyUnit(service)
+		if err := controller.Runner.Run(ctx, "systemctl", "stop", unit); err != nil {
+			return err
+		}
+		// Kea's lease-file cleanup can leave this lock behind when the daemon is
+		// interrupted. With the service stopped, the lock is necessarily stale;
+		// preserving the lease database while removing it makes restart idempotent.
+		pidPath, err := controller.resolvePath("/var/lib/kea/kea-leases4.csv.pid")
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove stale Kea lease cleanup lock: %w", err)
+		}
+		return controller.Runner.Run(ctx, "systemctl", "start", unit)
+	}
+	if service == PPPoE {
+		if err := controller.Runner.Run(ctx, "systemctl", "start", applyUnit(service)); err != nil {
+			return err
+		}
+		// The native client is a long-running simple service. `start` does not
+		// reload a changed plan, while reload-or-restart can race target
+		// activation. The target is active above; restart each peer explicitly.
+		for _, unit := range applyUnits(service, artifacts) {
+			if err := controller.Runner.Run(ctx, "systemctl", "restart", unit); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	for _, unit := range applyUnits(service, artifacts) {
 		if err := controller.Runner.Run(ctx, "systemctl", applyCommand(service), unit); err != nil {
@@ -101,11 +174,99 @@ func (controller FilesystemController) runApplyCommand(ctx context.Context, serv
 	return nil
 }
 
+func artifactsMatchSnapshot(controller FilesystemController, snapshots []artifactSnapshot, artifacts []RenderedArtifact) bool {
+	if len(snapshots) != len(artifacts) {
+		return false
+	}
+	byPath := make(map[string]artifactSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		byPath[snapshot.Path] = snapshot
+	}
+	for _, artifact := range artifacts {
+		path, err := controller.resolvePath(artifact.Path)
+		if err != nil {
+			return false
+		}
+		snapshot, ok := byPath[path]
+		if !ok || !snapshot.Existed || !artifactContentsEqual(snapshot.Content, []byte(artifact.Content)) {
+			return false
+		}
+	}
+	return true
+}
+
+func artifactContentsEqual(left, right []byte) bool {
+	if bytes.Equal(left, right) {
+		return true
+	}
+	// JSON artifacts can be rewritten by an older control-plane version with
+	// different indentation or object-key order. Treat semantically identical
+	// PPPoE plans as unchanged so an Apply does not needlessly tear down a live
+	// native session.
+	var leftValue, rightValue any
+	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+		return false
+	}
+	leftCanonical, leftErr := json.Marshal(leftValue)
+	rightCanonical, rightErr := json.Marshal(rightValue)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftCanonical, rightCanonical)
+}
+
+func nativePPPoEArtifactsReady(ctx context.Context, runner CommandRunner, artifacts []RenderedArtifact) bool {
+	peerCount := 0
+	for _, artifact := range artifacts {
+		if !strings.HasPrefix(artifact.Path, "/etc/ly-route/pppoe/ly-route-") {
+			continue
+		}
+		var plan struct {
+			StatusFile string `json:"status_file"`
+		}
+		if json.Unmarshal([]byte(artifact.Content), &plan) != nil || plan.StatusFile == "" {
+			return false
+		}
+		peerCount++
+		if err := validateNativePPPoEOnce(ctx, runner, plan.StatusFile); err != nil {
+			return false
+		}
+	}
+	return peerCount > 0
+}
+
+func (controller FilesystemController) restoreServiceFromSnapshot(ctx context.Context, service ServiceName, snapshots []artifactSnapshot, current []RenderedArtifact) error {
+	if service != PPPoE {
+		return controller.runApplyCommand(ctx, service, current)
+	}
+	previous := make([]RenderedArtifact, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if !snapshot.Existed {
+			continue
+		}
+		path := snapshot.Path
+		if controller.RootDir != "" {
+			root, rootErr := filepath.Abs(controller.RootDir)
+			absolute, absoluteErr := filepath.Abs(snapshot.Path)
+			if rootErr != nil || absoluteErr != nil {
+				return fmt.Errorf("resolve PPPoE rollback artifact path %s", snapshot.Path)
+			}
+			relative, relErr := filepath.Rel(root, absolute)
+			if relErr != nil || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
+				return fmt.Errorf("PPPoE rollback artifact escapes controller root: %s", snapshot.Path)
+			}
+			path = "/" + filepath.ToSlash(relative)
+		}
+		previous = append(previous, NewArtifact(service, path, string(snapshot.Content), "restart"))
+	}
+	if len(previous) == 0 {
+		return controller.Stop(ctx, service, current)
+	}
+	return controller.runApplyCommand(ctx, service, previous)
+}
+
 func (controller FilesystemController) Stop(ctx context.Context, service ServiceName, artifacts []RenderedArtifact) error {
 	if controller.Runner == nil {
 		return fmt.Errorf("%s stop requires a daemon command runner", service)
 	}
-	if service != PPPd {
+	if service != PPPoE {
 		return fmt.Errorf("verified stop is not implemented for %s", service)
 	}
 	units := applyUnits(service, artifacts)
@@ -117,6 +278,9 @@ func (controller FilesystemController) Stop(ctx context.Context, service Service
 		if err := controller.Runner.Run(ctx, "systemctl", "stop", unit); err != nil {
 			stopErrors = append(stopErrors, fmt.Errorf("stop %s: %w", unit, err))
 		}
+	}
+	if err := controller.Runner.Run(ctx, "systemctl", "stop", applyUnit(service)); err != nil {
+		stopErrors = append(stopErrors, fmt.Errorf("stop %s: %w", applyUnit(service), err))
 	}
 	if err := errors.Join(stopErrors...); err != nil {
 		return err
@@ -145,7 +309,7 @@ func (controller FilesystemController) waitForNativePPPoESessionsAbsent(ctx cont
 }
 
 func applyUnits(service ServiceName, artifacts []RenderedArtifact) []string {
-	if service != PPPd {
+	if service != PPPoE {
 		return []string{applyUnit(service)}
 	}
 	units := make([]string, 0)

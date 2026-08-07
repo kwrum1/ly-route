@@ -31,6 +31,38 @@ func HasSupplementalOperations(plan Plan, owner SupplementalOwner) bool {
 	return err == nil && len(operations) > 0
 }
 
+func SupplementalOperationsEqual(left, right Plan, owner SupplementalOwner) (bool, error) {
+	leftOperations, err := supplementalOperations(left, owner)
+	if err != nil {
+		return false, err
+	}
+	rightOperations, err := supplementalOperations(right, owner)
+	if err != nil {
+		return false, err
+	}
+	if len(leftOperations) != len(rightOperations) {
+		return false, nil
+	}
+	for index := range leftOperations {
+		leftOperation, rightOperation := leftOperations[index], rightOperations[index]
+		if leftOperation.Name != rightOperation.Name || leftOperation.Resource != rightOperation.Resource {
+			return false, nil
+		}
+		leftHash, err := supplementalOperationHash(leftOperation)
+		if err != nil {
+			return false, err
+		}
+		rightHash, err := supplementalOperationHash(rightOperation)
+		if err != nil {
+			return false, err
+		}
+		if leftHash != rightHash {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (a Adapter) ApplySupplemental(ctx context.Context, plan Plan, owner SupplementalOwner) ([]SupplementalOperationReadback, error) {
 	operations, err := supplementalOperations(plan, owner)
 	if err != nil || len(operations) == 0 {
@@ -57,9 +89,9 @@ func (a Adapter) ApplySupplemental(ctx context.Context, plan Plan, owner Supplem
 		readback := SupplementalOperationReadback{Name: operation.Name, Resource: operation.Resource}
 		for _, result := range envelope.CommandResults {
 			if strings.HasPrefix(result.Command, "show ") {
-				if strings.TrimSpace(result.Stdout) == "" {
-					return nil, fmt.Errorf("%w: supplemental operation %q show %q returned empty output", ErrSnapshotIncomplete, operation.Name, result.Command)
-				}
+				// Lifecycle operations deliberately start by proving that an object is
+				// absent.  An empty initial inventory is therefore valid evidence; the
+				// operation-specific verifier below requires the final semantic state.
 				readback.Shows = append(readback.Shows, result)
 			}
 		}
@@ -136,9 +168,9 @@ func ValidateSupplementalReadback(plan Plan, owner SupplementalOwner, actual []S
 
 func supplementalOperationOwner(operation Operation) SupplementalOwner {
 	switch operation.Name {
-	case "vpp.dataplane.attach":
+	case "vpp.dataplane.attach", "vpp.lan-control-lcp", "vpp.management-lcp":
 		return SupplementalInterfaces
-	case "vpp.abf.policy", "vpp.pbr.policy", "vpp.service-chain.egress-binding":
+	case "vpp.abf.policy", "vpp.pbr.policy", "vpp.service-chain.egress-binding", "vpp.proxy-service.network", "vpp.dns-service.network", "vpp.dns-transparent-interception":
 		return SupplementalRoutes
 	case "vpp.smart-qos":
 		return SupplementalQoS
@@ -168,7 +200,12 @@ func SupplementalCleanupOperations(plan Plan, owner SupplementalOwner) ([]Operat
 		if commandErr != nil {
 			return nil, commandErr
 		}
-		cleanup = append(cleanup, Operation{Name: operation.Name + ".rollback-delete", RequestID: plan.RequestID, Resource: operation.Resource, Payload: operation.Payload, VPPCtlCommands: commands})
+		payload := operation.Payload
+		if management, ok := payload.(ManagementLCP); ok {
+			management.Enabled = false
+			payload = management
+		}
+		cleanup = append(cleanup, Operation{Name: operation.Name + ".rollback-delete", RequestID: plan.RequestID, Resource: operation.Resource, Payload: payload, VPPCtlCommands: commands})
 	}
 	return cleanup, nil
 }
@@ -181,11 +218,15 @@ func supplementalCleanupCommands(operation Operation) ([]string, error) {
 			return []string{fmt.Sprintf("?delete interface af_xdp %s", payload.VPPInterface), "show interface"}, nil
 		case NativeHookRDMA:
 			return []string{fmt.Sprintf("?delete interface rdma %s", payload.VPPInterface), "show interface"}, nil
+		case NativeHookVMXNET3:
+			return []string{fmt.Sprintf("?delete interface vmxnet3 %s", payload.VPPInterface), "show interface"}, nil
 		default:
 			return nil, &UnsupportedOperationError{Name: operation.Name, Resource: operation.Resource}
 		}
 	case proxy.VPPSteeringInstruction:
 		return proxySteeringDeleteCommands(payload), nil
+	case DNSServiceNetwork:
+		return dnsServiceNetworkDeleteCommands(payload), nil
 	case flow.Target:
 		return flowTargetDeleteCommands(payload), nil
 	case SmartQoSInterface:
@@ -195,6 +236,10 @@ func supplementalCleanupCommands(operation Operation) ([]string, error) {
 		}, nil
 	case SecurityGeneration:
 		return []string{"?show acl-plugin acl", "?show acl-plugin interface", "?show acl-plugin macip acl", "?show acl-plugin macip interface", "?show policer"}, nil
+	case ManagementLCP:
+		return managementLCPCleanupCommands(), nil
+	case DNSTransparentInterception:
+		return dnsTransparentCleanupCommands(payload), nil
 	default:
 		return nil, &UnsupportedOperationError{Name: operation.Name, Resource: operation.Resource}
 	}

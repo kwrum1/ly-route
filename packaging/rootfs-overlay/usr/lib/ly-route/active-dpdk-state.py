@@ -56,6 +56,7 @@ values = [
     attachment.get("kernel_driver"),
     attachment.get("iommu_group"),
     attachment.get("vpp_interface"),
+	attachment.get("mode"),
 ]
 if not PCI.fullmatch(values[0] or ""):
     fail("active dataplane PCI address is invalid")
@@ -63,5 +64,7 @@ if not TOKEN.fullmatch(values[1] or "") or not TOKEN.fullmatch(values[2] or ""):
     fail("active dataplane attachment identity is invalid")
 if not VPP_INTERFACE.fullmatch(values[3] or ""):
     fail("active VPP interface identity is invalid")
+if values[4] not in {"vfio_pci", "uio_pci_generic"}:
+    fail("active DPDK binding mode is invalid")
 
 print("|".join(values))

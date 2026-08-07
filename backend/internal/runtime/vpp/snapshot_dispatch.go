@@ -157,7 +157,7 @@ func snapshotOperation(request SnapshotRequest, capability SnapshotCapability) O
 	case SnapshotCapabilityQoS:
 		return Operation{Name: "vpp.qos.snapshot", RequestID: transactionID, Resource: string(capability), Payload: request, VPPCtlCommands: qosSnapshotCommands(request)}
 	case SnapshotCapabilityNAT44:
-		return Operation{Name: "vpp.nat44-ed.snapshot", RequestID: transactionID, Resource: string(capability), Payload: request, VPPCtlCommands: []string{"show nat44 static mappings"}}
+		return Operation{Name: "vpp.nat44-ed.snapshot", RequestID: transactionID, Resource: string(capability), Payload: request, VPPCtlCommands: nat44SnapshotCommands(request)}
 	default:
 		return Operation{Name: "vpp.snapshot", RequestID: transactionID, Resource: string(capability)}
 	}

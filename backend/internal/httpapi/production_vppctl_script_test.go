@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ly-route/backend/internal/runtime/flow"
+	"ly-route/backend/internal/runtime/proxy"
 	"ly-route/backend/internal/runtime/trafficpolicy"
 	"ly-route/backend/internal/runtime/vpp"
 )
@@ -24,6 +25,8 @@ func writeProductionVPPCTL(t *testing.T, directory string, plan vpp.Plan) string
 	var script strings.Builder
 	script.WriteString("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_VPPCTL_TRACE\"\n")
 	script.WriteString("case \"$*\" in\n")
+	script.WriteString("  lcp\\ create\\ *) printf 'itf-pair: [0] %s tap4096 %s 36 type tap\\n' \"$3\" \"$5\" > \"$FAKE_VPPCTL_LCP_STATE\";;\n")
+	script.WriteString("  lcp\\ delete\\ *) : > \"$FAKE_VPPCTL_LCP_STATE\";;\n")
 	if len(plan.Interfaces) > 0 {
 		for _, state := range plan.Interfaces {
 			fmt.Fprintf(&script, "  %q) printf 'absent\\n' > \"$FAKE_VPPCTL_STATE\";;\n", "set interface state "+state.Name+" down")
@@ -39,8 +42,18 @@ func writeProductionVPPCTL(t *testing.T, directory string, plan vpp.Plan) string
 		fmt.Fprintf(&script, "  %q) printf 'both\\n' > \"$FAKE_VPPCTL_NAT_STATE\";;\n", fmt.Sprintf("nat44 add static mapping %s local %s %d external %s %d", mapping.Protocol, mapping.InternalHost, mapping.InternalPort, mapping.ExternalAddress, mapping.ExternalPort))
 		fmt.Fprintf(&script, "  %q) printf 'static\\n' > \"$FAKE_VPPCTL_NAT_STATE\";;\n", fmt.Sprintf("nat44 add static mapping %s local %s %d external %s %d del", mapping.Protocol, mapping.InternalHost, mapping.InternalPort, mapping.ExternalAddress, mapping.ExternalPort))
 	}
+	if plan.DNSInterception {
+		v4ACL := proofStableID("dns-transparent-v4-acl", 50000, 9999)
+		v6ACL := proofStableID("dns-transparent-v6-acl", 50000, 9999)
+		fmt.Fprintf(&script, "  %q) printf 'index:%d\\n';;\n", "set acl-plugin acl permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 17 sport 0-65535 dport 53-53, permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 6 sport 0-65535 dport 53-53 tag ly-route-dns-transparent-v4", v4ACL)
+		fmt.Fprintf(&script, "  %q) printf 'index:%d\\n';;\n", "set acl-plugin acl permit src ::/0 dst ::/0 proto 17 sport 0-65535 dport 53-53, permit src ::/0 dst ::/0 proto 6 sport 0-65535 dport 53-53 tag ly-route-dns-transparent-v6", v6ACL)
+	}
 	commands := sortedResponseCommands(responses)
 	for _, command := range commands {
+		if command == "show lcp" {
+			script.WriteString("  'show lcp') printf \"lcp default netns '<unset>'\\n\"; cat \"$FAKE_VPPCTL_LCP_STATE\";;\n")
+			continue
+		}
 		fmt.Fprintf(&script, "  '%s')\n", command)
 		if command == "show interface address" {
 			script.WriteString("    if [ \"$(cat \"$FAKE_VPPCTL_STATE\")\" = prior ]; then\n")
@@ -80,6 +93,10 @@ func productionVPPResponses(plan vpp.Plan) (map[string]string, error) {
 			fmt.Fprintf(&output, "%s (up):\n  L3 %s\n", state.Name, state.Addresses[0])
 		}
 		responses["show interface address"] = output.String()
+		// The management LCP operation now verifies the limited-broadcast
+		// route explicitly. Keep the production proof harness honest by
+		// returning the same local receive DPO that VPP emits on a live node.
+		responses["show ip fib 255.255.255.255"] = "255.255.255.255/32\n  [@12]: dpo-receive: 0.0.0.0 on local0\n"
 	}
 	if len(plan.Bonds) > 0 {
 		bond := plan.Bonds[0]
@@ -104,6 +121,27 @@ func productionVPPResponses(plan vpp.Plan) (map[string]string, error) {
 		routeACLInventory.WriteString(aclOutput)
 		responses[fmt.Sprintf("show abf policy %d", policyID)] = fmt.Sprintf("abf:[0]: policy:%d acl:%d\n path-list:[17] locks:1 flags:shared len:1\n  path:[21] pl-index:17 ip4 weight=1 pref=0\n    [@0]: ipv4 via table %d\n", policyID, aclID, wanTableID)
 		responses[fmt.Sprintf("show ip fib table %d", tableID)] = fmt.Sprintf("ipv4-VRF:%d, fib_index:3, flow hash:[src dst sport dport proto]\n0.0.0.0/0\n  unicast-ip4-chain\n    [@0]: dpo-load-balance: [proto:ip4 index:8 buckets:1 uRPF:7 to:[0:0]]\n      path-list:[17] locks:1 flags:shared len:1\n        path:[21] pl-index:17 ip4 weight=1 pref=0\n          [@0]: ipv4 via table %d\n", tableID, wanTableID)
+	}
+	if plan.DNSInterception {
+		v4Policy := proofStableID("dns-transparent-v4", 9000, 999)
+		v6Policy := proofStableID("dns-transparent-v6", 9000, 999)
+		v4ACL := proofStableID("dns-transparent-v4-acl", 50000, 9999)
+		v6ACL := proofStableID("dns-transparent-v6-acl", 50000, 9999)
+		lanInterface := "lyroute-eth1"
+		for _, assignment := range plan.AddressAssignments {
+			if strings.EqualFold(assignment.Role, "lan") && assignment.VPPInterface != "" {
+				lanInterface = assignment.VPPInterface
+				break
+			}
+		}
+		responses[fmt.Sprintf("show abf policy %d", v4Policy)] = fmt.Sprintf("abf:[0]: policy:%d acl:%d\n", v4Policy, v4ACL)
+		responses[fmt.Sprintf("show abf policy %d", v6Policy)] = fmt.Sprintf("abf:[1]: policy:%d acl:%d\n", v6Policy, v6ACL)
+		attachments := fmt.Sprintf("%s\nipv4:\n abf-interface-attach: policy:%d priority:0\nipv6:\n abf-interface-attach: policy:%d priority:0\n", lanInterface, v4Policy, v6Policy)
+		responses["show abf attach"] = attachments
+		responses["show abf attach "+lanInterface] = attachments
+		responses[fmt.Sprintf("show ip fib table %d", 101)] = "ipv6-VRF:101\n::/0 via local\n"
+		fmt.Fprintf(&routeACLInventory, "acl-index %d count 2 tag {ly-route-dns-transparent-v4}\n  0: ipv4 permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 17 sport 0-65535 dport 53-53\n  1: ipv4 permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 6 sport 0-65535 dport 53-53\n", v4ACL)
+		fmt.Fprintf(&routeACLInventory, "acl-index %d count 2 tag {ly-route-dns-transparent-v6}\n  0: ipv6 permit src ::/0 dst ::/0 proto 17 sport 0-65535 dport 53-53\n  1: ipv6 permit src ::/0 dst ::/0 proto 6 sport 0-65535 dport 53-53\n", v6ACL)
 	}
 	if routeACLInventory.Len() > 0 {
 		responses["show acl-plugin acl"] = routeACLInventory.String()
@@ -132,6 +170,25 @@ func productionVPPResponses(plan vpp.Plan) (map[string]string, error) {
 		responses[fmt.Sprintf("show abf policy %d", policyID)] = fmt.Sprintf("proxy abf %d present\n", policyID)
 		responses[fmt.Sprintf("show ip table %d", tableID)] = fmt.Sprintf("proxy table %d present\n", tableID)
 		responses[fmt.Sprintf("show ip fib table %d", tableID)] = fmt.Sprintf("proxy FIB %d present\n", tableID)
+		if steering.TargetKind == "vpp.proxy-service.network" {
+			network := steering.ServiceNetwork
+			if network.EgressVPPInterface == "" || network.IngressVPPInterface == "" {
+				network = proxy.ServiceNetworkForEgressID(resource)
+			}
+			responses["show interface address "+network.IngressVPPInterface] = network.IngressVPPInterface + " (up):\n  L3 " + network.IngressVPPAddress + "/30\n"
+			responses["show interface address "+network.EgressVPPInterface] = network.EgressVPPInterface + " (up):\n  L3 " + network.EgressVPPAddress + "/30\n"
+			responses["show nat44 interfaces"] = "nat44 in: " + network.EgressVPPInterface + "\n"
+			responses["show tap"] = "tap " + network.IngressVPPInterface + "\n"
+		}
+	}
+	// The HTTP proof server supplies its built-in proxy egress even when the
+	// compiler fixture has no persisted proxy document yet.
+	if _, ok := responses["show nat44 interfaces"]; !ok {
+		network := proxy.ServiceNetworkForEgressID("proxy-egress-default")
+		responses["show interface address "+network.IngressVPPInterface] = network.IngressVPPInterface + " (up):\n  L3 " + network.IngressVPPAddress + "/30\n"
+		responses["show interface address "+network.EgressVPPInterface] = network.EgressVPPInterface + " (up):\n  L3 " + network.EgressVPPAddress + "/30\n"
+		responses["show nat44 interfaces"] = "nat44 in: " + network.EgressVPPInterface + "\n"
+		responses["show tap"] = "tap " + network.IngressVPPInterface + "\n"
 	}
 	responses["show nat44 static mappings"] = "NAT44 static mappings:\n  local 192.168.88.10 external 203.0.113.10 vrf 0\n  tcp local 192.168.88.20:8443 external 203.0.113.10:8443 vrf 0\n"
 	operationPlan := plan

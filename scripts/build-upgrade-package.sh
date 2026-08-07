@@ -59,6 +59,7 @@ case "$arch" in
 esac
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+geodata_dir=${LY_ROUTE_GEODATA_DIR:-$repo_root/packaging/geodata}
 . "$repo_root/scripts/lib/product-build-profile.sh"
 load_product_build_profile "$repo_root" "$product" "$manifest"
 validate_prebuilt_control "$control_binary" "$product"
@@ -133,6 +134,19 @@ chmod 0755 "$package_root/usr/lib/ly-route/vpp-apply"
 copy_product_frontend "$package_root/opt/ly-route/admin" "$frontend_bundle" "$product"
 cp "$PRODUCT_MANIFEST" "$package_root/etc/ly-route/product-manifest.json"
 cp "$repo_root/packaging/nginx/ly-route-admin.conf" "$package_root/etc/nginx/conf.d/ly-route-admin.conf"
+if [ "$product" = gateway ]; then
+  if [ "${LY_ROUTE_BUILD_TAR_ONLY:-0}" != 1 ]; then
+    for geodata_file in geoip.dat geosite.dat china-list.txt manifest.json; do
+      product_build_require_file "$geodata_dir/$geodata_file"
+    done
+  fi
+  if [ -d "$geodata_dir" ]; then
+    mkdir -p "$package_root/usr/share/ly-route/geodata"
+    for geodata_file in geoip.dat geosite.dat china-list.txt manifest.json; do
+      [ -f "$geodata_dir/$geodata_file" ] && cp "$geodata_dir/$geodata_file" "$package_root/usr/share/ly-route/geodata/$geodata_file"
+    done
+  fi
+fi
 service="$package_root/etc/systemd/system/ly-route-control-api.service"
 cp "$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-control-api.service" "$service"
 awk -v profile='Environment=LY_ROUTE_PRODUCT_PROFILE=/etc/ly-route/product-manifest.json' \
@@ -170,6 +184,14 @@ $service_hash  etc/systemd/system/ly-route-control-api.service
 $profile_hash  etc/ly-route/product-manifest.json
 $artifact_manifest_hash  usr/share/ly-route/artifact-manifest.json
 EOF
+if [ -d "$package_root/usr/share/ly-route/geodata" ]; then
+  for geodata_file in geoip.dat geosite.dat china-list.txt manifest.json; do
+    if [ -f "$package_root/usr/share/ly-route/geodata/$geodata_file" ]; then
+      geodata_hash=$(sha256sum "$package_root/usr/share/ly-route/geodata/$geodata_file" | cut -d' ' -f1)
+      printf '%s  %s\n' "$geodata_hash" "usr/share/ly-route/geodata/$geodata_file" >>"$package_root/checksums.sha256"
+    fi
+  done
+fi
 
 node - "$package_root/manifest.json" "$PRODUCT_BUILD_PROFILE" "$product" "$suite" "$arch" \
   "$source_commit" "$created_at" "$control_hash" "$vpp_apply_hash" "$app_hash" \

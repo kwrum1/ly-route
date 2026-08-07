@@ -72,11 +72,67 @@ func TestFilesystemController_receipt_and_readback_bind_live_artifact_hashes(t *
 	}
 
 	path := filepath.Join(controller.RootDir, "etc/kea/kea-dhcp4.conf")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o644); got != want {
+		t.Fatalf("Kea artifact mode = %o, want %o for the unprivileged daemon", got, want)
+	}
 	if err := os.WriteFile(path, []byte("tampered"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := controller.Readback(context.Background(), request); err == nil {
 		t.Fatal("readback accepted an artifact whose content no longer matches the apply receipt")
+	}
+}
+
+func TestFilesystemController_persist_only_VPP_plan_is_rollback_safe(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "var/lib/ly-route/vpp/operations.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("prior-plan"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	controller := FilesystemController{RootDir: root, Runner: runner}
+	artifact := NewArtifact(VPP, "/var/lib/ly-route/vpp/operations.json", "committed-plan", ReloadModePersistOnly)
+
+	if err := controller.ReloadOrRestart(context.Background(), VPP, []RenderedArtifact{artifact}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(content), "committed-plan"; got != want {
+		t.Fatalf("persisted VPP plan = %q, want %q", got, want)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("persist-only VPP plan executed commands: %#v", runner.commands)
+	}
+	request := EvidenceRequest{TransactionID: "txn-persist-vpp", Capability: "vpp", Artifacts: []RenderedArtifact{artifact}}
+	if _, err := controller.Receipt(context.Background(), request); err != nil {
+		t.Fatalf("persist-only VPP receipt: %v", err)
+	}
+	if _, err := controller.Readback(context.Background(), request); err != nil {
+		t.Fatalf("persist-only VPP readback used the legacy live helper receipt: %v", err)
+	}
+
+	if err := controller.Rollback(context.Background(), VPP, []RenderedArtifact{artifact}); err != nil {
+		t.Fatal(err)
+	}
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(content), "prior-plan"; got != want {
+		t.Fatalf("rolled back VPP plan = %q, want %q", got, want)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("persist-only VPP rollback executed commands: %#v", runner.commands)
 	}
 }
 

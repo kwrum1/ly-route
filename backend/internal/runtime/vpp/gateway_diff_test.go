@@ -43,6 +43,24 @@ func TestGatewayDesiredLiveDiffClassifiesEveryResourceClass(t *testing.T) {
 	}
 }
 
+func TestGatewayDesiredLiveDiffCarriesLANVPPIngressIntoRouteLifecycle(t *testing.T) {
+	desired := Plan{AddressAssignments: []AddressAssignment{
+		{ID: "lan", Role: "lan", LinuxInterface: "ens192", VPPInterface: "lyroute-ens192"},
+		{ID: "wan", Role: "wan", LinuxInterface: "ens224", VPPInterface: "lyroute-ens224"},
+	}}
+
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{
+		TransactionID: "txn-route-ingress",
+		Desired:       desired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.Routes.IngressVPPInterface != "lyroute-ens192" {
+		t.Fatalf("route ingress = %q, want LAN VPP interface", diff.Routes.IngressVPPInterface)
+	}
+}
+
 func TestGatewayDesiredLiveDiffTreatsLinkStateOnlyChangeAsChanged(t *testing.T) {
 	// Given
 	priorInterface := InterfaceState{Name: "if-link", AdminState: "up", LinkState: "down", Addresses: []string{"192.0.2.1/24"}}
@@ -133,6 +151,37 @@ func TestGatewayDesiredLiveDiffReplacesVerifiedInterfaceAddressDrift(t *testing.
 	}
 	if !reflect.DeepEqual(diff.Interfaces.DeleteInterfaces, []string{"wan0"}) || !reflect.DeepEqual(diff.Interfaces.Interfaces, []InterfaceState{prior}) {
 		t.Fatalf("verified address drift diff = %#v, want replace", diff.Interfaces)
+	}
+}
+
+func TestGatewayDesiredLiveDiffKeepsRuntimeOwnedIPv6OnStaticInterface(t *testing.T) {
+	static := InterfaceState{Name: "lyroute-ens192", AdminState: "up", LinkState: "up", Addresses: []string{"10.1.18.1/24"}}
+	live := static
+	live.Addresses = []string{"10.1.18.1/24", "2001:db8:100::1/64"}
+
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{
+		TransactionID:       "txn-runtime-ipv6",
+		Prior:               Plan{Interfaces: []InterfaceState{static}},
+		Desired:             Plan{Interfaces: []InterfaceState{static}},
+		Live:                Snapshot{Interfaces: []InterfaceState{live}},
+		RepairVerifiedDrift: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Interfaces.DeleteInterfaces) != 0 || len(diff.Interfaces.Interfaces) != 0 {
+		t.Fatalf("runtime IPv6 was treated as static drift: %#v", diff.Interfaces)
+	}
+}
+
+func TestInterfaceStateMatchesDesiredRejectsUnexpectedIPv4AndStaticIPv6Drift(t *testing.T) {
+	wanted := InterfaceState{Name: "lan", AdminState: "up", LinkState: "up", Addresses: []string{"192.0.2.1/24"}}
+	if InterfaceStateMatchesDesired(InterfaceState{Name: "lan", AdminState: "up", LinkState: "up", Addresses: []string{"192.0.2.1/24", "198.51.100.1/24"}}, wanted) {
+		t.Fatal("unexpected IPv4 address was accepted")
+	}
+	wanted.Addresses = []string{"192.0.2.1/24", "2001:db8::1/64"}
+	if InterfaceStateMatchesDesired(InterfaceState{Name: "lan", AdminState: "up", LinkState: "up", Addresses: []string{"192.0.2.1/24", "2001:db8::2/64"}}, wanted) {
+		t.Fatal("unexpected static global IPv6 address was accepted")
 	}
 }
 

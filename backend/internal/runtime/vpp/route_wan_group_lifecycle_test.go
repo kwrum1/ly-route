@@ -72,6 +72,40 @@ func TestBuildRouteWANGroupOperations_usesReadOnlyContextWithoutGroupCommands(t 
 	}
 }
 
+func TestBuildRouteWANGroupOperationsRewritesLANIngressForProductionLifecycle(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{
+		ID: "route-proxy", Action: "route", Egress: "proxy-egress",
+		Path: &trafficpolicy.WANPath{VPPInterface: "lypxinc0", NextHop: "198.18.16.2"},
+	}
+	operations, err := BuildRouteWANGroupOperations(RouteWANGroupPlan{
+		TransactionID:       "txn-route-ingress",
+		IngressVPPInterface: "lyroute-ens192",
+		Routes:              []trafficpolicy.RoutePolicy{route},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Join(operations[0].VPPCtlCommands, "\n")
+	if strings.Contains(commands, "$LY_ROUTE_LAN_INTERFACE") || !strings.Contains(commands, "show abf attach lyroute-ens192") {
+		t.Fatalf("route commands = %q, want resolved LAN VPP ingress", commands)
+	}
+}
+
+func TestParseRoutePolicyVPPCTLSpecRejectsUnresolvedLANIngress(t *testing.T) {
+	t.Setenv("LY_ROUTE_LAN_INTERFACE", "")
+	route := trafficpolicy.RoutePolicy{
+		ID: "route-unresolved", Action: "route", Egress: "wan0",
+		Path: &trafficpolicy.WANPath{VPPInterface: "lyroute-wan0", NextHop: "198.51.100.1"},
+	}
+	_, err := parseRoutePolicyVPPCTLSpec(Operation{
+		Name: "vpp.route-policy", Resource: route.ID, Payload: route,
+		VPPCtlCommands: routePolicyCommands(route, nil),
+	})
+	if !errors.Is(err, ErrSnapshotIncomplete) {
+		t.Fatalf("error = %v, want unresolved ingress to fail closed", err)
+	}
+}
+
 func TestGatewayRouteWANGroupDeleteExecutesAndConfirmsAbsence(t *testing.T) {
 	// Given
 	client := &routeWANLifecycleClient{replies: map[string]Reply{

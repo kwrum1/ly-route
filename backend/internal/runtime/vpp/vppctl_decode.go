@@ -45,6 +45,17 @@ func snapshotDecodeError(format string, args ...any) error {
 }
 
 func commandOutput(results []VPPCTLCommandResult, command string) (string, error) {
+	output, err := commandOutputAllowEmpty(results, command)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(output) == "" {
+		return "", snapshotDecodeError("command %q returned incomplete output", command)
+	}
+	return output, nil
+}
+
+func commandOutputAllowEmpty(results []VPPCTLCommandResult, command string) (string, error) {
 	var output string
 	matches := 0
 	for _, result := range results {
@@ -59,9 +70,6 @@ func commandOutput(results []VPPCTLCommandResult, command string) (string, error
 	}
 	if matches != 1 {
 		return "", snapshotDecodeError("command %q returned %d result rows", command, matches)
-	}
-	if strings.TrimSpace(output) == "" {
-		return "", snapshotDecodeError("command %q returned incomplete output", command)
 	}
 	return output, nil
 }

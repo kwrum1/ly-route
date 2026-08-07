@@ -200,8 +200,9 @@ go build -trimpath -o "$tmpdir/dns-v6-tcp-packet-client" "$tmpdir/dns-v6-tcp-pac
 docker run -d --rm --name "$name" --network none --device /dev/net/tun --device /dev/vhost-net \
   --cap-add NET_ADMIN --cap-add NET_RAW \
   -v "$smartdns_deb:/tmp/smartdns.deb:ro" \
+  -v "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/dns-vpp-v6-namespace-apply:/tmp/dns-vpp-namespace-apply:ro" \
   -v "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/dns-vpp-session-apply:/tmp/dns-vpp-session-apply:ro" \
-  --entrypoint sh "$image" -c 'printf "unix { nodaemon cli-listen /run/vpp/cli.sock runtime-dir /run/vpp }\nsession { enable rt-backend rule-table }\n" >/tmp/vpp.conf; vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1' >/dev/null
+  --entrypoint sh "$image" -c 'printf "unix {\n  nodaemon\n  cli-listen /run/vpp/cli.sock\n  runtime-dir /run/vpp\n}\nsession {\n  enable rt-backend rule-table\n  use-app-socket-api\n}\n" >/tmp/vpp.conf; vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1' >/dev/null
 docker cp "$tmpdir/dns-packet-client" "$name:/tmp/dns-packet-client"
 docker cp "$tmpdir/dns-tcp-client" "$name:/tmp/dns-tcp-client"
 docker cp "$tmpdir/dns-tcp-packet-client" "$name:/tmp/dns-tcp-packet-client"
@@ -216,18 +217,26 @@ docker exec "$name" sh -c '
   vppctl "set interface ip address tap0 192.0.2.1/24"
   vppctl "set interface ip address tap0 2001:db8:1::1/64"
   vppctl "set interface state tap0 up"
+  vppctl "create tap id 1 hw-addr 02:00:00:00:01:01 host-if-name lyroute-wan-tes host-mac-addr 02:00:00:00:01:02"
+  vppctl "set interface ip address tap1 203.0.113.2/24"
+  vppctl "set interface state tap1 up"
+  vppctl "nat44 plugin enable"
+  vppctl "set interface nat44 in tap0"
+  vppctl "set interface nat44 out tap1 output-feature"
+  vppctl "nat44 add address 203.0.113.2"
   LY_ROUTE_VPPCTL_INTEGRATION_BINARY=vppctl /tmp/vpp-runtime.test -test.run '^TestDNSTransparentVPPCTLIntegration$' -test.v
-  vppctl "app ns add id dns-v6 secret 4242 ip4-fib-id 0 ip6-fib-id 101"
+  LY_ROUTE_VPPCTL=vppctl /tmp/dns-vpp-namespace-apply
   vppctl "show acl-plugin acl"
   vppctl "show abf policy"
   vppctl "show abf attach tap0"
   vppctl "show interface features tap0"
+  vppctl "show nat44 interfaces"
   vppctl "trace add virtio-input 20"
   vppctl "set ip neighbor tap0 192.0.2.10 02:00:00:00:00:02"
   vppctl "set ip neighbor tap0 2001:db8:1::10 02:00:00:00:00:02"
   dpkg-deb -x /tmp/smartdns.deb /opt/smartdns
-  printf "vcl { app-socket-api /run/vpp/app_ns_sockets/default app-scope-local app-scope-global app_original_dst }\n" >/tmp/vcl.conf
-  printf "vcl { app-socket-api /run/vpp/app_ns_sockets/default app-scope-local app-scope-global app_original_dst namespace-id dns-v6 namespace-secret 4242 }\n" >/tmp/vcl-v6.conf
+  printf "vcl {\n  app-socket-api /run/vpp/app_ns_sockets/dns-v4\n  app-scope-local\n  app-scope-global\n  app_original_dst\n  namespace-id dns-v4\n  namespace-secret 4242\n}\n" >/tmp/vcl.conf
+  printf "vcl {\n  app-socket-api /run/vpp/app_ns_sockets/dns-v6\n  app-scope-local\n  app-scope-global\n  app_original_dst\n  namespace-id dns-v6\n  namespace-secret 4242\n}\n" >/tmp/vcl-v6.conf
   printf "bind 127.0.0.1:1053\nbind-tcp 127.0.0.1:1053\naddress /updates.example/203.0.113.54\nbind 127.0.0.1:12000 -group source-client\nbind-tcp 127.0.0.1:12000 -group source-client\ngroup-begin source-client -inherit none\naddress /updates.example/203.0.113.53\ngroup-end\n" >/tmp/smartdns.conf
   printf "# source-prefix match-kind domain smartdns-port\n192.0.2.0/24 exact updates.example 12000\n2001:db8:1::/64 exact updates.example 12000\n" >/tmp/dns-source-routes.conf
   /opt/smartdns/usr/sbin/smartdns -f -x -p - -c /tmp/smartdns.conf >/tmp/smartdns.log 2>&1 &
@@ -239,7 +248,7 @@ docker exec "$name" sh -c '
     exit 1
   fi
   ! grep -q "bind service .* failed" /tmp/smartdns.log
-  LY_ROUTE_DNS_ROUTE_DEBUG=1 LY_ROUTE_DNS_SOURCE_ROUTES=/tmp/dns-source-routes.conf LY_ROUTE_DNS_FAMILY=ipv4 VCL_CONFIG=/tmp/vcl.conf VCL_VPP_API_SOCKET=/run/vpp/api.sock LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libvcl_ldpreload.so.25.10 /tmp/dns-vpp-proxy >/tmp/dns-vpp-proxy.log 2>&1 &
+  LY_ROUTE_DNS_ROUTE_DEBUG=1 LY_ROUTE_DNS_SOURCE_ROUTES=/tmp/dns-source-routes.conf LY_ROUTE_DNS_FAMILY=ipv4 VCL_APP_NAMESPACE_ID=dns-v4 VCL_APP_NAMESPACE_SECRET=4242 VCL_CONFIG=/tmp/vcl.conf VCL_VPP_API_SOCKET=/run/vpp/api.sock LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libvcl_ldpreload.so.25.10 /tmp/dns-vpp-proxy >/tmp/dns-vpp-proxy.log 2>&1 &
   echo $! >/tmp/dns-vpp-proxy.pid
   sleep 2
   if ! kill -0 "$(cat /tmp/dns-vpp-proxy.pid)"; then
@@ -301,6 +310,7 @@ docker exec "$name" sh -c '
   fi
   grep -q "source=192.0.2.10 domain=updates.example port=12000" /tmp/dns-vpp-proxy.log
   grep -q "source=2001:db8:1::10 domain=updates.example port=12000" /tmp/dns-vpp-proxy-v6.log
+  vppctl show version >/dev/null
   kill "$(cat /tmp/dns-vpp-proxy.pid)" "$(cat /tmp/dns-vpp-proxy-v6.pid)" "$(cat /tmp/smartdns.pid)" 2>/dev/null || true
 '
 

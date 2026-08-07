@@ -74,11 +74,47 @@ func selectCommonDataplanePath(request NativePathRequest) (NativePath, error) {
 		results = append(results, prerequisite("common_dataplane_tier", "", false, reason))
 		return NativePath{}, &DataplaneLockedError{Prerequisites: results, Candidates: evaluations}
 	}
+	selectedDPDKMode := NativeMode("")
+	if selectedTier == DataplaneTierDPDK {
+		for _, mode := range []NativeMode{NativeModeDPDKVFIO, NativeModeDPDKUIO} {
+			common := true
+			for _, assignment := range assignments {
+				found := false
+				for _, proof := range eligible[strings.TrimSpace(assignment.LinuxInterface)][selectedTier] {
+					if proof.Mode == mode {
+						found = true
+						break
+					}
+				}
+				if !found {
+					common = false
+					break
+				}
+			}
+			if common {
+				selectedDPDKMode = mode
+				break
+			}
+		}
+		if selectedDPDKMode == "" {
+			results = append(results, prerequisite("common_dpdk_binding_driver", "", false, "no single DPDK PCI binding driver is eligible on every active data interface"))
+			return NativePath{}, &DataplaneLockedError{Prerequisites: results, Candidates: evaluations}
+		}
+	}
 
 	attachments := make([]NativeAttachment, 0, len(assignments))
 	for _, assignment := range assignments {
 		name := strings.TrimSpace(assignment.LinuxInterface)
 		candidates := eligible[name][selectedTier]
+		if selectedTier == DataplaneTierDPDK {
+			filtered := make([]CapabilityProof, 0, len(candidates))
+			for _, candidate := range candidates {
+				if candidate.Mode == selectedDPDKMode {
+					filtered = append(filtered, candidate)
+				}
+			}
+			candidates = filtered
+		}
 		sort.SliceStable(candidates, func(i, j int) bool {
 			if candidates[i].PerformanceScore != candidates[j].PerformanceScore {
 				return candidates[i].PerformanceScore > candidates[j].PerformanceScore
@@ -91,7 +127,7 @@ func selectCommonDataplanePath(request NativePathRequest) (NativePath, error) {
 		selected := candidates[0]
 		attachments = append(attachments, proveNativeAttachment(NativeAttachment{
 			LinuxInterface: name,
-			VPPInterface:   "lyroute-" + name,
+			VPPInterface:   selectedVPPInterface(selected, name),
 			Tier:           selectedTier,
 			Hook:           selected.Hook,
 			Mode:           selected.Mode,
@@ -117,9 +153,16 @@ func proofTier(proof CapabilityProof) DataplaneTier {
 	return DataplaneTierNative
 }
 
+func selectedVPPInterface(proof CapabilityProof, linuxInterface string) string {
+	if value := strings.TrimSpace(proof.VPPInterface); value != "" {
+		return value
+	}
+	return "lyroute-" + linuxInterface
+}
+
 func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier DataplaneTier, requireSmartQoS bool) []string {
 	reasons := make([]string, 0)
-	runtimeProof := (proof.Source == ProofSourceRuntimeProbe || proof.Source == ProofSourceActiveRuntimeReadback) && proof.RuntimeVerified && !proof.ObservedAt.IsZero()
+	runtimeProof := isRuntimeCapabilityProof(proof) && proof.RuntimeVerified && !proof.ObservedAt.IsZero()
 	if !runtimeProof {
 		reasons = append(reasons, "runtime capability proof is required")
 	}
@@ -138,9 +181,20 @@ func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier Datapl
 		if !approvedNativeMode(proof.Hook, proof.Mode) || !proof.Native {
 			reasons = append(reasons, "candidate is not an approved VPP-native high-performance path")
 		}
+		if proof.Hook == NativeHookVMXNET3 {
+			if !pciAddressSafe(proof.PCIAddress) {
+				reasons = append(reasons, "VMXNET3 candidate has no safe PCI address")
+			}
+			if !proof.VFIOAvailable {
+				reasons = append(reasons, "vfio-pci is unavailable")
+			}
+			if (!decimalIdentifierSafe(proof.IOMMUGroup) || !proof.IOMMUProtected) && !proof.VFIONoIOMMUAvailable {
+				reasons = append(reasons, "VMXNET3 candidate is not protected by an IOMMU group")
+			}
+		}
 	case DataplaneTierDPDK:
-		if proof.Hook != NativeHookDPDK || proof.Mode != NativeModeDPDKVFIO || proof.Native {
-			reasons = append(reasons, "candidate is not an approved VPP DPDK VFIO path")
+		if proof.Hook != NativeHookDPDK || proof.Mode != NativeModeDPDKVFIO && proof.Mode != NativeModeDPDKUIO || proof.Native {
+			reasons = append(reasons, "candidate is not an approved VPP DPDK PCI path")
 		}
 		if !pciAddressSafe(proof.PCIAddress) {
 			reasons = append(reasons, "DPDK candidate has no safe PCI address")
@@ -148,11 +202,18 @@ func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier Datapl
 		if strings.TrimSpace(proof.KernelDriver) == "" {
 			reasons = append(reasons, "DPDK candidate has no current kernel driver")
 		}
-		if !decimalIdentifierSafe(proof.IOMMUGroup) || !proof.IOMMUProtected {
-			reasons = append(reasons, "DPDK candidate is not protected by an IOMMU group")
-		}
-		if !proof.VFIOAvailable {
-			reasons = append(reasons, "vfio-pci is unavailable")
+		switch proof.Mode {
+		case NativeModeDPDKVFIO:
+			if (!decimalIdentifierSafe(proof.IOMMUGroup) || !proof.IOMMUProtected) && !proof.VFIONoIOMMUAvailable {
+				reasons = append(reasons, "DPDK candidate is not protected by an IOMMU group")
+			}
+			if !proof.VFIOAvailable {
+				reasons = append(reasons, "vfio-pci is unavailable")
+			}
+		case NativeModeDPDKUIO:
+			if !proof.UIOPCIAvailable {
+				reasons = append(reasons, "uio_pci_generic is unavailable")
+			}
 		}
 		if !proof.HugepagesAvailable {
 			reasons = append(reasons, "VPP hugepages are unavailable")

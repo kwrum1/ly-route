@@ -100,17 +100,12 @@ if ! rootfs_tar_list | awk '
   {
     path = $0
     sub(/^\.\//, "", path)
-    if (path ~ /^\// || path == ".." || path ~ /^\.\.\// || path ~ /\/\.\.\//) invalid = 1
+    if (path ~ /^\// || path == ".." || path ~ /^\.\.\// || path ~ /\/\.\.\//) exit 1
   }
-  END { exit invalid ? 1 : 0 }
 '; then
   product_build_fail "Rootfs archive contains an unsafe member path"
 fi
-if ! rootfs_tar_verbose_list | awk '
-  # Debian base rootfs archives may contain standard device nodes and FIFOs.
-  substr($0, 1, 1) !~ /^[-dlhpcb]$/ { invalid = 1 }
-  END { exit invalid ? 1 : 0 }
-'; then
+if ! rootfs_tar_verbose_list | awk 'substr($0, 1, 1) !~ /^[-dlhcbp]$/ { exit 1 }'; then
   product_build_fail "Rootfs archive contains unsafe member types"
 fi
 
@@ -166,6 +161,7 @@ for directory in "$root_tree/etc" "$root_tree/etc/apt" "$root_tree/etc/default" 
   "$root_tree/dev" "$root_tree/dev/pts" "$root_tree/proc" "$root_tree/sys"; do
   prepare_real_directory "$directory"
 done
+chmod 1777 "$root_tree/tmp" "$root_tree/var/tmp"
 
 rootfs_manifest="$root_tree/usr/share/ly-route/artifact-manifest.json"
 product_build_require_file "$rootfs_manifest"
@@ -232,9 +228,6 @@ else
   done
 
   rm -f "$root_tree/etc/apt/sources.list"
-  # Package installation inside the extracted rootfs requires writable temp dirs.
-  mkdir -p "$root_tree/tmp" "$root_tree/var/tmp"
-  chmod 1777 "$root_tree/tmp" "$root_tree/var/tmp"
   cat >"$root_tree/etc/apt/sources.list" <<EOF
 deb ${LY_ROUTE_MIRROR:-http://deb.debian.org/debian} $suite main
 deb ${LY_ROUTE_MIRROR:-http://deb.debian.org/debian} ${suite}-updates main
@@ -295,7 +288,7 @@ GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Ly Route $product"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet"
-GRUB_CMDLINE_LINUX="root=UUID=$root_uuid"
+GRUB_CMDLINE_LINUX="root=UUID=$root_uuid intel_iommu=on amd_iommu=on iommu=pt"
 EOF
   mount --bind /dev "$mnt/dev"
   mount --bind /dev/pts "$mnt/dev/pts"

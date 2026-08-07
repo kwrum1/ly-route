@@ -108,12 +108,29 @@ func parseObservedServiceChainABFPolicy(output string) (observedServiceChainABFP
 	paths := 0
 	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
-		if len(fields) < 5 || !strings.HasPrefix(fields[0], "[@") || fields[2] != "via" {
+		// VPP renders a receive/local path on the `path:` line itself:
+		// `path:[N] ... ip4 ... receive:`.  There is no `via` line to
+		// parse in this form.
+		if len(fields) >= 6 && strings.HasPrefix(fields[0], "path:[") && fields[5] == "receive:" {
+			family, familyErr := parseObservedAddressFamily(fields[2])
+			if familyErr != nil {
+				return observedServiceChainABFPolicy{}, familyErr
+			}
+			paths++
+			observed.AddressFamily = family
+			observed.NextHop = "local"
+			observed.ServiceInterface = ""
+			continue
+		}
+		if len(fields) < 5 || !strings.HasPrefix(fields[0], "[@") {
 			continue
 		}
 		family, familyErr := parseObservedAddressFamily(fields[1])
 		if familyErr != nil {
 			return observedServiceChainABFPolicy{}, familyErr
+		}
+		if fields[2] != "via" {
+			continue
 		}
 		nextHop, addressErr := netip.ParseAddr(fields[3])
 		if addressErr != nil {
@@ -168,9 +185,9 @@ func parseObservedServiceChainAttachments(output string) ([]observedServiceChain
 
 func parseObservedAddressFamily(raw string) (string, error) {
 	switch raw {
-	case "ipv4":
+	case "ipv4", "ip4":
 		return "ip4", nil
-	case "ipv6":
+	case "ipv6", "ip6":
 		return "ip6", nil
 	default:
 		return "", serviceChainDecodeError("address family %q", raw)

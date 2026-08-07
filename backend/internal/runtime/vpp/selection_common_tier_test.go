@@ -69,6 +69,26 @@ func TestCommonTierCarriesDPDKIdentityIntoAttachment(t *testing.T) {
 	}
 }
 
+func TestCommonTierUsesUIOPCIGenericWhenVFIOIsUnavailable(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	proof := candidateProof(now, DataplaneTierDPDK, NativeHookDPDK, NativeModeDPDKUIO, 75)
+	proof.IOMMUGroup = "none"
+	proof.IOMMUProtected = false
+	proof.VFIOAvailable = false
+	proof.UIOPCIAvailable = true
+	path, err := SelectNativePath(NativePathRequest{
+		ManagementInterface: "eth0",
+		Now:                 now,
+		Assignments:         []NativeAssignment{{LinuxInterface: "eth1", Explicit: true, Candidates: []CapabilityProof{proof}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path.Tier != DataplaneTierDPDK || len(path.Attachments) != 1 || path.Attachments[0].Mode != NativeModeDPDKUIO || path.Attachments[0].IOMMUGroup != "none" {
+		t.Fatalf("path = %#v, want DPDK UIO fallback", path)
+	}
+}
+
 func TestCommonTierSmartQoSPreservesPreferredNativeTierWhenPluginIsAvailable(t *testing.T) {
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	nativeOne := candidateProof(now, DataplaneTierNative, NativeHookAFXDP, NativeModeZeroCopy, 100)

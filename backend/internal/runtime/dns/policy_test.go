@@ -121,14 +121,16 @@ func TestCompilePolicyRejectsDefaultAnyAndIPDomainRules(t *testing.T) {
 }
 
 func TestCompilePolicyRejectsImplicitOrAmbiguousDirectResolver(t *testing.T) {
-	for _, outcome := range []Outcome{
-		{Kind: OutcomeDirect},
-		{Kind: OutcomeDirect, UpstreamID: "dns-primary", WANEgressID: "wan-primary"},
-	} {
-		_, err := CompilePolicy(NewPolicy(Reject(), []Rule{{ID: "invalid-direct", Domains: []string{"example.test"}, Outcome: outcome}}), nil)
-		if !errors.Is(err, ErrInvalidPolicy) || !strings.Contains(err.Error(), "exactly one explicit upstream or WAN egress") {
-			t.Fatalf("direct outcome %#v error = %v, want explicit single resolver rejection", outcome, err)
-		}
+	_, err := CompilePolicy(NewPolicy(Reject(), []Rule{{ID: "invalid-direct", Domains: []string{"example.test"}, Outcome: Outcome{Kind: OutcomeDirect}}}), nil)
+	if !errors.Is(err, ErrInvalidPolicy) || !strings.Contains(err.Error(), "select an upstream or WAN egress") {
+		t.Fatalf("implicit direct outcome error = %v, want resolver selection rejection", err)
+	}
+	compiled, err := CompilePolicy(NewPolicy(Reject(), []Rule{{ID: "fixed-wan", Domains: []string{"example.test"}, Outcome: Outcome{Kind: OutcomeDirect, UpstreamID: "dns-primary", WANEgressID: "wan-primary"}}}), nil)
+	if err != nil {
+		t.Fatalf("upstream plus WAN binding should be accepted: %v", err)
+	}
+	if compiled.Rules[0].Outcome.UpstreamID != "dns-primary" || compiled.Rules[0].Outcome.WANEgressID != "wan-primary" {
+		t.Fatalf("combined direct binding was not retained: %#v", compiled.Rules[0].Outcome)
 	}
 }
 

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 const maxNameLength = 63
@@ -36,7 +37,7 @@ func ParseTopology(input TopologyInput) (Topology, error) {
 }
 
 func ParseGroup(input GroupInput) (Group, error) {
-	name, err := parseName(input.Name)
+	name, err := parseGroupName(input.Name)
 	if err != nil {
 		return Group{}, fmt.Errorf("orchestration group name: %w", err)
 	}
@@ -167,6 +168,19 @@ func parseName(raw string) (InterfaceName, error) {
 	}
 	for _, character := range value {
 		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("._:-", character)) {
+			return InterfaceName{}, fmt.Errorf("%w: %q", ErrInvalidName, value)
+		}
+	}
+	return InterfaceName{value: value}, nil
+}
+
+func parseGroupName(raw string) (InterfaceName, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || len([]rune(value)) > maxNameLength {
+		return InterfaceName{}, ErrInvalidName
+	}
+	for _, character := range value {
+		if !(unicode.IsLetter(character) || unicode.IsDigit(character) || strings.ContainsRune("._:-", character)) {
 			return InterfaceName{}, fmt.Errorf("%w: %q", ErrInvalidName, value)
 		}
 	}

@@ -29,23 +29,31 @@ const (
 type SnapshotRequest struct {
 	TransactionID       string
 	ManagementInterface string
-	Interfaces          []string
-	Bonds               []string
-	RoutePolicies       []string
-	WANGroups           []string
-	ACLs                []string
-	QoS                 []string
-	NATStaticMappings   []string
-	NATPortMappings     []string
-	AbsentRoutePolicies []string
-	AbsentWANGroups     []string
-	AbsentACLs          []string
-	AbsentQoS           []string
-	AbsentNATStatic     []string
-	AbsentNATPort       []string
-	Capabilities        []SnapshotCapability
-	ReadbackAt          time.Time
-	Candidates          SnapshotCandidates
+	// AllowMissing is used only for a verified production drift readback. A
+	// successful inventory with no requested product object means that the
+	// object was removed while VPP was restarted; an unreadable inventory must
+	// still fail closed.
+	AllowMissing          bool
+	VerifyNATReturnGuards bool
+	Interfaces            []string
+	AbsentInterfaces      []string
+	Bonds                 []string
+	AbsentBonds           []string
+	RoutePolicies         []string
+	WANGroups             []string
+	ACLs                  []string
+	QoS                   []string
+	NATStaticMappings     []string
+	NATPortMappings       []string
+	AbsentRoutePolicies   []string
+	AbsentWANGroups       []string
+	AbsentACLs            []string
+	AbsentQoS             []string
+	AbsentNATStatic       []string
+	AbsentNATPort         []string
+	Capabilities          []SnapshotCapability
+	ReadbackAt            time.Time
+	Candidates            SnapshotCandidates
 }
 
 type SnapshotCandidates struct {

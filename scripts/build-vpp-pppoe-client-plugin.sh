@@ -5,23 +5,21 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-$repo_root/runtime-downloads}
 out=${LY_ROUTE_VPP_PPPOE_CLIENT_BUILD_DIR:-$repo_root/build/vpp-pppoe-client}
 sysroot=${LY_ROUTE_VPP_PPPOE_CLIENT_SYSROOT:-$out/sysroot}
-arch=${LY_ROUTE_RUNTIME_DEB_ARCH:-$(dpkg --print-architecture)}
-multiarch=$(dpkg-architecture -a"$arch" -qDEB_HOST_MULTIARCH)
 
 for package in vpp-dev libvppinfra-dev; do
-  set -- "$debs/${package}_"*"_${arch}.deb"
-  [ -f "$1" ] || { echo "missing VPP development package for $arch: $package" >&2; exit 1; }
+  set -- "$debs/${package}_25.10-release_amd64.deb"
+  [ -f "$1" ] || { echo "missing VPP development package: $1" >&2; exit 1; }
 done
 command -v cmake >/dev/null
 command -v dpkg-deb >/dev/null
 
 mkdir -p "$out" "$sysroot"
-dpkg-deb -x "$debs"/vpp-dev_*_"$arch".deb "$sysroot"
-dpkg-deb -x "$debs"/libvppinfra-dev_*_"$arch".deb "$sysroot"
+dpkg-deb -x "$debs/vpp-dev_25.10-release_amd64.deb" "$sysroot"
+dpkg-deb -x "$debs/libvppinfra-dev_25.10-release_amd64.deb" "$sysroot"
 
 cmake -S "$repo_root/runtime/vpp-pppoe-client" -B "$out/cmake" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DVPP_DIR="$sysroot/usr/lib/$multiarch/cmake/vpp" \
+  -DVPP_DIR="$sysroot/usr/lib/x86_64-linux-gnu/cmake/vpp" \
   -DVPP_INCLUDE_DIR="$sysroot/usr/include" \
   -DVPP_APIGEN="$sysroot/usr/bin/vppapigen" \
   -DVPP_VAPI_C_GEN="$sysroot/usr/bin/vapi_c_gen.py" \

@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,7 +35,7 @@ func TestTransparentTransactionJournalRoundTripAndDurableClear(t *testing.T) {
 	if !restarted.transparentJournalPending || !reflect.DeepEqual(restarted.transparentBonds, desired) {
 		t.Fatalf("restarted journal state = pending %v bonds %#v", restarted.transparentJournalPending, restarted.transparentBonds)
 	}
-	if err := restarted.CommitTransparentTransaction(context.Background()); err != nil {
+	if err := restarted.CommitTransparentTransaction(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if restarted.transparentJournalPending {

@@ -1,0 +1,9 @@
+{
+  "provider": "Loyalsoldier/v2ray-rules-dat",
+  "tag": "202608052252",
+  "files": {
+    "geoip.dat": "6ba63d75f307d16a81ae09406ddcf2779fa75cb642d4aae59613370d62d33509",
+    "geosite.dat": "857227f9dcedbfda5c067ba740ca8a461a06a6ac12aeeb99dcbf82c0e1bdb125",
+    "china-list.txt": "a74d47f63d557ba6760d05c726d491f9b8a71ec4a360dd5e288e09ab480c17e8"
+  }
+}

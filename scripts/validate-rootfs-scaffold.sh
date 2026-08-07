@@ -24,8 +24,8 @@ $repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-dns-ipset-sync.s
 $repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-dns-ipset-sync.timer
 $repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-dns-vpp-v6-namespace.service
 $repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-dns-vpp-session.service
-$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-pppoe@.service
 $repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-pppoe.target
+$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-pppoe@.service
 $repo_root/packaging/rootfs-overlay/usr/lib/ly-route/firstboot.sh
 $repo_root/packaging/rootfs-overlay/usr/lib/ly-route/tune-vpp.sh
 $repo_root/packaging/rootfs-overlay/usr/lib/ly-route/runtime-check.sh
@@ -47,7 +47,7 @@ $repo_root/backend/gateway/main.go
 $repo_root/backend/orchestrator/main.go
 $repo_root/backend/internal/httpapi/server.go
 $repo_root/backend/internal/httpapi/auth.go
-$repo_root/.github/workflows/gateway-release.yml
+$repo_root/.github/workflows/firmware.yml
 $repo_root/docs/rootfs-image.md
 "
 
@@ -60,8 +60,6 @@ done
 
 sh -n "$repo_root/scripts/build-rootfs.sh"
 bash -n "$repo_root/scripts/build-runtime-debs.sh"
-bash -n "$repo_root/scripts/build-armbian-installer.sh"
-bash -n "$repo_root/scripts/build-auto-install-iso.sh"
 sh -n "$repo_root/scripts/rootfs-runtime-smoke.sh"
 sh -n "$repo_root/scripts/test-firstboot-env-migration.sh"
 sh -n "$repo_root/scripts/test-vpp-native-selection.sh"
@@ -85,13 +83,13 @@ sh -n "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/recover-runtime.sh"
 
 for token in Panabit "assets/" VRRP vrrp login-logo admin-logo login-background "--pa-"; do
   if grep -R --line-number --fixed-strings -- "$token" \
-    "$repo_root/frontend/gateway/index.html" \
-    "$repo_root/frontend/gateway/styles.css" \
-    "$repo_root/frontend/gateway/app.js" \
+    "$repo_root/index.html" \
+    "$repo_root/styles.css" \
+    "$repo_root/app.js" \
     "$repo_root/Dockerfile" \
     "$repo_root/docker-compose.yml" \
     "$repo_root/packaging" \
-    "$repo_root/.github/workflows/gateway-release.yml" >/tmp/ly-route-rootfs-grep.txt; then
+    "$repo_root/.github/workflows/firmware.yml" >/tmp/ly-route-rootfs-grep.txt; then
     cat /tmp/ly-route-rootfs-grep.txt >&2
     exit 1
   fi
@@ -122,7 +120,7 @@ if ! grep -q '192.168.88.100 - 192.168.88.199' "$repo_root/packaging/rootfs-over
   exit 1
 fi
 
-if ! grep -q 'build-runtime-debs.sh smartdns' "$repo_root/.github/workflows/gateway-release.yml" || ! grep -q 'build-runtime-debs.sh xray' "$repo_root/.github/workflows/gateway-release.yml"; then
+if ! grep -q 'build-runtime-debs.sh smartdns' "$repo_root/.github/workflows/firmware.yml" || ! grep -q 'build-runtime-debs.sh xray' "$repo_root/.github/workflows/firmware.yml"; then
   echo "GitHub x86 firmware workflow does not package SmartDNS and xray runtime services" >&2
   exit 1
 fi
@@ -192,7 +190,7 @@ if ! grep -q 'ly-route-recovery.service' "$repo_root/scripts/build-rootfs.sh"; t
   exit 1
 fi
 
-for package in kea-dhcp4-server ppp curl python3; do
+for package in kea-dhcp4-server ipset curl python3; do
   if ! grep -q "$package" "$repo_root/scripts/build-rootfs.sh"; then
     echo "rootfs builder does not include runtime package $package" >&2
     exit 1
@@ -226,12 +224,12 @@ if ! grep -q '^runtime-debs:' "$repo_root/Makefile"; then
   exit 1
 fi
 
-if ! grep -q 'build-runtime-debs.sh vpp-apply' "$repo_root/.github/workflows/gateway-release.yml"; then
+if ! grep -q 'build-runtime-debs.sh vpp-apply' "$repo_root/.github/workflows/firmware.yml"; then
   echo "rootfs image workflow does not build the local runtime adapter package" >&2
   exit 1
 fi
 
-if ! grep -q 'LY_ROUTE_EXTRA_DEBS_DIR' "$repo_root/.github/workflows/gateway-release.yml"; then
+if ! grep -q 'LY_ROUTE_EXTRA_DEBS_DIR' "$repo_root/.github/workflows/firmware.yml"; then
   echo "rootfs image workflow does not inject local runtime .deb packages" >&2
   exit 1
 fi
@@ -355,8 +353,9 @@ if grep -q 'vpp.service is not active' "$repo_root/backend/internal/runtime/serv
   exit 1
 fi
 
-if ! grep -q 'ExecStart=/usr/lib/ly-route/ly-route-pppoe-client' "$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-pppoe@.service"; then
-  echo "PPPoE systemd template is not wired to the native VPP client" >&2
+if ! grep -q 'ly-route-pppoe.target' "$repo_root/scripts/build-rootfs.sh" ||
+   ! grep -q 'ly-route-pppoe-client' "$repo_root/scripts/build-rootfs.sh"; then
+  echo "gateway rootfs is not wired to the native PPPoE client" >&2
   exit 1
 fi
 

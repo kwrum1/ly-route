@@ -24,8 +24,31 @@ func proxySteeringDeleteCommands(steering proxy.VPPSteeringInstruction) []string
 		return []string{fmt.Sprintf("?ip route del table %d 0.0.0.0/0 via local", tableID), fmt.Sprintf("?ip table del %d", tableID), fmt.Sprintf("show ip table %d", tableID), fmt.Sprintf("show ip fib table %d", tableID)}
 	case "vpp.service-chain.egress-binding":
 		return []string{fmt.Sprintf("show interface %s", interfaceName), fmt.Sprintf("show abf attach %s", interfaceName), fmt.Sprintf("show ip table %d", tableID)}
+	case "vpp.proxy-service.network":
+		network := steering.ServiceNetwork
+		if strings.TrimSpace(network.EgressID) == "" {
+			network = proxy.ServiceNetworkForEgressID(resource)
+		}
+		return []string{
+			fmt.Sprintf("?set interface nat44 in %s del", network.EgressVPPInterface),
+			fmt.Sprintf("?ip route del table %d 0.0.0.0/0", network.OutboundTableID),
+			fmt.Sprintf("?ip table del %d", network.OutboundTableID),
+			fmt.Sprintf("?delete tap %s", network.IngressVPPInterface),
+			fmt.Sprintf("?delete tap %s", network.EgressVPPInterface),
+			"show tap",
+		}
 	default:
 		return nil
+	}
+}
+
+func dnsServiceNetworkDeleteCommands(network DNSServiceNetwork) []string {
+	return []string{
+		fmt.Sprintf("?set interface nat44 in %s del", network.VPPInterface),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", network.TableID),
+		fmt.Sprintf("?ip table del %d", network.TableID),
+		fmt.Sprintf("?delete tap %s", network.VPPInterface),
+		"show tap",
 	}
 }
 
@@ -61,5 +84,19 @@ func flowTargetDeleteCommands(target flow.Target) []string {
 		return []string{fmt.Sprintf("?policer del name %s", policerName), fmt.Sprintf("show policer name %s", policerName)}
 	default:
 		return nil
+	}
+}
+
+func managementLCPCleanupCommands() []string {
+	return []string{"show lcp"}
+}
+
+func dnsTransparentCleanupCommands(interception DNSTransparentInterception) []string {
+	return []string{
+		"show abf attach",
+		fmt.Sprintf("show abf attach %s", interception.LANInterface),
+		fmt.Sprintf("show abf policy %d", stableID("dns-transparent-v4", 9000, 999)),
+		fmt.Sprintf("show abf policy %d", stableID("dns-transparent-v6", 9000, 999)),
+		"show acl-plugin acl",
 	}
 }

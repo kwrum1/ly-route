@@ -22,6 +22,7 @@ func TestRuntimeApply_xray_failure_degrades_only_proxy_capability(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	saveTestProxyNode(t, store)
 	controller := &httpServiceController{
 		applyErrs: map[serviceRuntime.ServiceName]error{serviceRuntime.Xray: errors.New("xray daemon missing")},
 		health: map[serviceRuntime.ServiceName]serviceRuntime.Health{
@@ -34,7 +35,7 @@ func TestRuntimeApply_xray_failure_degrades_only_proxy_capability(t *testing.T) 
 		WithClock(fixedClock()),
 		WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}),
 		WithServiceRuntime(serviceRuntime.Runtime{Controller: controller}),
-		WithProxyEgress(proxy.NewProxyEgress("proxy-egress-default", "xray-tproxy-outbound")),
+		WithProxyEgress(testProxyEgressWithNode()),
 		WithFlowIntent(flow.NewIntent("default", []flow.Rule{flow.NewRule("classify-default", flow.RuleGranularity, flow.Classify("best-effort"))})),
 	)
 	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
@@ -187,7 +188,9 @@ func TestRuntimeApply_failed_PPPoE_preserves_unrelated_service_receipt(t *testin
 	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"status":"degraded"`) || strings.Contains(response.Body.String(), `"status":"apply_failed"`) {
 		t.Fatalf("runtime apply = %d %s", response.Code, response.Body.String())
 	}
-	if got, want := strings.Join(controller.applied, ","), "smartdns,pppd"; got != want {
+	// PPPoE must establish the selected WAN before dependent DNS source routes
+	// are applied; an authentication failure does not discard SmartDNS evidence.
+	if got, want := strings.Join(controller.applied, ","), "pppd,smartdns"; got != want {
 		t.Fatalf("attempted services = %s, want %s", got, want)
 	}
 	if len(controller.receiptArtifacts) != 2 || controller.receiptArtifacts[0].Service != serviceRuntime.SmartDNS || controller.receiptArtifacts[1].Service != serviceRuntime.SmartDNS || controller.receiptArtifacts[1].Path != "/etc/ly-route/dns-source-routes.conf" {

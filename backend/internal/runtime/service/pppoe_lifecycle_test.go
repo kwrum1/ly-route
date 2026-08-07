@@ -26,10 +26,35 @@ func TestFilesystemControllerStopPPPoEStopsEveryInstanceAndVerifiesInterfacesGon
 	for _, required := range []string{
 		"systemctl stop ly-route-pppoe@ly-route-wan-blue.service",
 		"systemctl stop ly-route-pppoe@ly-route-wan-green.service",
+		"systemctl stop ly-route-pppoe.target",
 		"vppctl show pppoe session",
 	} {
 		if !strings.Contains(commands, required) {
 			t.Fatalf("PPPoE stop commands missing %q:\n%s", required, commands)
+		}
+	}
+}
+
+func TestFilesystemControllerApplyPPPoEActivatesTargetBeforeInstances(t *testing.T) {
+	artifacts, err := RenderPPPoEConfig([]PPPoEPeer{{ID: "wan-blue", Interface: "eth7", Username: "blue", Password: "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	controller := FilesystemController{Runner: runner}
+	if err := controller.runApplyCommand(context.Background(), PPPd, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"systemctl start ly-route-pppoe.target",
+		"systemctl reload-or-restart ly-route-pppoe@ly-route-wan-blue.service",
+	}
+	if len(runner.commands) != len(want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	for index := range want {
+		if runner.commands[index] != want[index] {
+			t.Fatalf("commands = %#v, want %#v", runner.commands, want)
 		}
 	}
 }

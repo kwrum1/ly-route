@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ func main() {
 	wanInterface := flag.String("wan-interface", "", "VPP WAN interface; when set, prepare the VPP control-plane tap")
 	tapID := flag.Int("tap-id", 700, "VPP control-plane tap ID")
 	statusFile := flag.String("status-file", "", "runtime status JSON path")
+	reconcileUnit := flag.String("reconcile-unit", "ly-route-policy-routing.service", "systemd unit to reconcile after PPPoE connects")
 	natInsideInterfaces := []string{}
 	ipv6LANInterfaces := []string{}
 	ipv6PrefixGroup := ""
@@ -55,6 +57,7 @@ func main() {
 			NATInsideInterfaces []string `json:"nat_inside_interfaces"`
 			IPv6LANInterfaces   []string `json:"ipv6_lan_interfaces"`
 			IPv6PrefixGroup     string   `json:"ipv6_prefix_group"`
+			ReconcileUnit       string   `json:"reconcile_unit"`
 		}
 		if err := json.Unmarshal(content, &config); err != nil {
 			fatal(err)
@@ -86,6 +89,9 @@ func main() {
 		natInsideInterfaces = append(natInsideInterfaces, config.NATInsideInterfaces...)
 		ipv6LANInterfaces = append(ipv6LANInterfaces, config.IPv6LANInterfaces...)
 		ipv6PrefixGroup = config.IPv6PrefixGroup
+		if config.ReconcileUnit != "" {
+			*reconcileUnit = config.ReconcileUnit
+		}
 	}
 	if len(natInsideInterfaces) == 0 {
 		for _, name := range strings.Split(os.Getenv("LY_ROUTE_LAN_INTERFACE"), ",") {
@@ -126,6 +132,14 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	var prefixLease pppoeclient.DelegatedPrefixLease
+	if ipv6PrefixGroup != "" && len(ipv6LANInterfaces) > 0 {
+		prefixLease, err = client.AcquireDelegatedPrefix(ctx, session)
+		if err != nil {
+			fatal(err)
+		}
+		session = sessionWithPrefixLease(session, prefixLease)
+	}
 	encoded, _ := json.Marshal(session)
 	programmed, err := pppoeclient.ProgramVPP(ctx, pppoeclient.VPPConfig{Binary: *vppctl, TableID: *tableID, MTU: uint16(*mru), InstallDefaultRoute: *defaultRoute, EnableNAT: *nat, NATInsideInterfaces: natInsideInterfaces, IPv6PrefixGroup: ipv6PrefixGroup, IPv6LANInterfaces: ipv6LANInterfaces}, session)
 	if err != nil {
@@ -135,11 +149,71 @@ func main() {
 	encoded, _ = json.Marshal(programmed)
 	fmt.Println(string(encoded))
 	writeStatus(*statusFile, map[string]any{"state": "connected", "interface": programmed.Interface, "session": session})
+	if err := notifyDependentRuntime(*reconcileUnit); err != nil {
+		fmt.Fprintf(os.Stderr, "dependent runtime reconciliation: %v\n", err)
+	}
 	defer writeStatus(*statusFile, map[string]any{"state": "disconnected"})
 	defer client.Disconnect(context.Background())
-	if err := client.Serve(ctx); err != nil && ctx.Err() == nil {
+	serve := client.Serve
+	if prefixLease.Prefix.IsValid() {
+		serve = func(ctx context.Context) error {
+			return client.ServeWithDelegatedPrefix(ctx, session, prefixLease, func(ctx context.Context, updated pppoeclient.DelegatedPrefixLease) error {
+				if err := programmed.UpdateDelegatedPrefix(ctx, updated.Prefix.String()); err != nil {
+					return err
+				}
+				session = sessionWithPrefixLease(session, updated)
+				programmed.Session = session
+				writeStatus(*statusFile, map[string]any{"state": "connected", "interface": programmed.Interface, "session": session})
+				return nil
+			})
+		}
+	}
+	if err := serve(ctx); err != nil && ctx.Err() == nil {
 		fatal(err)
 	}
+}
+
+func sessionWithPrefixLease(session pppoeclient.Session, lease pppoeclient.DelegatedPrefixLease) pppoeclient.Session {
+	session.DelegatedPrefix = lease.Prefix.String()
+	session.PrefixPreferredLifetime = lease.PreferredLifetime
+	session.PrefixValidLifetime = lease.ValidLifetime
+	session.PrefixT1 = lease.T1
+	session.PrefixT2 = lease.T2
+	return session
+}
+
+var runServiceCommand = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+func notifyDependentRuntime(unit string) error {
+	unit = strings.TrimSpace(unit)
+	if unit == "" {
+		return nil
+	}
+	if !strings.HasSuffix(unit, ".service") {
+		return fmt.Errorf("invalid reconciliation unit %q", unit)
+	}
+	for _, char := range unit {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.' || char == '@' {
+			continue
+		}
+		return fmt.Errorf("invalid reconciliation unit %q", unit)
+	}
+	stateOutput, stateErr := runServiceCommand("systemctl", "show", "--property=ActiveState", "--value", unit)
+	if stateErr == nil {
+		switch strings.TrimSpace(string(stateOutput)) {
+		case "activating", "deactivating":
+			// The policy renderer already waits for the selected VPP underlay.
+			// Do not interrupt that transaction when PPPoE reaches connected.
+			return nil
+		}
+	}
+	output, err := runServiceCommand("systemctl", "--no-block", "try-restart", unit)
+	if err != nil {
+		return fmt.Errorf("systemctl try-restart %s: %w: %s", unit, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func writeStatus(path string, value any) {

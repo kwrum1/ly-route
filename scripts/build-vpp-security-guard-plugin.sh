@@ -4,18 +4,16 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-$repo_root/runtime-downloads}
 out=${LY_ROUTE_VPP_SECURITY_GUARD_BUILD_DIR:-$repo_root/build/vpp-security-guard}
 sysroot=${LY_ROUTE_VPP_SECURITY_GUARD_SYSROOT:-$out/sysroot}
-arch=${LY_ROUTE_RUNTIME_DEB_ARCH:-$(dpkg --print-architecture)}
-multiarch=$(dpkg-architecture -a"$arch" -qDEB_HOST_MULTIARCH)
 for package in vpp-dev libvppinfra-dev; do
-  set -- "$debs/${package}_"*"_${arch}.deb"
-  [ -f "$1" ] || { echo "missing VPP development package for $arch: $package" >&2; exit 1; }
+  file="$debs/${package}_25.10-release_amd64.deb"
+  [ -f "$file" ] || { echo "missing VPP development package: $file" >&2; exit 1; }
 done
 mkdir -p "$out" "$sysroot"
-dpkg-deb -x "$debs"/vpp-dev_*_"$arch".deb "$sysroot"
-dpkg-deb -x "$debs"/libvppinfra-dev_*_"$arch".deb "$sysroot"
+dpkg-deb -x "$debs/vpp-dev_25.10-release_amd64.deb" "$sysroot"
+dpkg-deb -x "$debs/libvppinfra-dev_25.10-release_amd64.deb" "$sysroot"
 cmake -S "$repo_root/runtime/vpp-security-guard" -B "$out/cmake" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DVPP_DIR="$sysroot/usr/lib/$multiarch/cmake/vpp" \
+  -DVPP_DIR="$sysroot/usr/lib/x86_64-linux-gnu/cmake/vpp" \
   -DVPP_INCLUDE_DIR="$sysroot/usr/include" \
   -DVPP_APIGEN="$sysroot/usr/bin/vppapigen" \
   -DVPP_VAPI_C_GEN="$sysroot/usr/bin/vapi_c_gen.py" \

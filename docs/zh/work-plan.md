@@ -76,7 +76,7 @@
 
 Gateway 网络生产事务、真实 VPP 双向包流和故障门禁也已闭环：接口与 active-backup Bond 经同一生产多资源事务应用和语义回读；部分 Bond generation 失败会恢复原状态；WAN admin-state 漂移由可信完整读回触发修复，读回不完整仍锁定；事务回滚和 WAN 故障期间共享 LAN 管理地址持续可访问。容器 AF_PACKET/veth peer carrier 的自动恢复不作为原生网卡结论，driver/carrier 热插拔仍由目标硬件门禁承担。
 
-Gateway 服务运行与故障门禁已闭环：Kea 真实租约采集接入主程序，按 memfile 最后记录过滤释放/过期租约并在 API 中脱敏，租约库丢失时不返回缓存；PPPoE 生命周期 API 真实控制逐 WAN pppd 实例，等待 IPCP/IPv6CP 收敛，完成 Connect/Disconnect/Reconnect、接入集中器失效和恢复且不保留陈旧接口或路由交接；Xray 最快订阅启用仅回环 RoutingService，正式二进制接受生成配置，产品 API 可读回当前选中节点，在全节点失效时降级并在节点恢复后重新给出实时选择。安全资源现已使用严格 L2-L4 契约，ACL、IP-MAC、IP/CIDR 威胁名单与基础攻击阈值拥有类型化输入，DPI、应用识别、域名/URL/SNI、IDS/IPS 和用户行为声明会被拒绝并审计且不产生写入；聚合 VPP 安全代际已证明合法绑定流量放行、MAC 欺骗与威胁 IP 阻断、错误更新保留有效规则并生成运行时失败审计。真实 PPPoE 容器性能基准已覆盖 NAT44、纯路由和 64B 小包。统一真实验收现为 `33/33`，发布矩阵为 `39/45`。
+Gateway 服务运行与故障门禁已闭环：Kea 真实租约采集接入主程序，按 memfile 最后记录过滤释放/过期租约并在 API 中脱敏，租约库丢失时不返回缓存；PPPoE 生命周期 API 真实控制逐 WAN Ly Route 原生 PPPoE 客户端，等待 IPCP/IPv6CP 收敛，完成 Connect/Disconnect/Reconnect、接入集中器失效和恢复且不保留陈旧接口或路由交接；当前业务数据由 VPP PPPoE 会话承载，拨号控制帧仍通过专用 TAP/AF_PACKET 控制通道，不应描述为“完全无 Linux 控制面”。Xray 最快订阅启用仅回环 RoutingService，正式二进制接受生成配置，产品 API 可读回当前选中节点，在全节点失效时降级并在节点恢复后重新给出实时选择。安全资源现已使用严格 L2-L4 契约，ACL、IP-MAC、IP/CIDR 威胁名单与基础攻击阈值拥有类型化输入，DPI、应用识别、域名/URL/SNI、IDS/IPS 和用户行为声明会被拒绝并审计且不产生写入；聚合 VPP 安全代际已证明合法绑定流量放行、MAC 欺骗与威胁 IP 阻断、错误更新保留有效规则并生成运行时失败审计。真实 PPPoE 容器性能基准已覆盖 NAT44、纯路由和 64B 小包。统一真实验收现为 `33/33`，发布矩阵为 `39/45`。
 
 验收：Gateway 全功能清单不存在未映射设计、跳过项或只有 mock 的必测项；测试记录包含拓扑、构建版本、请求、包捕获、DNS/DHCP/PPPoE/代理日志、计数器、故障和恢复结果；软件层完整矩阵可在 CI 重复执行。
 

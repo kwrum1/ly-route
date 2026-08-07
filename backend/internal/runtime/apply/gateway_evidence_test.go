@@ -178,6 +178,29 @@ func TestExecutorPersistsGatewayEvidenceAndRejectsWrongOrMissingSnapshotEvidence
 	}
 }
 
+func TestExecutorAcceptsAgedCommittedGatewayEvidenceAsPreviousGeneration(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, ctx)
+	committedAt := time.Date(2026, 7, 26, 12, 30, 0, 0, time.UTC)
+	commitClock := deterministicClock(committedAt)
+	trace := []string{}
+	adapters, _ := gatewayEvidenceAdapters(commitClock, &trace, "")
+	executor := gatewayEvidenceExecutor(store, commitClock, &GatewayMultiResourceTransaction{Adapters: adapters, Now: commitClock})
+	request := validRequest("txn-evidence-aged")
+	if _, err := executor.Run(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+
+	executor.Now = deterministicClock(committedAt.Add(ReadbackFreshnessWindow + time.Hour))
+	previous, err := executor.previousState(ctx, request.SnapshotID)
+	if err != nil {
+		t.Fatalf("aged committed generation was rejected as rollback state: %v", err)
+	}
+	if !previous.Available {
+		t.Fatal("aged committed generation is not available as rollback state")
+	}
+}
+
 func TestExecutorDoesNotPersistFailedGatewayCandidateEvidence(t *testing.T) {
 	// Given
 	ctx := context.Background()

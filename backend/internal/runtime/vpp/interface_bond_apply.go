@@ -16,6 +16,7 @@ type InterfaceBondPlan struct {
 	DeleteInterfaces     []string
 	DeleteBonds          []string
 	DeleteInterfaceState []InterfaceState
+	DeleteBondState      []BondState
 }
 
 type RollbackResult string
@@ -103,6 +104,7 @@ func interfaceBondManagementLock(management, operation string) error {
 
 func (a Adapter) ApplyInterfaceBond(ctx context.Context, plan InterfaceBondPlan, prior Snapshot, attempted ...InterfaceBondPlan) (InterfaceBondApplyResult, error) {
 	plan.DeleteInterfaceState = appendInterfaceDeleteState(plan.DeleteInterfaceState, plan.DeleteInterfaces, prior.Interfaces)
+	plan.DeleteBondState = appendBondDeleteState(plan.DeleteBondState, plan.DeleteBonds, prior.Bonds)
 	rollbackPlan := plan
 	if len(attempted) > 0 {
 		rollbackPlan = attempted[0]
@@ -124,7 +126,7 @@ func (a Adapter) ApplyInterfaceBond(ctx context.Context, plan InterfaceBondPlan,
 			return InterfaceBondApplyResult{}, a.interfaceBondFailure(ctx, channel, plan.TransactionID, operation.Name, err, prior, rollbackPlan)
 		}
 	}
-	readback, err := a.Snapshot(ctx, lifecycleSnapshotRequest(plan.TransactionID, plan.Interfaces, plan.Bonds))
+	readback, err := a.Snapshot(ctx, lifecycleSnapshotRequest(plan.TransactionID, plan))
 	if err != nil {
 		return InterfaceBondApplyResult{}, a.interfaceBondFailure(ctx, channel, plan.TransactionID, "readback", err, prior, rollbackPlan)
 	}
@@ -133,7 +135,7 @@ func (a Adapter) ApplyInterfaceBond(ctx context.Context, plan InterfaceBondPlan,
 
 func (a Adapter) interfaceBondFailure(ctx context.Context, channel Channel, transactionID, operation string, cause error, prior Snapshot, current InterfaceBondPlan) error {
 	rollbackErr := errors.Join(cleanupInterfaceBond(ctx, channel, transactionID, current), applySnapshot(ctx, channel, transactionID, prior))
-	readback, err := a.Snapshot(ctx, lifecycleSnapshotRequest(transactionID, prior.Interfaces, prior.Bonds))
+	readback, err := a.Snapshot(ctx, lifecycleSnapshotRequest(transactionID, InterfaceBondPlan{Interfaces: prior.Interfaces, Bonds: prior.Bonds}))
 	if err != nil {
 		rollbackErr = errors.Join(rollbackErr, err)
 	} else if !reflect.DeepEqual(readback.Interfaces, prior.Interfaces) || !reflect.DeepEqual(readback.Bonds, prior.Bonds) {
@@ -244,13 +246,26 @@ func bondNames(states []BondState) []string {
 	return names
 }
 
-func lifecycleSnapshotRequest(transactionID string, interfaces []InterfaceState, bonds []BondState) SnapshotRequest {
+func lifecycleSnapshotRequest(transactionID string, plan InterfaceBondPlan) SnapshotRequest {
+	interfaces := append([]InterfaceState(nil), plan.Interfaces...)
+	bonds := append([]BondState(nil), plan.Bonds...)
 	capabilities := make([]SnapshotCapability, 0, 2)
-	if len(interfaces) > 0 {
+	if len(interfaces) > 0 || len(plan.DeleteInterfaces) > 0 {
 		capabilities = append(capabilities, SnapshotCapabilityInterfaces)
 	}
-	if len(bonds) > 0 {
+	if len(bonds) > 0 || len(plan.DeleteBonds) > 0 {
 		capabilities = append(capabilities, SnapshotCapabilityBonds)
 	}
-	return SnapshotRequest{TransactionID: transactionID, Interfaces: interfaceNames(interfaces), Bonds: bondNames(bonds), Capabilities: capabilities, Candidates: SnapshotCandidates{Interfaces: append([]InterfaceState(nil), interfaces...), Bonds: append([]BondState(nil), bonds...)}}
+	return SnapshotRequest{
+		TransactionID:    transactionID,
+		Interfaces:       interfaceNames(interfaces),
+		AbsentInterfaces: append([]string(nil), plan.DeleteInterfaces...),
+		Bonds:            bondNames(bonds),
+		AbsentBonds:      append([]string(nil), plan.DeleteBonds...),
+		Capabilities:     capabilities,
+		Candidates: SnapshotCandidates{
+			Interfaces: append(append([]InterfaceState(nil), interfaces...), plan.DeleteInterfaceState...),
+			Bonds:      append(append([]BondState(nil), bonds...), plan.DeleteBondState...),
+		},
+	}
 }

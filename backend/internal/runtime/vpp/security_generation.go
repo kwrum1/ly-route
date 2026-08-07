@@ -66,10 +66,14 @@ func CompileSecurityGeneration(id, defaultInterface string, acls []trafficpolicy
 		if direction == "" {
 			direction = "input"
 		}
-		if direction != "input" && direction != "output" {
+		if direction != "input" && direction != "output" && direction != "both" {
 			return SecurityGeneration{}, fmt.Errorf("security ACL %q has unsupported direction %q", acl.ID, direction)
 		}
-		groups[defaultInterface+"\x00"+direction] = append(groups[defaultInterface+"\x00"+direction], acl)
+		for _, attachDirection := range securityDirections(direction) {
+			compiled := acl
+			compiled.Match.Direction = attachDirection
+			groups[defaultInterface+"\x00"+attachDirection] = append(groups[defaultInterface+"\x00"+attachDirection], compiled)
+		}
 	}
 	for _, threat := range threats {
 		iface := strings.TrimSpace(threat.Interface)
@@ -126,6 +130,21 @@ func CompileSecurityGeneration(id, defaultInterface string, acls []trafficpolicy
 		generation.AttackRules = append(generation.AttackRules, attack)
 	}
 	return generation, nil
+}
+
+// securityDirections expands the user-facing bidirectional ACL choice into
+// the two independent VPP interface attachment directions. VPP does not have
+// a single "both" attachment, so keeping the expansion here prevents a
+// bidirectional rule from silently becoming input-only.
+func securityDirections(direction string) []string {
+	switch strings.ToLower(strings.TrimSpace(direction)) {
+	case "both", "bidirectional", "input_output", "inbound_outbound", "双向":
+		return []string{"input", "output"}
+	case "output", "egress", "out", "lan_to_wan":
+		return []string{"output"}
+	default:
+		return []string{"input"}
+	}
 }
 
 type SecurityThreatList struct {

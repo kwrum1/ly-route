@@ -45,6 +45,13 @@ func PrepareControlPlane(ctx context.Context, config ControlPlaneConfig) (Contro
 	if err != nil {
 		return ControlPlane{}, err
 	}
+	// DPDK and native hardware interfaces can exist while administratively
+	// down. PPPoE discovery frames otherwise reach the control TAP but are
+	// dropped at the physical egress. Bring the selected WAN up before binding
+	// the discovery relay.
+	if _, err := runVPP(ctx, config.VPPCTL, "set", "interface", "state", config.WANInterface, "up"); err != nil {
+		return ControlPlane{}, err
+	}
 	vppInterface := "tap" + strconv.Itoa(config.TapID)
 	show, showErr := runVPP(ctx, config.VPPCTL, "show", "interface", vppInterface)
 	if showErr != nil || !strings.Contains(show, vppInterface) {

@@ -19,7 +19,7 @@ B 层缺少物理网卡或运营商线路不构成免测理由；虚拟二层网
 - 优先使用 network namespace、veth 和 Linux bridge 建立完全隔离、可重复的拓扑；需要容器表现为二层独立设备时使用 macvlan 或等价接口。
 - PPPoE、DNS 上游、DHCP 客户端、代理节点、流量发生器、服务节点与被测设备必须位于独立容器/命名空间，禁止用同进程 mock 绕过网络。
 - 用 `tc netem` 和受控瓶颈注入延迟、抖动、丢包、限速、乱序、端口 down 和链路中断。
-- 被测对象使用本次提交构建的正式产品 rootfs，启动正式控制 API、VPP、受控 DNS/代理服务接口、SmartDNS、Kea、Xray、pppd 和运行时适配器。`nftables` 不得出现在业务转发路径中。
+- 被测对象使用本次提交构建的正式产品 rootfs，启动正式控制 API、VPP、受控 DNS/代理服务接口、SmartDNS、Kea、Xray、Ly Route 原生 PPPoE 客户端和运行时适配器。`pppd` 不属于产品运行时，`nftables` 也不得出现在业务转发路径中。
 - 每个功能必须同时验证成功、无匹配/空状态、非法输入、依赖失效、应用回滚、服务重启和设备重启后的行为。
 
 ## 3. Gateway 测试拓扑
@@ -104,7 +104,7 @@ DNS 控制不是普通策略路由中的一个附属字段，而是独立的、�
 
 ## 6. PPPoE、DHCP 与客户端联动场景
 
-- PPPoE Server/AC 容器真实提供发现、认证、会话、IPv4 地址、IPv6CP/前缀能力和 DNS 信息；Gateway 必须运行正式 pppd 流程，不得直接注入“已连接”。
+- PPPoE Server/AC 容器真实提供发现、认证、会话、IPv4 地址、IPv6CP/前缀能力和 DNS 信息；Gateway 必须运行 `/usr/lib/ly-route/ly-route-pppoe-client` 完成真实拨号，不得直接注入“已连接”。当前客户端使用 VPP PPPoE 会话承载业务数据，Linux TAP/AF_PACKET 仅承载拨号控制帧；这不等同于完整 PPP 状态机全部位于 VPP 内。
 - PPPoE 获得的 WAN、普通 DHCP WAN 和静态 WAN 分别进入 DNS 固定线路、WAN 群组、PBR、NAT 和代理 underlay 场景，证明接口来源不会改变上层语义。
 - LAN 客户端通过 DHCP 获得 Gateway 地址和本机 DNS 地址，然后尝试改为外部 DNS，证明默认 53 接管仍生效。
 - Kea 静态绑定、动态租约和在线用户必须共享稳定客户端身份；租约变化后 ACL、QoS、DNS 源条件和遥测不得指向错误用户。

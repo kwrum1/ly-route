@@ -149,11 +149,14 @@ func (e Executor) Run(ctx context.Context, request Request) (Result, error) {
 		return e.persistAuditFailure(ctx, events.events, err)
 	}
 	plan := Plan{Request: request, CompiledProxy: compiledProxy, CompiledFlow: compiledFlow, SnapshotHash: snapshotHash, Previous: previous, GatewayPlan: request.GatewayPlan}
-	if err := e.apply(ctx, plan); err != nil {
-		return e.fail(ctx, plan, events, snapshotHash, PhaseApply, err)
-	}
 	gatewayResult, err := e.gateway(ctx, plan)
 	if err != nil {
+		return e.fail(ctx, plan, events, snapshotHash, PhaseApply, err)
+	}
+	// VPP owns production data interfaces. Apply the gateway graph first so
+	// Linux control-plane peers (Kea, SmartDNS, PPPoE and Xray) can bind to
+	// their committed LCP/TAP handoff instead of racing a nonexistent netdev.
+	if err := e.apply(ctx, plan); err != nil {
 		return e.fail(ctx, plan, events, snapshotHash, PhaseApply, err)
 	}
 	receipt, err := e.receipt(ctx, plan)

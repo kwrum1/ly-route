@@ -243,7 +243,7 @@
       return `<line x1="0" y1="${y}" x2="${width}" y2="${y}" class="system-wan-grid-line"></line><text x="0" y="${Math.max(12, y - 5)}" class="system-wan-axis-label">${formatRate(peak * ratio / 100)}</text>`;
     }).join("");
     const legend = model.series.map((item) => `<span class="system-wan-legend-item"><i style="background:${colors.get(item.id)}"></i>${options.escape(item.name || item.id)}</span>`).join("");
-    return `<section class="system-panel system-traffic-panel"><header class="system-panel-head"><div><h3>WAN 流量趋势</h3><p>单 WAN、WAN 组和代理 WAN 的实时流量</p></div><div class="system-traffic-summary"><span>当前 ${formatRate(current)}</span><span>峰值 ${formatRate(peak)}</span><span>平均 ${formatRate(average)}</span></div></header><div class="system-wan-legend">${legend || '<span class="system-wan-empty">暂无 WAN 流量采样</span>'}</div><div class="system-wan-chart"><svg viewBox="0 0 1000 248" preserveAspectRatio="none" role="img" aria-label="WAN 流量趋势">${grid}${chart}</svg>${!chart ? '<div class="system-wan-chart-empty">暂无流量采样</div>' : ''}</div></section>`;
+    return `<section class="system-panel system-traffic-panel"><header class="system-panel-head"><div><h3>WAN 流量趋势</h3></div><div class="system-traffic-summary"><span>当前 ${formatRate(current)}</span><span>峰值 ${formatRate(peak)}</span><span>平均 ${formatRate(average)}</span></div></header><div class="system-wan-legend">${legend || '<span class="system-wan-empty">暂无 WAN 流量采样</span>'}</div><div class="system-wan-chart"><svg viewBox="0 0 1000 248" preserveAspectRatio="none" role="img" aria-label="WAN 流量趋势">${grid}${chart}</svg>${!chart ? '<div class="system-wan-chart-empty">暂无流量采样</div>' : ''}</div></section>`;
   }
 
   function renderSystem(options) {

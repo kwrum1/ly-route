@@ -37,11 +37,22 @@ grep -q '^LY_ROUTE_VPP_MAIN_CORE=1$' "$tmp/eight-core/var/lib/ly-route/vpp-tunin
 grep -q '^LY_ROUTE_VPP_WORKERS=6$' "$tmp/eight-core/var/lib/ly-route/vpp-tuning.env"
 grep -q '^CPUAffinity=1-7$' "$tmp/eight-core/etc/systemd/system/vpp.service.d/10-ly-route-affinity.conf"
 grep -q '^  corelist-workers 2-7$' "$tmp/eight-core/etc/vpp/startup.conf"
+grep -q '^  runtime-dir /run/vpp$' "$tmp/eight-core/etc/vpp/startup.conf"
+grep -q '^  use-app-socket-api$' "$tmp/eight-core/etc/vpp/startup.conf"
 
 run_tuning sixteen-core 16 32768
 grep -q '^LY_ROUTE_VPP_WORKERS=8$' "$tmp/sixteen-core/var/lib/ly-route/vpp-tuning.env"
 grep -q '^CPUAffinity=1-9$' "$tmp/sixteen-core/etc/systemd/system/vpp.service.d/10-ly-route-affinity.conf"
 grep -q '^  corelist-workers 2-9$' "$tmp/sixteen-core/etc/vpp/startup.conf"
+
+for lcp_plugin in \
+  '  plugin linux_cp_plugin.so { enable }' \
+  '  plugin linux_nl_plugin.so { enable }'; do
+  if ! grep -Fq "$lcp_plugin" "$tmp/eight-core/etc/vpp/startup.conf"; then
+    echo "generated VPP tuning config is missing Linux control-plane plugin: $lcp_plugin" >&2
+    exit 1
+  fi
+done
 
 for key in \
   'net.ipv4.ip_forward = 1' \

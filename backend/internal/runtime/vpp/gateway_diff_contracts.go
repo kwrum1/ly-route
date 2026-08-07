@@ -2,8 +2,10 @@ package vpp
 
 import (
 	"maps"
+	"net/netip"
 	"reflect"
 	"slices"
+	"strings"
 
 	"ly-route/backend/internal/runtime/flow"
 	"ly-route/backend/internal/runtime/nat"
@@ -17,8 +19,9 @@ func interfaceContract() resourceContract[InterfaceState] {
 		equal: func(left, right InterfaceState) bool {
 			return left.Name == right.Name && left.AdminState == right.AdminState && left.LinkState == right.LinkState && slices.Equal(left.Addresses, right.Addresses)
 		},
+		liveMatchesDesired: InterfaceStateMatchesDesired,
 		repairInPlace: func(observed, wanted InterfaceState) (InterfaceState, bool) {
-			if !slices.Equal(observed.Addresses, wanted.Addresses) {
+			if !interfaceAddressesMatchDesired(observed.Addresses, wanted.Addresses) {
 				return InterfaceState{}, false
 			}
 			// Admin-state drift can be repaired without removing the interface or
@@ -29,6 +32,107 @@ func interfaceContract() resourceContract[InterfaceState] {
 			return wanted, true
 		},
 	}
+}
+
+// InterfaceStateMatchesDesired compares a verified live VPP interface with
+// the static interface plan.  The PPPoE/IPv6-PD runtime owns dynamically
+// learned IPv6 addresses and RA state, so those addresses may be present in a
+// live snapshot even though they are not part of the static interface plan.
+// IPv4 remains exact: an unexpected IPv4 address is configuration drift and
+// must not be hidden by this exception.
+func InterfaceStateMatchesDesired(observed, wanted InterfaceState) bool {
+	return observed.Name == wanted.Name &&
+		observed.AdminState == wanted.AdminState &&
+		observed.LinkState == wanted.LinkState &&
+		interfaceAddressesMatchDesired(observed.Addresses, wanted.Addresses)
+}
+
+// InterfaceStatesMatchDesired is the evidence-level slice comparison.  VPP
+// readback order is not a configuration semantic, so compare by interface
+// identity and apply the runtime IPv6 ownership rule per interface.
+func InterfaceStatesMatchDesired(observed, wanted []InterfaceState) bool {
+	if len(observed) != len(wanted) {
+		return false
+	}
+	observedByName := make(map[string]InterfaceState, len(observed))
+	for _, state := range observed {
+		name := strings.TrimSpace(state.Name)
+		if name == "" {
+			return false
+		}
+		if _, exists := observedByName[name]; exists {
+			return false
+		}
+		observedByName[name] = state
+	}
+	for _, state := range wanted {
+		name := strings.TrimSpace(state.Name)
+		live, exists := observedByName[name]
+		if !exists || !InterfaceStateMatchesDesired(live, state) {
+			return false
+		}
+	}
+	return true
+}
+
+func interfaceAddressesMatchDesired(observed, wanted []string) bool {
+	wantedAddresses := normalizedInterfaceAddresses(wanted)
+	observedAddresses := normalizedInterfaceAddresses(observed)
+
+	// Every statically requested address must still be present.
+	for address := range wantedAddresses {
+		if _, present := observedAddresses[address]; !present {
+			return false
+		}
+	}
+
+	// IPv4 is exclusively owned by the static gateway plan.  Any unexpected
+	// IPv4 address is therefore drift.  IPv6 is runtime-owned when the plan has
+	// no static IPv6 address (the normal delegated-prefix case).  If a static
+	// IPv6 address is explicitly present, require the global IPv6 set to match
+	// while still allowing link-local addresses created by VPP.
+	staticIPv6 := false
+	for address := range wantedAddresses {
+		if parsed, ok := parseInterfacePrefix(address); ok && parsed.Addr().Is6() {
+			staticIPv6 = true
+			break
+		}
+	}
+	for address := range observedAddresses {
+		if _, expected := wantedAddresses[address]; expected {
+			continue
+		}
+		parsed, ok := parseInterfacePrefix(address)
+		if !ok {
+			return false
+		}
+		if !parsed.Addr().Is6() {
+			return false
+		}
+		if staticIPv6 && !parsed.Addr().IsLinkLocalUnicast() {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizedInterfaceAddresses(addresses []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		normalized := strings.TrimSpace(address)
+		if prefix, ok := parseInterfacePrefix(normalized); ok {
+			normalized = prefix.String()
+		}
+		if normalized != "" {
+			result[normalized] = struct{}{}
+		}
+	}
+	return result
+}
+
+func parseInterfacePrefix(address string) (netip.Prefix, bool) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(address))
+	return prefix, err == nil
 }
 
 func bondContract() resourceContract[BondState] {
@@ -86,7 +190,7 @@ func natStaticContract() resourceContract[nat.StaticMapping] {
 		kind:     "NAT44 static mapping",
 		identity: func(mapping nat.StaticMapping) string { return mapping.ID },
 		equal: func(left, right nat.StaticMapping) bool {
-			return left.ID == right.ID && left.ExternalAddress == right.ExternalAddress && left.InternalAddress == right.InternalAddress && left.WANInterface == right.WANInterface
+			return left.ID == right.ID && left.ExternalAddress == right.ExternalAddress && left.InternalAddress == right.InternalAddress && left.WANInterface == right.WANInterface && left.WANNextHop == right.WANNextHop && left.ReturnPathGuard == right.ReturnPathGuard
 		},
 	}
 }
@@ -96,7 +200,7 @@ func portMapContract() resourceContract[nat.PortMapping] {
 		kind:     "NAT44 port mapping",
 		identity: func(mapping nat.PortMapping) string { return mapping.ID },
 		equal: func(left, right nat.PortMapping) bool {
-			return left.ID == right.ID && left.Protocol == right.Protocol && left.ExternalAddress == right.ExternalAddress && left.ExternalPort == right.ExternalPort && left.InternalHost == right.InternalHost && left.InternalPort == right.InternalPort && left.WANInterface == right.WANInterface && left.Hairpin == right.Hairpin
+			return left.ID == right.ID && left.Protocol == right.Protocol && left.ExternalAddress == right.ExternalAddress && left.ExternalPort == right.ExternalPort && left.InternalHost == right.InternalHost && left.InternalPort == right.InternalPort && left.WANInterface == right.WANInterface && left.WANNextHop == right.WANNextHop && left.Hairpin == right.Hairpin && left.ReturnPathGuard == right.ReturnPathGuard
 		},
 	}
 }

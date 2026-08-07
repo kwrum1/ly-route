@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
 	"ly-route/backend/internal/runtime/flow"
+	"ly-route/backend/internal/runtime/nat"
 	"ly-route/backend/internal/runtime/proxy"
 	"ly-route/backend/internal/runtime/trafficpolicy"
 )
@@ -56,7 +56,18 @@ type VPPCTLReplyPayload struct {
 	CommandResults []VPPCTLCommandResult
 }
 
+// vppRouteBatchBegin/end are internal declarative markers.  VPP's CLI has a
+// finite input-line size, so a large provider prefix set must be sent through
+// `vppctl exec` as many short commands instead of one giant ACL line.
+const (
+	vppRouteBatchBegin = "__ly-route-vpp-batch-begin__"
+	vppRouteBatchEnd   = "__ly-route-vpp-batch-end__"
+)
+
 func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply, error) {
+	if attachment, ok := operation.Payload.(NativeAttachment); ok && attachment.Hook == NativeHookVMXNET3 {
+		return channel.doVMXNET3Lifecycle(ctx, operation, attachment)
+	}
 	if channel.dynamicACL && operation.Name == "vpp.security-acl.snapshot" {
 		operation.VPPCtlCommands = []string{"show acl-plugin acl"}
 	}
@@ -80,13 +91,22 @@ func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply
 	if channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.route-policy") && !strings.HasSuffix(operation.Name, ".snapshot") {
 		return channel.doRoutePolicyLifecycle(ctx, operation)
 	}
-	if interception, ok := operation.Payload.(DNSTransparentInterception); ok && channel.dynamicACL && operation.Name == "vpp.dns-transparent-interception" {
+	if mapping, ok := operation.Payload.(nat.PortMapping); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.nat44-ed.port-map") {
+		return channel.doNAT44MappingLifecycle(ctx, operation, natReturnGuardForPortMapping(mapping))
+	}
+	if mapping, ok := operation.Payload.(nat.StaticMapping); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.nat44-ed.static-mapping") {
+		return channel.doNAT44MappingLifecycle(ctx, operation, natReturnGuardForStaticMapping(mapping))
+	}
+	if interception, ok := operation.Payload.(DNSTransparentInterception); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.dns-transparent-interception") {
+		if strings.HasSuffix(operation.Name, ".rollback-delete") {
+			return channel.doDNSTransparentDeleteLifecycle(ctx, operation, interception)
+		}
 		return channel.doDNSTransparentLifecycle(ctx, operation, interception)
 	}
 	if generation, ok := operation.Payload.(SecurityGeneration); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.security-generation") {
 		return channel.doSecurityGenerationLifecycle(ctx, operation, generation, strings.HasSuffix(operation.Name, ".rollback-delete"))
 	}
-	if management, ok := operation.Payload.(ManagementLCP); ok && operation.Name == "vpp.management-lcp" {
+	if management, ok := operation.Payload.(ManagementLCP); ok && (strings.HasPrefix(operation.Name, "vpp.management-lcp") || strings.HasPrefix(operation.Name, "vpp.lan-control-lcp")) {
 		return channel.doManagementLCPLifecycle(ctx, operation, management)
 	}
 	if smartQoS, ok := operation.Payload.(SmartQoSInterface); ok && strings.HasPrefix(operation.Name, "vpp.smart-qos") {
@@ -111,29 +131,9 @@ func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply
 	return channel.doCommands(ctx, operation)
 }
 
-func operationHasCommand(operation Operation, fragment string) bool {
-	for _, command := range operation.VPPCtlCommands {
-		if strings.Contains(command, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
-func (channel vppctlChannel) doCommands(ctx context.Context, operation Operation) (Reply, error) {
-	results := make([]VPPCTLCommandResult, 0, len(operation.VPPCtlCommands))
-	for _, command := range operation.VPPCtlCommands {
-		command = strings.TrimSpace(command)
-		ignoreFailure := strings.HasPrefix(command, "?")
-		command = strings.TrimSpace(strings.TrimPrefix(command, "?"))
-		logicalCommand := command
-		if lanInterface := strings.TrimSpace(os.Getenv("LY_ROUTE_LAN_INTERFACE")); lanInterface != "" {
-			command = strings.ReplaceAll(command, "$LY_ROUTE_LAN_INTERFACE", lanInterface)
-		}
-		if command == "" {
-			continue
-		}
-		args := strings.Fields(command)
+func (channel vppctlChannel) doVMXNET3Lifecycle(ctx context.Context, operation Operation, attachment NativeAttachment) (Reply, error) {
+	results := make([]VPPCTLCommandResult, 0, 6)
+	run := func(command string, args ...string) (string, error) {
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
 		cmd := exec.CommandContext(ctx, channel.binary, args...)
@@ -149,26 +149,77 @@ func (channel vppctlChannel) doCommands(ctx context.Context, operation Operation
 				retval = -1
 			}
 		}
-		results = append(results, VPPCTLCommandResult{Command: logicalCommand, Stdout: stdout.String(), Stderr: stderr.String(), Retval: retval})
+		results = append(results, VPPCTLCommandResult{Command: command, Stdout: stdout.String(), Stderr: stderr.String(), Retval: retval})
 		if err != nil {
-			if ignoreFailure {
-				continue
-			}
-			reply := Reply{Operation: operation.Name, Retval: retval, Payload: VPPCTLReplyPayload{CommandResults: results}}
-			failure := fmt.Errorf("vppctl %s command %q failed with retval %d: %w: %s", operation.Name, command, retval, err, strings.TrimSpace(stderr.String()))
-			if strings.HasSuffix(operation.Name, ".snapshot") {
-				return reply, fmt.Errorf("%w: %v", ErrSnapshotIncomplete, failure)
-			}
-			return reply, failure
+			return stdout.String(), fmt.Errorf("vppctl %s failed with retval %d: %w: %s", command, retval, err, strings.TrimSpace(stderr.String()))
+		}
+		return stdout.String(), nil
+	}
+
+	if strings.HasSuffix(operation.Name, ".rollback-delete") {
+		if strings.TrimSpace(attachment.VPPInterface) != "" {
+			_, _ = run("delete interface vmxnet3 "+attachment.VPPInterface, "delete", "interface", "vmxnet3", attachment.VPPInterface)
+		}
+		if _, err := run("show interface", "show", "interface"); err != nil {
+			return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
+		}
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, nil
+	}
+	if strings.TrimSpace(attachment.PCIAddress) == "" {
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, errors.New("VMXNET3 attachment has no PCI address")
+	}
+	_, _ = run("create interface vmxnet3 "+attachment.PCIAddress, "create", "interface", "vmxnet3", attachment.PCIAddress)
+	vmxnet3Output, err := run("show vmxnet3", "show", "vmxnet3")
+	if err != nil {
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
+	}
+	actual := parseVMXNET3Interface(vmxnet3Output, attachment.PCIAddress)
+	if actual == "" {
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, fmt.Errorf("VPP VMXNET3 interface for PCI %s was not found", attachment.PCIAddress)
+	}
+	desired := strings.TrimSpace(attachment.VPPInterface)
+	if desired == "" {
+		desired = actual
+	}
+	if actual != desired {
+		if _, err := run("set interface name "+actual+" "+desired, "set", "interface", "name", actual, desired); err != nil {
+			return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
 		}
 	}
-	payload := VPPCTLReplyPayload{CommandResults: results}
-	readback, err := decodeVPPCTLReadback(operation, results)
-	if err != nil {
-		return Reply{Operation: operation.Name, Payload: payload}, err
+	if _, err := run("set interface state "+desired+" up", "set", "interface", "state", desired, "up"); err != nil {
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
 	}
-	payload.Readback = readback
-	return Reply{Operation: operation.Name, Payload: payload}, nil
+	if _, err := run("show hardware-interfaces "+desired, "show", "hardware-interfaces", desired); err != nil {
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
+	}
+	if _, err := run("show interface "+desired, "show", "interface", desired); err != nil {
+		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
+	}
+	return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, nil
+}
+
+func parseVMXNET3Interface(output, pci string) string {
+	current := ""
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "Interface:" {
+			current = fields[1]
+			continue
+		}
+		if len(fields) >= 3 && fields[0] == "PCI" && fields[1] == "Address:" && fields[2] == pci {
+			return current
+		}
+	}
+	return ""
+}
+
+func operationHasCommand(operation Operation, fragment string) bool {
+	for _, command := range operation.VPPCtlCommands {
+		if strings.Contains(command, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func (vppctlChannel) Close() error { return nil }

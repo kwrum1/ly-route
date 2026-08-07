@@ -61,16 +61,20 @@ func run() error {
 	if profile.AllowsService(product.ServiceKea) {
 		options = append(options, httpapi.WithDHCPLeases(serviceRuntime.KeaMemfileLeaseCollector{Path: env("LY_ROUTE_KEA_LEASE_FILE", serviceRuntime.DefaultKeaDHCP4LeaseFile)}))
 	}
+	vppctl := env("LY_ROUTE_VPPCTL", "vppctl")
 	if envBool("LY_ROUTE_ENABLE_VPP_INTERFACE_TELEMETRY", true) {
-		options = append(options, httpapi.WithInterfaceTelemetry(vppctlInterfaceTelemetry{binary: env("LY_ROUTE_VPPCTL", "vppctl")}))
+		options = append(options, httpapi.WithInterfaceTelemetry(vppctlInterfaceTelemetry{binary: vppctl}))
 	}
-	options = append(options, httpapi.WithSecurityGuardRuntime(productionSecurityGuardObserver{binary: env("LY_ROUTE_VPPCTL", "vppctl"), now: time.Now}))
+	options = append(options, httpapi.WithPolicyHitTelemetry(newVPPCTLPolicyCounters(store, vppctl)))
+	options = append(options, httpapi.WithSecurityGuardRuntime(productionSecurityGuardObserver{binary: vppctl, now: time.Now}))
 	if endpoint := strings.TrimSpace(os.Getenv("LY_ROUTE_GATEWAY_TELEMETRY_URL")); endpoint != "" {
 		collector, collectorErr := newGatewayHTTPTelemetry(endpoint)
 		if collectorErr != nil {
 			return fmt.Errorf("initialize gateway telemetry: %w", collectorErr)
 		}
 		options = append(options, httpapi.WithGatewayTelemetry(collector))
+	} else {
+		options = append(options, httpapi.WithGatewayTelemetry(newVPPCTLGatewayTelemetry(store, vppctl, time.Now)))
 	}
 	server, err := httpapi.NewServer(selection, options...)
 	if err != nil {
@@ -632,6 +636,23 @@ func (collector vppctlInterfaceTelemetry) Interfaces(ctx context.Context) ([]map
 }
 
 func parseVPPInterfaceTelemetry(output string) []map[string]any {
+	all := parseAllVPPInterfaceTelemetry(output)
+	items := make([]map[string]any, 0, len(all))
+	for _, item := range all {
+		name, _ := item["name"].(string)
+		if !strings.HasPrefix(name, "lyroute-") {
+			continue
+		}
+		linuxName := strings.TrimPrefix(name, "lyroute-")
+		item["id"] = linuxName
+		item["name"] = linuxName
+		item["vpp_interface"] = name
+		items = append(items, item)
+	}
+	return items
+}
+
+func parseAllVPPInterfaceTelemetry(output string) []map[string]any {
 	var items []map[string]any
 	var current map[string]any
 	for _, line := range strings.Split(output, "\n") {
@@ -639,14 +660,15 @@ func parseVPPInterfaceTelemetry(output string) []map[string]any {
 		if len(fields) == 0 {
 			continue
 		}
-		if strings.HasPrefix(fields[0], "lyroute-") {
-			linuxName := strings.TrimPrefix(fields[0], "lyroute-")
+		if len(fields) >= 4 {
+			if _, err := strconv.Atoi(fields[1]); err == nil {
+				current = nil
+			}
+		}
+		if current == nil && len(fields) >= 4 {
 			current = map[string]any{
-				"id":            linuxName,
-				"name":          linuxName,
-				"vpp_interface": fields[0],
-				"active_path":   "af_xdp",
-				"work_mode":     "af_xdp",
+				"id":            fields[0],
+				"name":          fields[0],
 				"admin_state":   "up",
 				"runtime_state": "running",
 				"rx_bps":        0,

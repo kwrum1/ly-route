@@ -12,7 +12,7 @@ if [ ! -f "$artifact" ]; then
 fi
 
 if [ "${LY_ROUTE_ROOTFS_REQUIRED_PACKAGES+x}" != x ]; then
-  LY_ROUTE_ROOTFS_REQUIRED_PACKAGES="libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns ly-route-dns-vpp-proxy xray openssh-server sudo ipset"
+  LY_ROUTE_ROOTFS_REQUIRED_PACKAGES="libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns ly-route-dns-vpp-proxy xray openssh-server sudo"
 fi
 required_files_defaulted=false
 if [ "${LY_ROUTE_ROOTFS_REQUIRED_FILES+x}" != x ]; then
@@ -24,7 +24,7 @@ fi
 if [ "$required_files_defaulted" = true ]; then
   LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/x86_64-linux-gnu/vpp_plugins/dpdk_plugin.so /usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_security_guard_plugin.so"
   LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/x86_64-linux-gnu/vpp_plugins/linux_cp_plugin.so /usr/lib/x86_64-linux-gnu/vpp_plugins/linux_nl_plugin.so"
-  LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/ly-route/ly-route-dns-vpp-proxy /usr/lib/ly-route/ly-route-dns-vpp-proxy-v6 /usr/lib/ly-route/dns-vpp-v6-namespace-apply /usr/lib/ly-route/dns-vpp-session-apply /etc/ly-route/vcl.conf /etc/ly-route/vcl-v6.conf /etc/systemd/system/ly-route-dns-vpp-v6-namespace.service /etc/systemd/system/ly-route-dns-vpp-session.service /lib/systemd/system/ly-route-dns-vpp-proxy.service /lib/systemd/system/ly-route-dns-vpp-proxy-v6.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-v6-namespace.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-session.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-proxy.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-proxy-v6.service"
+  LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/ly-route/ly-route-dns-vpp-proxy /usr/lib/ly-route/ly-route-dns-vpp-proxy-v6 /usr/lib/ly-route/dns-vpp-v6-namespace-apply /usr/lib/ly-route/dns-vpp-session-apply /etc/ly-route/vcl.conf /etc/ly-route/vcl-v6.conf /etc/systemd/system/ly-route-dns-vpp-v6-namespace.service /etc/systemd/system/ly-route-dns-vpp-session.service /etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf /etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf /lib/systemd/system/ly-route-dns-vpp-proxy.service /lib/systemd/system/ly-route-dns-vpp-proxy-v6.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-v6-namespace.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-session.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-proxy.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-proxy-v6.service"
 fi
 
 case "$artifact" in
@@ -48,46 +48,12 @@ tmp=$(mktemp -d)
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
 
-require_match() {
-  pattern=$1
-  path=$2
-  label=$3
-  if ! grep -q "$pattern" "$path"; then
-    echo "rootfs validation failed: $label ($path)" >&2
-    exit 1
-  fi
-}
-
-extract_required_file() {
-  file=$1
-  archive_path=".${file}"
-  if tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" "$archive_path" 2>/dev/null; then
-    return 0
-  fi
-  # Debian bookworm uses usrmerge, so /lib is represented as /usr/lib in tar archives.
-  case "$file" in
-    /lib/*)
-      tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" "./usr${file}"
-      ;;
-    *)
-      echo "missing rootfs archive entry: $file" >&2
-      return 1
-      ;;
-  esac
-}
-
 if [ -n "$LY_ROUTE_ROOTFS_REQUIRED_PACKAGES" ]; then
   tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" ./var/lib/dpkg/status
 fi
 for file in $LY_ROUTE_ROOTFS_REQUIRED_FILES; do
-  extract_required_file "$file"
-  check_path="$tmp$file"
-  if [ ! -e "$check_path" ] && [ ! -L "$check_path" ]; then
-    case "$file" in
-      /lib/*) check_path="$tmp/usr${file}" ;;
-    esac
-  fi
-  if [ ! -e "$check_path" ] && [ ! -L "$check_path" ]; then
+  tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" ".${file}"
+  if [ ! -e "$tmp$file" ] && [ ! -L "$tmp$file" ]; then
     echo "missing rootfs file: $file" >&2
     exit 1
   fi
@@ -101,16 +67,13 @@ for package in $LY_ROUTE_ROOTFS_REQUIRED_PACKAGES; do
 done
 
 if printf '%s' " $LY_ROUTE_ROOTFS_REQUIRED_FILES " | grep -q ' /usr/lib/ly-route/vpp-apply '; then
-  if [ ! -x "$tmp/usr/lib/ly-route/vpp-apply" ]; then
-    echo "rootfs validation failed: vpp-apply is not executable" >&2
-    exit 1
-  fi
+  test -x "$tmp/usr/lib/ly-route/vpp-apply"
 fi
 if [ -f "$tmp/etc/ly-route/runtime.env" ]; then
-  require_match 'LY_ROUTE_ENABLE_SERVICE_RUNTIME=true' "$tmp/etc/ly-route/runtime.env" 'service runtime is disabled'
+  grep -q 'LY_ROUTE_ENABLE_SERVICE_RUNTIME=true' "$tmp/etc/ly-route/runtime.env"
 fi
 if [ -f "$tmp/etc/ly-route/vpp-command-map.json" ]; then
-  require_match '"operations"' "$tmp/etc/ly-route/vpp-command-map.json" 'VPP command map is incomplete'
+  grep -q '"operations"' "$tmp/etc/ly-route/vpp-command-map.json"
 fi
 if grep -Eiq 'dpdk|af_packet|no-zero-copy|native-driver-auto|generic[-_]?xdp|generic[-_]?skb' \
   "$tmp/etc/ly-route/runtime.env" \
@@ -120,14 +83,24 @@ if grep -Eiq 'dpdk|af_packet|no-zero-copy|native-driver-auto|generic[-_]?xdp|gen
   exit 1
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-control-api.service" ]; then
-  require_match '/usr/lib/ly-route/ly-route-control' "$tmp/etc/systemd/system/ly-route-control-api.service" 'control service binary'
-  require_match 'After=network.target ly-route-firstboot.service ly-route-runtime-check.service' "$tmp/etc/systemd/system/ly-route-control-api.service" 'control service ordering'
+  grep -q '/usr/lib/ly-route/ly-route-control' "$tmp/etc/systemd/system/ly-route-control-api.service"
+  grep -q 'After=network.target ly-route-firstboot.service ly-route-runtime-check.service' "$tmp/etc/systemd/system/ly-route-control-api.service"
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-policy-routing.service" ]; then
-  require_match '/var/lib/ly-route/policy-routing/apply.sh' "$tmp/usr/lib/ly-route/policy-routing-apply-default" 'policy routing apply path'
+  grep -q '/usr/lib/ly-route/policy-routing-apply-default' "$tmp/usr/lib/ly-route/policy-routing-apply-default"
+  grep -q '^PartOf=vpp.service$' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
+  grep -q 'ly-route-vpp-apply.service' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
+  test -L "$tmp/etc/systemd/system/multi-user.target.wants/ly-route-policy-routing.service"
+fi
+if [ -f "$tmp/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf" ]; then
+  grep -q '^Wants=ly-route-dns-vpp-session.service$' "$tmp/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf"
+  grep -q '^Before=ly-route-dns-vpp-session.service$' "$tmp/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf"
+  grep -q '^Wants=smartdns.service$' "$tmp/etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf"
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-vpp-apply.service" ]; then
-  require_match '/usr/lib/ly-route/vpp-apply-default' "$tmp/etc/systemd/system/ly-route-vpp-apply.service" 'VPP apply service command'
+  grep -q '/usr/lib/ly-route/vpp-apply-default' "$tmp/etc/systemd/system/ly-route-vpp-apply.service"
+  grep -q '^PartOf=vpp.service$' "$tmp/etc/systemd/system/ly-route-vpp-apply.service"
+  grep -q '^Restart=on-failure$' "$tmp/etc/systemd/system/ly-route-vpp-apply.service"
 fi
 if [ -f "$tmp/etc/nginx/conf.d/ly-route-admin.conf" ]; then
   grep -q 'root /opt/ly-route/admin' "$tmp/etc/nginx/conf.d/ly-route-admin.conf"
@@ -136,7 +109,7 @@ if [ -f "$tmp/etc/nginx/conf.d/ly-route-admin.conf" ]; then
   grep -q 'proxy_pass http://127.0.0.1:8080/api/v1/' "$tmp/etc/nginx/conf.d/ly-route-admin.conf"
 fi
 if [ -f "$tmp/opt/ly-route/admin/index.html" ]; then
-  grep -q 'Ly Route' "$tmp/opt/ly-route/admin/index.html"
+  grep -q 'Ly Route 管理控制台' "$tmp/opt/ly-route/admin/index.html"
   if grep -q 'mock-api.js' "$tmp/opt/ly-route/admin/index.html"; then
     echo "production admin UI must not load mock-api.js" >&2
     exit 1

@@ -69,6 +69,9 @@ func (controller FilesystemController) Readback(ctx context.Context, request Evi
 				return apply.Readback{}, fmt.Errorf("%s artifact %s hash mismatch: %w", service, artifact.Path, apply.ErrIncompleteEvidence)
 			}
 		}
+		if artifactsArePersistOnly(artifacts) {
+			continue
+		}
 		if controller.Runner == nil {
 			return apply.Readback{}, fmt.Errorf("%s readback runner is missing: %w", service, apply.ErrIncompleteEvidence)
 		}
@@ -104,12 +107,17 @@ func (controller FilesystemController) validateRecords(artifacts []RenderedArtif
 	return appliedAt, nil
 }
 
-func (controller FilesystemController) saveApplyRecord(service ServiceName, artifacts []RenderedArtifact) error {
+func (controller FilesystemController) saveApplyRecord(service ServiceName, artifacts []RenderedArtifact, transactionID string) error {
 	hashes := make(map[string]string, len(artifacts))
 	for _, artifact := range artifacts {
 		hashes[artifact.Path] = artifact.ContentHash
 	}
-	payload, err := json.Marshal(serviceApplyRecord{Service: service, AppliedAt: controller.now(), Artifacts: hashes})
+	payload, err := json.Marshal(serviceApplyRecord{
+		Service:       service,
+		TransactionID: strings.TrimSpace(transactionID),
+		AppliedAt:     controller.now(),
+		Artifacts:     hashes,
+	})
 	if err != nil {
 		return err
 	}
@@ -124,6 +132,9 @@ func (controller FilesystemController) bindTransaction(transactionID string, art
 		}
 		if record.TransactionID != "" && record.TransactionID != transactionID {
 			return fmt.Errorf("%s apply record belongs to transaction %q: %w", service, record.TransactionID, apply.ErrIncompleteEvidence)
+		}
+		if record.TransactionID == transactionID {
+			continue
 		}
 		record.TransactionID = transactionID
 		payload, err := json.Marshal(record)

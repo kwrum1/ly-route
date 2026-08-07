@@ -179,8 +179,8 @@
 
   function roleLabel(item) {
     if (!item) return "未配置";
-    if (item.port) return `单口 ${item.port}`;
-    return `${item.bond?.name || "链路聚合"} · ${(item.bond?.members || []).join(" + ")}`;
+    if (item.port) return item.port;
+    return (item.bond?.members || []).join(" ") || "链路聚合";
   }
 
   function configured(topology) {
@@ -202,7 +202,13 @@
   function roleCandidates(inventory, topology, role) {
     const owned = ownedPorts(topology, role, "");
     const current = new Set(rolePorts(roleInterface(topology, role)));
+    const physical = (item) => {
+      const name = String(item.name || item.id || "");
+      return item.type !== "bond" && item.kind !== "bond" && !item.bond && !Array.isArray(item.members)
+        && !name.startsWith("bond-") && !name.startsWith("聚合");
+    };
     return inventory.filter((item) => {
+      if (!physical(item)) return false;
       const sharedManagementLAN = role === "lan" && topology.management_shared === true && item.name === topology.management_interface;
       return (item.name !== topology.management_interface || sharedManagementLAN) && (sharedManagementLAN || !owned.has(item.name) || current.has(item.name));
     });
@@ -211,7 +217,12 @@
   function groupCandidates(inventory, topology, groupName = "") {
     const owned = ownedPorts(topology, "", groupName);
     const current = new Set((topology.orchestration_groups.find((group) => group.name === groupName)?.ports || []).map((port) => port.interface));
-    return inventory.filter((item) => item.name !== topology.management_interface && (!owned.has(item.name) || current.has(item.name)));
+    return inventory.filter((item) => {
+      const name = String(item.name || item.id || "");
+      const physical = item.type !== "bond" && item.kind !== "bond" && !item.bond && !Array.isArray(item.members)
+        && !name.startsWith("bond-") && !name.startsWith("聚合");
+      return physical && item.name !== topology.management_interface && (!owned.has(item.name) || current.has(item.name));
+    });
   }
 
   function replaceRole(topology, nextRole) {
@@ -355,7 +366,6 @@
       return `<form class="orchestrator-form" data-role-form data-role="${role}">
         <label><span>连接方式</span><select aria-label="连接方式" data-role-kind><option value="port" ${kind === "port" ? "selected" : ""}>单物理端口</option><option value="bond" ${kind === "bond" ? "selected" : ""}>LAN/WAN 链路聚合</option></select></label>
         <label data-port-field><span>物理网卡</span><select aria-label="物理网卡" data-role-port>${portOptions}</select></label>
-        <label data-bond-field><span>聚合名称</span><input aria-label="聚合名称" data-bond-name value="${safeText(current?.bond?.name || `bond-${role}`)}" pattern="[A-Za-z0-9._:\\-]{1,63}" required></label>
         <fieldset data-bond-field><legend>聚合成员（至少两个）</legend><div class="orchestrator-port-grid">${members}</div></fieldset>
       </form>`;
     }
@@ -371,6 +381,9 @@
           field.hidden = !usesBond;
           field.querySelectorAll("input, select, textarea").forEach((control) => { control.disabled = !usesBond; });
         });
+        if (!usesBond && !portField.querySelector("[data-role-port] option:checked")) {
+          portField.querySelector("[data-role-port]")?.options[0] && (portField.querySelector("[data-role-port]").selectedIndex = 0);
+        }
       };
       kind.addEventListener("change", sync);
       sync();
@@ -395,16 +408,21 @@
               state.notice = { tone: "error", text: "链路聚合至少需要两个成员端口" };
               return false;
             }
-            nextRole.bond = { name: form.querySelector("[data-bond-name]").value.trim(), members };
+            nextRole.bond = { name: `bond-${role}`, members };
           }
           state.draft = model.replaceRole(topologyForDraft(), nextRole);
-          state.notice = { tone: "pending", text: `${role.toUpperCase()} 草稿已更新，尚未写入 API` };
-          state.stale = false;
-          render();
-          return true;
+          return save();
         },
       });
-      syncRoleForm(document.getElementById("modalBody"));
+      const roleBody = document.getElementById("modalBody");
+      const roleKind = roleBody.querySelector("[data-role-kind]");
+      if (roleKind) {
+        const portOption = roleKind.querySelector('option[value="port"]');
+        const bondOption = roleKind.querySelector('option[value="bond"]');
+        if (portOption) portOption.textContent = "单物理口";
+        if (bondOption) bondOption.textContent = "链路聚合";
+      }
+      syncRoleForm(roleBody);
     }
 
     function topologyForDraft() {
@@ -454,12 +472,21 @@
       const lan = model.roleInterface(topology, "lan");
       const wan = model.roleInterface(topology, "wan");
       const owners = model.ownedPorts(topology);
-      const rows = state.inventory.map((item) => {
+      const bondMembers = new Set([...(lan?.bond?.members || []), ...(wan?.bond?.members || [])]);
+      const rows = state.inventory.filter((item) => !bondMembers.has(item.name)).map((item) => {
         const managementPort = item.name === management;
         const health = item.link_state === "down" ? "链路断开" : "链路正常";
         const sharedLAN = managementPort && topology.management_shared === true && model.rolePorts(lan).includes(item.name);
         const owner = sharedLAN ? "LAN + 管理共享" : managementPort ? "管理专用" : model.rolePorts(lan).includes(item.name) ? "LAN" : model.rolePorts(wan).includes(item.name) ? "WAN" : owners.has(item.name) ? "编排组" : "可用";
         return `<tr><td><strong>${safeText(item.name)}</strong></td><td><span class="orchestrator-health ${item.link_state === "down" ? "is-down" : "is-up"}">${health}</span></td><td>${safeText(item.speed_mbps || "未知")} Mbps</td><td>${safeText(item.driver || "未报告")}</td><td>${owner}</td></tr>`;
+      }).join("");
+      const bondRows = [lan, wan].filter((item) => item?.bond).map((item) => {
+        const members = item.bond.members || [];
+        const memberItems = members.map((name) => state.inventory.find((entry) => entry.name === name)).filter(Boolean);
+        const down = memberItems.some((entry) => entry.link_state === "down");
+        const speed = memberItems.reduce((sum, entry) => sum + Number(entry.speed_mbps || 0), 0);
+        const roleLabel = item.role === "lan" ? "聚合 LAN" : "聚合 WAN";
+        return `<tr><td><strong>${roleLabel}</strong><small>${safeText(members.join(" "))}</small></td><td><span class="orchestrator-health ${down ? "is-down" : "is-up"}">${down ? "链路断开" : "链路正常"}</span></td><td>${speed ? `${speed} Mbps` : "未知"}</td><td>bond</td><td>${item.role.toUpperCase()}</td></tr>`;
       }).join("");
       return `<section class="page-body list-page orchestrator-settings">
         ${state.renderNotice()}
@@ -468,8 +495,7 @@
           <div><span>LAN</span><strong>${safeText(model.roleLabel(lan))}</strong><button type="button" data-configure-role="lan">配置 LAN</button></div>
           <div><span>WAN</span><strong>${safeText(model.roleLabel(wan))}</strong><button type="button" data-configure-role="wan">配置 WAN</button></div>
         </section>
-        <div class="orchestrator-toolbar"><div><strong>物理网卡库存</strong><span>${state.inventory.length} 个端口 · ${topology.management_shared ? "管理口仅可复用为 LAN" : "管理口不可分配"}</span></div><button class="primary" type="button" data-save-nics ${state.busy || !model.configured(topology) ? "disabled" : ""}>保存网卡设置</button></div>
-        <div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>接口</th><th>链路健康</th><th>速率</th><th>驱动</th><th>所有权</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>接口</th><th>链路健康</th><th>速率</th><th>驱动</th><th>所有权</th></tr></thead><tbody>${rows}${bondRows}</tbody></table></div>
       </section>`;
     }
 
@@ -498,7 +524,7 @@
       const options = (selected) => candidates.map((item) => `<option value="${item.name}" ${item.name === selected ? "selected" : ""}>${item.name} · ${item.link_state === "down" ? "链路断开" : "链路正常"}</option>`).join("");
       return `<form class="orchestrator-form pa-config-form" data-group-form data-original-name="${safeText(group?.name || "")}">
         <section class="pa-form-section"><h3>基本设置</h3><div class="pa-form-rows">
-          <label data-required><span>组名称</span><input aria-label="组名称" data-group-name value="${safeText(group?.name || "")}" pattern="[A-Za-z0-9._:\\-]{1,63}" ${group ? "readonly" : ""} required></label>
+          <label data-required><span>组名称</span><input aria-label="组名称" data-group-name value="${safeText(group?.name || "")}" maxlength="63" ${group ? "readonly" : ""} required></label>
         </div></section>
         <section class="pa-form-section"><h3>接口方向</h3><div class="pa-form-rows">
           <label data-required><span>WAN 侧端口</span><select aria-label="WAN 侧端口" data-group-wan required>${options(wanPort)}</select></label>
@@ -518,6 +544,10 @@
           const name = form.querySelector("[data-group-name]").value.trim();
           const lanPort = form.querySelector("[data-group-lan]").value;
           const wanPort = form.querySelector("[data-group-wan]").value;
+          if (!name || [...name].length > 63) {
+            state.notice = { tone: "error", text: "组名称不能为空，且不能超过 63 个字符" };
+            return false;
+          }
           if (lanPort === wanPort) {
             state.notice = { tone: "error", text: "LAN 侧和 WAN 侧必须使用不同端口" };
             return false;
@@ -642,24 +672,35 @@
       return `<textarea readonly rows="3" data-policy-condition-summary="${prefix}" data-condition-label="${label}" data-condition-values="[]" aria-label="编辑${label}" placeholder="任意"></textarea>`;
     }
 
-    function policyForm(selectedGroup = "") {
+    function policyConditionValues(rule, key) {
+      const references = rule?.match?.[key] || [];
+      const policy = currentPolicy();
+      return references.flatMap((reference) => {
+        if (reference === "any") return [];
+        if ((state.ipGroups?.items || []).some((item) => item.id === reference)) return [reference];
+        const object = (policy.ip_objects || []).find((item) => item.id === reference);
+        return object?.prefixes?.length ? object.prefixes : [reference];
+      });
+    }
+
+    function policyForm(selectedGroup = "", rule = null) {
       const groups = state.topology?.orchestration_groups || [];
-      const options = groups.map((group) => `<option value="${safeText(group.name)}">${safeText(group.name)}</option>`).join("");
-      const groupSelector = groups.length
-        ? `<label data-required><span>策略组</span><select data-policy-group ${selectedGroup ? "disabled" : ""}>${groups.map((group) => `<option value="${safeText(group.name)}" ${group.name === selectedGroup ? "selected" : ""}>${safeText(group.name)}</option>`).join("")}</select></label>`
-        : `<label data-required><span>策略组</span><input data-policy-group required maxlength="63"></label><label data-required><span>组优先级</span><input data-policy-position type="number" min="1" step="1" value="10" required></label>`;
+      const selectedTarget = rule?.action?.group || "";
+      const options = groups.map((group) => `<option value="${safeText(group.name)}" ${group.name === selectedTarget ? "selected" : ""}>${safeText(group.name)}</option>`).join("");
+      const sourceValues = policyConditionValues(rule, "sources");
+      const destinationValues = policyConditionValues(rule, "destinations");
       return `<form class="orchestrator-form pa-config-form" data-policy-form>
-        <section class="pa-form-section"><h3>基本设置</h3><div class="pa-form-rows">${groupSelector}
-          <label data-required><span>策略序号</span><input data-policy-sequence type="number" min="1" step="1" value="10" required></label>
-          <label data-required><span>明细名称</span><input data-policy-rule required maxlength="63"></label>
+        <input type="hidden" data-policy-group value="${safeText(selectedGroup)}">
+        <input type="hidden" data-policy-rule value="${safeText(rule?.id || "")}">
+        <section class="pa-form-section"><h3>基本设置</h3><div class="pa-form-rows">
+          <label data-required><span>策略序号</span><input data-policy-sequence type="number" min="1" step="1" value="${safeText(rule?.sequence || 10)}" required></label>
         </div></section>
-        <section class="pa-form-section"><h3>匹配条件</h3><div class="pa-form-rows"><label><span>源 / 目的地址</span><span class="pa-address-summary-pair">${conditionSummary("source", "源地址")}<em>/</em>${conditionSummary("destination", "目的地址")}</span></label>
-          <label><span>源 / 目的端口</span><span class="pa-port-pair"><input data-policy-source-port placeholder="0"><em>/</em><input data-policy-destination-port placeholder="0"></span></label>
-          <label><span>协议</span><select data-policy-protocol><option value="any">Any</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option><option value="icmpv6">ICMPv6</option></select></label>
+        <section class="pa-form-section"><h3>匹配条件</h3><div class="pa-form-rows"><label><span>源 / 目的地址</span><span class="pa-address-summary-pair"><textarea readonly rows="3" data-policy-condition-summary="source" data-condition-label="源地址" data-condition-values='${safeText(JSON.stringify(sourceValues))}' aria-label="编辑源地址" placeholder="任意">${safeText(sourceValues.join("\n"))}</textarea><em>/</em><textarea readonly rows="3" data-policy-condition-summary="destination" data-condition-label="目的地址" data-condition-values='${safeText(JSON.stringify(destinationValues))}' aria-label="编辑目的地址" placeholder="任意">${safeText(destinationValues.join("\n"))}</textarea></span></label>
+          <label><span>源 / 目的端口</span><span class="pa-port-pair"><input data-policy-source-port value="${safeText((rule?.match?.source_ports || []).join(","))}" placeholder="0"><em>/</em><input data-policy-destination-port value="${safeText((rule?.match?.dest_ports || []).join(","))}" placeholder="0"></span></label>
+          <label><span>协议</span><select data-policy-protocol>${["any", "tcp", "udp", "icmp", "icmpv6"].map((protocol) => `<option value="${protocol}" ${protocol === (rule?.match?.protocol || "any") ? "selected" : ""}>${protocol === "any" ? "Any" : protocol.toUpperCase()}</option>`).join("")}</select></label>
         </div></section>
         <section class="pa-form-section"><h3>执行动作</h3><div class="pa-form-rows">
-          <label data-required><span>流量路径</span><select data-policy-action><option value="via">经过编排组</option><option value="direct">直接转发</option><option value="drop">丢弃</option></select></label>
-          <label data-policy-group-target><span>目标编排组</span><select data-policy-target>${options}</select></label>
+          <label data-required><span>流量路径</span><select data-policy-target required><option value="">请选择编排组</option>${options}</select></label>
         </div></section>
       </form>`;
     }
@@ -669,7 +710,6 @@
       return `<form class="orchestrator-form pa-config-form" data-policy-group-form>
         <section class="pa-form-section"><h3>策略组设置</h3><div class="pa-form-rows">
           <label data-required><span>策略组名称</span><input data-policy-group-name required maxlength="63"></label>
-          <label data-required><span>优先级</span><input data-policy-group-position type="number" min="1" step="1" value="${nextPosition}" required><small>数值越小越优先</small></label>
         </div></section>
       </form>`;
     }
@@ -734,53 +774,42 @@
       const form = body.querySelector("[data-policy-form]");
       if (!form) return;
       form.querySelectorAll("[data-policy-condition-summary]").forEach((summary) => summary.addEventListener("click", () => openConditionDialog(summary)));
-      const action = form.querySelector("[data-policy-action]");
-      const targetRow = form.querySelector("[data-policy-group-target]");
-      const target = targetRow.querySelector("select");
-      const syncAction = () => {
-        const visible = action.value === "via";
-        targetRow.hidden = !visible;
-        target.disabled = !visible;
-      };
-      action.addEventListener("change", syncAction);
-      syncAction();
     }
 
-    function openCreate(trigger, selectedGroup = "") {
+    function openCreate(trigger, selectedGroup = "", existingRule = null) {
       modal.open({
-        title: selectedGroup ? `新增策略明细 · ${selectedGroup}` : "新增编排策略明细",
-        html: policyForm(selectedGroup),
+        title: existingRule ? `编辑策略明细 · ${selectedGroup}` : `新增策略明细 · ${selectedGroup}`,
+        html: policyForm(selectedGroup, existingRule),
         trigger,
         async onSubmit(body) {
           state.busy = true;
           try {
             const form = body.querySelector("[data-policy-form]");
-            const actionKind = form.querySelector("[data-policy-action]").value;
             const group = form.querySelector("[data-policy-group]").value.trim();
-            const rule = form.querySelector("[data-policy-rule]").value.trim();
-            if (!/^[-A-Za-z0-9._:]{1,63}$/.test(group) || !/^[-A-Za-z0-9._:]{1,63}$/.test(rule)) throw new Error("策略组和明细名称仅允许字母、数字、点、下划线、冒号和连字符");
+            const rule = form.querySelector("[data-policy-rule]").value || `rule-${Date.now()}`;
+            if (!group) throw new Error("当前策略组不能为空");
             const next = JSON.parse(JSON.stringify(currentPolicy()));
             next.schema_version = 1;
             delete next.schema;
             next.ip_objects ||= [];
             let policyGroup = next.policy_groups.find((item) => item.id === group);
             if (!policyGroup) {
-              policyGroup = { id: group, position: Number(form.querySelector("[data-policy-position]")?.value || 10), rules: [] };
+              policyGroup = { id: group, position: ((next.policy_groups || []).length + 1) * 10, rules: [] };
               next.policy_groups.push(policyGroup);
             }
-            const action = { kind: actionKind };
-            if (actionKind === "via") {
-              action.group = form.querySelector("[data-policy-target]").value;
-              if (!action.group) throw new Error("经过编排组时必须选择目标编排组");
-            }
-            policyGroup.rules.push({
+            const action = { kind: "via", group: form.querySelector("[data-policy-target]").value };
+            if (!action.group) throw new Error("请选择目标编排组");
+            const nextRule = {
               id: rule,
               sequence: Number(form.querySelector("[data-policy-sequence]").value),
               match: { sources: addressSelector(form, "source", next, rule), destinations: addressSelector(form, "destination", next, rule), source_ports: splitValues(form.querySelector("[data-policy-source-port]").value), dest_ports: splitValues(form.querySelector("[data-policy-destination-port]").value), protocol: form.querySelector("[data-policy-protocol]").value },
               action,
-            });
+            };
+            const existingIndex = policyGroup.rules.findIndex((item) => item.id === rule);
+            if (existingIndex >= 0) policyGroup.rules[existingIndex] = nextRule;
+            else policyGroup.rules.push(nextRule);
             state.policy = await client.savePolicy(next);
-            state.notice = { tone: "success", text: "编排策略已保存并完成 API 回读" };
+            state.notice = { tone: "success", text: existingRule ? "策略明细已修改并完成 API 回读" : "策略明细已新增并完成 API 回读" };
             return true;
           } catch (error) {
             state.notice = { tone: "error", text: error.message || "编排策略保存失败" };
@@ -803,9 +832,9 @@
         async onSubmit(body) {
           const form = body.querySelector("[data-policy-group-form]");
           const id = form.querySelector("[data-policy-group-name]").value.trim();
-          const position = Number(form.querySelector("[data-policy-group-position]").value);
-          if (!/^[-A-Za-z0-9._:]{1,63}$/.test(id)) {
-            state.notice = { tone: "error", text: "策略组名称仅允许字母、数字、点、下划线、冒号和连字符" };
+          const position = ((currentPolicy().policy_groups || []).length + 1) * 10;
+          if (!id || [...id].length > 63) {
+            state.notice = { tone: "error", text: "策略组名称不能为空，且不能超过 63 个字符" };
             render();
             return false;
           }
@@ -835,8 +864,26 @@
 
     function ruleRow(group, rule) {
       const action = rule.action || {};
-      const actionLabel = ({ via: "经过编排组", direct: "直接转发", drop: "丢弃" })[action.kind] || action.kind;
-      return `<tr><td><strong>${safeText(rule.sequence)}</strong></td><td><strong>${safeText(rule.id)}</strong></td><td>${safeText((rule.match?.sources || ["any"]).join(", "))}</td><td>${safeText((rule.match?.destinations || ["any"]).join(", "))}</td><td>${safeText(rule.match?.protocol || "any")}</td><td>${safeText(actionLabel)}${action.group ? ` · ${safeText(action.group)}` : ""}</td></tr>`;
+      const actionLabel = action.group || group.id;
+      return `<tr><td><strong>${safeText(rule.sequence)}</strong></td><td>${safeText((rule.match?.sources || ["any"]).join(", "))}</td><td>${safeText((rule.match?.destinations || ["any"]).join(", "))}</td><td>${safeText(rule.match?.protocol || "any")}</td><td>${safeText(actionLabel)}</td><td><button class="link-btn" type="button" data-edit-policy-rule="${safeText(rule.id)}" data-policy-rule-group="${safeText(group.id)}">编辑</button><button class="link-btn is-danger" type="button" data-delete-policy-rule="${safeText(rule.id)}" data-policy-rule-group="${safeText(group.id)}">删除</button></td></tr>`;
+    }
+
+    async function deleteRule(groupID, ruleID) {
+      const next = JSON.parse(JSON.stringify(currentPolicy()));
+      const group = (next.policy_groups || []).find((item) => item.id === groupID);
+      if (!group) return;
+      group.rules = (group.rules || []).filter((item) => item.id !== ruleID);
+      next.ip_objects = (next.ip_objects || []).filter((item) => item.id !== `source-${ruleID}` && item.id !== `destination-${ruleID}`);
+      state.busy = true;
+      try {
+        state.policy = await client.savePolicy(next);
+        state.notice = { tone: "success", text: "策略明细已删除并完成 API 回读" };
+      } catch (error) {
+        state.notice = { tone: "error", text: error.message || "策略明细删除失败" };
+      } finally {
+        state.busy = false;
+        render();
+      }
     }
 
     function renderPage() {
@@ -844,10 +891,11 @@
       const groups = [...(policy.policy_groups || [])].sort((left, right) => left.position - right.position);
       const groupCards = groups.map((group, groupIndex) => {
         const rules = (group.rules || []).slice().sort((left, right) => left.sequence - right.sequence);
-        const controls = `${groupIndex > 0 ? `<button class="icon-btn" type="button" data-policy-up="${safeText(group.id)}" aria-label="上移策略组" title="上移策略组">↑</button>` : ""}${groupIndex < groups.length - 1 ? `<button class="icon-btn" type="button" data-policy-down="${safeText(group.id)}" aria-label="下移策略组" title="下移策略组">↓</button>` : ""}`;
-        return `<article class="policy-group-card" draggable="true" data-policy-group-card="${safeText(group.id)}"><header><div class="policy-group-order"><span>优先级</span><strong>${safeText(group.position)}</strong></div><div><h2>${safeText(group.id)}</h2><p>${rules.length} 条策略明细</p></div><div class="policy-group-actions">${controls}<button class="ghost-btn" type="button" data-create-policy-in-group="${safeText(group.id)}">新增明细</button></div></header><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table policy-rule-table"><thead><tr><th>序号</th><th>明细</th><th>源 IP</th><th>目的 IP</th><th>协议</th><th>流量路径</th></tr></thead><tbody>${rules.length ? rules.map((rule) => ruleRow(group, rule)).join("") : '<tr><td colspan="6" class="orchestrator-empty">本组暂无策略明细</td></tr>'}</tbody></table></div></article>`;
+        const collapsed = state.collapsedPolicyGroups.has(group.id);
+        const body = collapsed ? "" : `<div class="policy-group-body"><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table policy-rule-table"><thead><tr><th>序号</th><th>源 IP</th><th>目的 IP</th><th>协议</th><th>流量路径</th><th class="policy-operation-head">操作 <button class="primary policy-table-add-detail" type="button" data-create-policy-in-group="${safeText(group.id)}">新增明细</button></th></tr></thead><tbody>${rules.length ? rules.map((rule) => ruleRow(group, rule)).join("") : '<tr><td colspan="6" class="orchestrator-empty">暂无策略明细</td></tr>'}</tbody></table></div></div>`;
+        return `<article class="policy-group-card ${collapsed ? "is-collapsed" : ""}" data-policy-group-card="${safeText(group.id)}"><header class="policy-group-bar" draggable="true" data-policy-group-drag="${safeText(group.id)}"><strong class="policy-group-name">${safeText(group.id)}</strong><button class="policy-group-toggle" type="button" data-toggle-policy-group="${safeText(group.id)}" aria-expanded="${collapsed ? "false" : "true"}" aria-label="${collapsed ? "展开" : "折叠"} ${safeText(group.id)}">${collapsed ? "v" : "^"}</button></header>${body}</article>`;
       }).join("");
-      return `<section class="page-body list-page"><section class="list-content policy-workbench">${state.renderNotice()}<div class="orchestrator-toolbar pa-list-toolbar"><div><strong>策略组</strong><span>共 ${groups.length} 组</span></div><div><button class="ghost-btn" type="button" data-create-policy ${state.busy || !modelConfigured() ? "disabled" : ""}>新增明细</button><button class="primary" type="button" data-create-policy-group ${state.busy || !modelConfigured() ? "disabled" : ""}>新增策略组</button></div></div>${modelConfigured() ? `<section class="policy-default-path"><strong>缺省规则</strong><span>未命中任何策略</span><b>${safeText(policy.default?.kind || "direct") === "direct" ? "转发到 LAN" : safeText(policy.default?.kind || "direct")}</b></section><div class="policy-group-list" data-policy-group-list>${groupCards || '<p class="orchestrator-empty">暂无策略组</p>'}</div>` : '<div class="orchestrator-gate" role="status"><strong>请先完成网卡设置</strong><span>配置 LAN/WAN 后可创建编排策略。</span></div>'}</section></section>`;
+      return `<section class="page-body list-page"><section class="list-content policy-workbench">${modelConfigured() ? `<div class="policy-group-list" data-policy-group-list>${groupCards || '<p class="orchestrator-empty">暂无策略组</p>'}</div>` : '<div class="orchestrator-gate" role="status"><strong>请先完成网卡设置</strong><span>配置 LAN/WAN 后可创建编排策略。</span></div>'}</section></section>`;
     }
 
     function modelConfigured() {
@@ -888,9 +936,24 @@
 
     async function handle(target) {
       if (target.closest("[data-create-policy-group]")) return openCreateGroup(target.closest("[data-create-policy-group]"));
+      const toggle = target.closest("[data-toggle-policy-group]");
+      if (toggle) {
+        const id = toggle.dataset.togglePolicyGroup;
+        if (state.collapsedPolicyGroups.has(id)) state.collapsedPolicyGroups.delete(id);
+        else state.collapsedPolicyGroups.add(id);
+        return render();
+      }
       const inGroup = target.closest("[data-create-policy-in-group]");
       if (inGroup) return openCreate(inGroup, inGroup.dataset.createPolicyInGroup);
-      if (target.closest("[data-create-policy]")) return openCreate(target);
+      const editRule = target.closest("[data-edit-policy-rule]");
+      if (editRule) {
+        const groupID = editRule.dataset.policyRuleGroup;
+        const group = (currentPolicy().policy_groups || []).find((item) => item.id === groupID);
+        const rule = (group?.rules || []).find((item) => item.id === editRule.dataset.editPolicyRule);
+        if (group && rule) return openCreate(editRule, groupID, rule);
+      }
+      const deletePolicyRule = target.closest("[data-delete-policy-rule]");
+      if (deletePolicyRule) return deleteRule(deletePolicyRule.dataset.policyRuleGroup, deletePolicyRule.dataset.deletePolicyRule);
       const up = target.closest("[data-policy-up]");
       if (up) return moveGroup(up.dataset.policyUp, -1);
       const down = target.closest("[data-policy-down]");
@@ -945,13 +1008,56 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
     error: "",
     stale: false,
     busy: false,
+    collapsedPolicyGroups: new Set(),
     renderNotice() {
       return "";
     },
   };
   let shell;
   let activePage = "dashboard/overview";
-  const render = () => shell.render();
+  function updateTablePager(pager, page) {
+    const wrap = pager.previousElementSibling;
+    const table = wrap?.querySelector("table");
+    if (!table) return;
+    const rows = [...(table.tBodies[0]?.rows || [])];
+    const pageSize = 10;
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const current = Math.min(Math.max(1, Number(page) || 1), totalPages);
+    rows.forEach((row, index) => { row.hidden = index < (current - 1) * pageSize || index >= current * pageSize; });
+    pager.dataset.page = String(current);
+    pager.querySelector("[data-pager-page]").textContent = String(current);
+    pager.querySelector("[data-pager-prev]").disabled = current <= 1;
+    pager.querySelector("[data-pager-next]").disabled = current >= totalPages;
+  }
+
+  function enhanceTablePagers() {
+    document.querySelectorAll(".orchestrator-table-wrap").forEach((wrap) => {
+      if (wrap.nextElementSibling?.matches(".table-pager")) return;
+      const table = wrap.querySelector("table");
+      if (!table) return;
+      const body = table.tBodies[0];
+      const columnCount = table.tHead?.rows[0]?.cells.length || 1;
+      if (body) {
+        while (body.rows.length < 10) {
+          const row = document.createElement("tr");
+          row.className = "telemetry-placeholder";
+          const cell = document.createElement("td");
+          cell.colSpan = columnCount;
+          row.appendChild(cell);
+          body.appendChild(row);
+        }
+      }
+      const pager = document.createElement("div");
+      pager.className = "table-pager";
+      pager.innerHTML = '<button type="button" data-pager-prev>&#19978;&#19968;&#39029;</button><span data-pager-page>1</span><button type="button" data-pager-next>&#19979;&#19968;&#39029;</button>';
+      wrap.after(pager);
+      updateTablePager(pager, 1);
+    });
+  }
+
+  document.addEventListener("lyroute:rendered", enhanceTablePagers);
+
+  const render = () => { shell.render(); enhanceTablePagers(); };
   const nic = window.LyRouteOrchestratorNIC.createNICController({ client, modal, safeText, state, render });
   const groups = window.LyRouteOrchestratorGroups.createGroupController({ client, modal, safeText, state, render });
   const policy = window.LyRouteOrchestratorPolicy.createPolicyController({ client, modal, safeText, state, render });
@@ -959,6 +1065,62 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
   function capabilitiesText() {
     const names = (state.capabilities?.items || []).filter((item) => item.available !== false).map((item) => item.name);
     return names.join(" · ") || "未报告能力";
+  }
+
+  function formatMegabytes(value) {
+    const bytes = Number(value) || 0;
+    if (bytes === 0) return "0 M";
+    const megabytes = bytes / 1024 / 1024;
+    return `${megabytes >= 100 ? megabytes.toFixed(0) : megabytes.toFixed(2)} M`;
+  }
+
+  function formatTrafficRate(value) {
+    if (value === undefined || value === null || value === "") return "-";
+    const mbps = Number(value) * 8 / 1000000;
+    return `${mbps >= 100 ? mbps.toFixed(0) : mbps.toFixed(2)} Mbps`;
+  }
+
+  function groupStateText(group) {
+    if (group.bypass) return "旁路";
+    if (group.state === "running" || group.state === "healthy") return "正常";
+    if (group.state === "degraded") return "受限";
+    return "等待回读";
+  }
+
+  const telemetryLabels = {
+    ip: "IP地址",
+    ip_address: "IP地址",
+    address: "IP地址",
+    mac: "MAC地址",
+    mac_address: "MAC地址",
+    interface: "接口",
+    interface_id: "接口",
+    protocol: "协议",
+    source: "源地址",
+    source_ip: "源IP",
+    destination: "目的地址",
+    destination_ip: "目的IP",
+    source_port: "源端口",
+    destination_port: "目的端口",
+    bytes: "流量",
+    packets: "数据包",
+    state: "状态",
+    duration: "持续时间",
+    last_seen: "最近活动",
+    policy: "编排策略",
+    group: "编排组",
+  };
+
+  function telemetryLabel(key) {
+    return telemetryLabels[key] || key;
+  }
+
+  function telemetryValue(key, value) {
+    if (value === undefined || value === null || value === "") return "-";
+    if (["bytes", "rx_bytes", "tx_bytes", "wan_to_lan_bytes", "lan_to_wan_bytes"].includes(key)) return formatMegabytes(value);
+    if (typeof value === "boolean") return value ? "是" : "否";
+    if (typeof value === "object") return JSON.stringify(value);
+    return String(value);
   }
 
   function overview() {
@@ -974,11 +1136,12 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
     const stat = (label, value, note, toneClass = "") => `<article class="orch-stat ${toneClass}"><span>${label}</span><strong>${safeText(value)}</strong><small>${safeText(note)}</small></article>`;
     const groupRows = groups.map((group) => {
       const live = flowGroups.find((item) => item.name === group.name) || {};
-      const statusText = live.bypass ? "旁路" : live.state || "等待回读";
+      const statusText = groupStateText(live);
       const statusClass = live.bypass ? "status warn" : live.state === "running" || live.state === "healthy" ? "status ok" : "status";
-      return `<tr><td><strong>${safeText(group.name)}</strong></td><td>${safeText(group.ports?.map((port) => port.interface).join(" ↔ ") || "-")}</td><td><span class="${statusClass}">${safeText(statusText)}</span></td><td>${safeText(live.wan_to_lan?.bytes || 0)}</td><td>${safeText(live.lan_to_wan?.bytes || 0)}</td></tr>`;
+      return `<tr><td><strong>${safeText(group.name)}</strong></td><td>${safeText(group.ports?.map((port) => port.interface).join(" ↔ ") || "-")}</td><td><span class="${statusClass}">${safeText(statusText)}</span></td><td>${safeText(formatMegabytes(live.wan_to_lan?.bytes))}</td><td>${safeText(formatMegabytes(live.lan_to_wan?.bytes))}</td></tr>`;
     }).join("");
-    return `<section class="page-body orch-overview-page"><section class="orch-stat-grid">${stat("逻辑 LAN", boundary(lan), "接口")}${stat("逻辑 WAN", boundary(wan), "接口")}${stat("编排组", groups.length, "已创建")}${stat("旁路线路", bypassed, "线路")}</section><section class="orch-overview-grid"><section class="orch-panel"><header><div><h2>编排组运行状态</h2><p>按线路查看流量和连接状态。</p></div><button class="ghost-btn" type="button" data-open-page="telemetry/flow-summary">查看流量</button></header><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>编排组</th><th>方向接口</th><th>状态</th><th>WAN→LAN 字节</th><th>LAN→WAN 字节</th></tr></thead><tbody>${groupRows || '<tr><td colspan="5" class="orchestrator-empty">暂无编排组</td></tr>'}</tbody></table></div></section><aside class="orch-panel orch-boundary-panel"><header><div><h2>流量路径</h2><p>当前路由器的默认转发关系。</p></div></header><dl><div><dt>入口</dt><dd>WAN</dd></div><div><dt>出口</dt><dd>LAN</dd></div><div><dt>未命中策略</dt><dd>转发到 LAN</dd></div><div><dt>线路故障</dt><dd>自动旁路</dd></div></dl></aside></section></section>`;
+    const groupPlaceholders = Array.from({ length: Math.max(0, 10 - Math.max(1, groups.length)) }, () => '<tr class="telemetry-placeholder"><td colspan="5"></td></tr>').join("");
+    return `<section class="page-body orch-overview-page"><section class="orch-stat-grid">${stat("逻辑 LAN", boundary(lan), "接口")}${stat("逻辑 WAN", boundary(wan), "接口")}${stat("编排组", groups.length, "已创建")}${stat("旁路线路", bypassed, "线路")}</section><section class="orch-overview-grid"><section class="orch-panel orch-status-panel"><header><div><h2>编排组运行状态</h2><p>按线路查看流量和连接状态。</p></div><button class="ghost-btn" type="button" data-open-page="telemetry/flow-summary">查看流量</button></header><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>编排组</th><th>方向接口</th><th>状态</th><th>WAN→LAN 流量</th><th>LAN→WAN 流量</th></tr></thead><tbody>${groupRows || '<tr><td colspan="5" class="orchestrator-empty">暂无编排组</td></tr>'}${groupPlaceholders}</tbody></table></div></section><aside class="orch-panel orch-boundary-panel"><header><div><h2>流量路径</h2><p>当前路由器的默认转发关系。</p></div></header><div class="orch-path-flow"><span>WAN</span><b>→</b><span>编排组</span><b>→</b><span>LAN</span></div><dl><div><dt>入口接口</dt><dd>WAN</dd></div><div><dt>策略命中</dt><dd>按组和序号</dd></div><div><dt>未命中策略</dt><dd>转发到 LAN</dd></div><div><dt>线路故障</dt><dd>自动旁路</dd></div></dl></aside></section></section>`;
   }
 
   function placeholder(page) {
@@ -1024,7 +1187,7 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
 
   function ipGroupsPage() {
     const rows = (state.ipGroups?.items || []).map((item) => `<tr><td data-label="名称"><strong>${safeText(item.name || item.id)}</strong></td><td data-label="地址成员">${safeText((item.entries || item.members || []).join(", ") || "-")}</td><td data-label="成员数">${safeText((item.entries || item.members || []).length)}</td><td data-label="操作"><button class="icon-btn" type="button" data-edit-ip-group="${safeText(item.id)}" aria-label="编辑 ${safeText(item.name || item.id)}">编辑</button><button class="icon-btn danger" type="button" data-delete-ip-group="${safeText(item.id)}" aria-label="删除 ${safeText(item.name || item.id)}">删除</button></td></tr>`).join("");
-    return `<section class="page-body list-page"><section class="list-content">${state.renderNotice()}<div class="orchestrator-toolbar"><div><strong>IP 地址组</strong><span>可用于流量编排、限速和安全策略</span></div><div><button class="ghost-btn" type="button" data-export-ip-groups>导出</button><button class="ghost-btn" type="button" data-import-ip-groups>批量导入</button><button class="primary" type="button" data-add-ip-group>新增 IP 组</button></div></div><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>名称</th><th>地址成员</th><th>成员数</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="orchestrator-empty">暂无 IP 地址组</td></tr>'}</tbody></table></div></section></section>`;
+    return `<section class="page-body list-page"><section class="list-content">${state.renderNotice()}<div class="orchestrator-toolbar"><div><strong>IP 地址组</strong><span>可用于流量编排、限速和安全策略</span></div><div><button class="ghost-btn" type="button" data-export-ip-groups>导出</button><button class="primary" type="button" data-import-ip-groups>新增IP</button></div></div><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>名称</th><th>地址成员</th><th>成员数</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="orchestrator-empty">暂无 IP 地址组</td></tr>'}</tbody></table></div></section></section>`;
   }
 
   function securityPage() {
@@ -1062,19 +1225,21 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
     const rows = groups.flatMap((group) => (group.rules || []).slice().sort((left, right) => left.sequence - right.sequence).map((rule) => {
       const match = rule.match || {};
       const action = rule.action || {};
-      return `<tr><td data-label="策略组"><strong>${safeText(group.id)}</strong><small>组优先级 ${safeText(group.position)}</small></td><td data-label="序号">${safeText(rule.sequence)}</td><td data-label="源IP">${safeText((match.sources || []).join(", "))}</td><td data-label="目的IP">${safeText((match.destinations || []).join(", "))}</td><td data-label="协议">${safeText(match.protocol || "any")}</td><td data-label="流量路径">${safeText(action.kind || "")}${action.group ? ` · ${safeText(action.group)}` : ""}</td></tr>`;
+      const path = action.group || group.id;
+      return `<tr><td data-label="策略组"><strong>${safeText(group.id)}</strong><small>组优先级 ${safeText(group.position)}</small></td><td data-label="序号">${safeText(rule.sequence)}</td><td data-label="源IP">${safeText((match.sources || []).join(", "))}</td><td data-label="目的IP">${safeText((match.destinations || []).join(", "))}</td><td data-label="协议">${safeText(match.protocol || "any")}</td><td data-label="流量路径">${safeText(path)}</td></tr>`;
     })).join("");
     return `<section class="page-body list-page"><section class="list-content"><div class="orchestrator-toolbar"><div><strong>流量编排策略</strong><span>组按位置优先，组内按序号优先；未命中默认转发到 LAN</span></div></div><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>策略组</th><th>序号</th><th>源IP</th><th>目的IP</th><th>协议</th><th>流量路径</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="orchestrator-empty">暂无策略明细</td></tr>'}</tbody></table></div><div class="orchestrator-form-note">默认动作：${safeText(policy.default?.kind || "未配置")}</div></section></section>`;
   }
 
   function telemetryPage(title, payload, itemKey) {
     const items = Array.isArray(payload?.[itemKey]) ? payload[itemKey] : Array.isArray(payload?.items) ? payload.items : Array.isArray(payload) ? payload : [];
-    const columns = items.length ? Object.keys(items[0]).filter((key) => key !== "runtime_state") : [];
-    const rows = items.map((item) => `<tr>${columns.map((key) => `<td data-label="${safeText(key)}">${safeText(typeof item[key] === "object" ? JSON.stringify(item[key]) : item[key])}</td>`).join("")}</tr>`).join("");
+    const defaultColumns = title === "在线用户" ? ["ip_address", "mac_address", "interface", "last_seen"] : ["source_ip", "destination_ip", "protocol", "destination_port", "bytes"];
+    const columns = items.length ? Object.keys(items[0]).filter((key) => key !== "runtime_state" && key !== "state") : defaultColumns;
+    const rows = items.map((item) => `<tr>${columns.map((key) => `<td data-label="${safeText(telemetryLabel(key))}">${safeText(telemetryValue(key, item[key]))}</td>`).join("")}</tr>`).join("");
     const colspan = Math.max(columns.length, 1);
     const firstRow = rows || `<tr class="orchestrator-empty"><td colspan="${colspan}">暂无可用数据</td></tr>`;
     const placeholders = Array.from({ length: Math.max(0, 10 - Math.max(1, items.length)) }, () => `<tr class="telemetry-placeholder"><td colspan="${colspan}"></td></tr>`).join("");
-    return `<section class="page-body list-page"><section class="list-content telemetry-list"><div class="orchestrator-toolbar"><div><strong>${safeText(title)}</strong><span>${safeText(payload?.degraded_reason || payload?.runtime_state || "等待运行时数据")}</span></div></div><div class="orchestrator-table-wrap telemetry-table-wrap"><table class="data-table orchestrator-table telemetry-table"><thead><tr>${columns.map((key) => `<th>${safeText(key)}</th>`).join("")}</tr></thead><tbody>${firstRow}${placeholders}</tbody></table></div></section></section>`;
+    return `<section class="page-body list-page"><section class="list-content telemetry-list"><div class="orchestrator-toolbar"><div><strong>${safeText(title)}</strong><span>当前网络活动</span></div></div><div class="orchestrator-table-wrap telemetry-table-wrap"><table class="data-table orchestrator-table telemetry-table"><thead><tr>${columns.map((key) => `<th>${safeText(telemetryLabel(key))}</th>`).join("")}</tr></thead><tbody>${firstRow}${placeholders}</tbody></table></div></section></section>`;
   }
 
   function flowSummaryPage() {
@@ -1082,21 +1247,24 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
     const rows = (payload.orchestration_groups || []).map((group) => {
       const wanToLan = group.wan_to_lan || {};
       const lanToWan = group.lan_to_wan || {};
-      const rate = (value) => value === undefined || value === null ? "-" : `${(Number(value) * 8 / 1000000).toFixed(3)} Mbps`;
-      const status = group.bypass ? `旁路 · ${Number(group.bypass_packets || 0)} 包` : (group.state === "running" || group.state === "healthy" ? "正常" : "-" );
-      return `<tr><td data-label="编排组"><strong>${safeText(group.name)}</strong></td><td data-label="状态">${safeText(status)}</td><td data-label="WAN→LAN 字节">${safeText(wanToLan.bytes || 0)}</td><td data-label="WAN→LAN 速率">${safeText(rate(wanToLan.bytes_per_second))}</td><td data-label="LAN→WAN 字节">${safeText(lanToWan.bytes || 0)}</td><td data-label="LAN→WAN 速率">${safeText(rate(lanToWan.bytes_per_second))}</td></tr>`;
+      const status = group.bypass ? "旁路" : groupStateText(group);
+      return `<tr><td data-label="编排组"><strong>${safeText(group.name)}</strong></td><td data-label="状态">${safeText(status)}</td><td data-label="WAN→LAN 流量">${safeText(formatMegabytes(wanToLan.bytes))}</td><td data-label="WAN→LAN 速率">${safeText(formatTrafficRate(wanToLan.bytes_per_second))}</td><td data-label="LAN→WAN 流量">${safeText(formatMegabytes(lanToWan.bytes))}</td><td data-label="LAN→WAN 速率">${safeText(formatTrafficRate(lanToWan.bytes_per_second))}</td></tr>`;
     }).join("");
     const totals = payload.orchestration_groups?.reduce((sum, group) => sum + Number(group.wan_to_lan?.bytes || 0) + Number(group.lan_to_wan?.bytes || 0), 0) || 0;
-    return `<section class="page-body list-page"><section class="list-content"><div class="orchestrator-toolbar"><div><strong>编排组流量</strong><span>按线路查看实时流量。</span></div></div><section class="orch-flow-summary"><div><span>编排组总数</span><strong>${safeText(payload.orchestration_groups?.length || 0)}</strong></div><div><span>累计字节</span><strong>${safeText(totals)}</strong></div><div><span>统计周期</span><strong>实时</strong></div></section><div class="orchestrator-table-wrap"><table class="data-table orchestrator-table"><thead><tr><th>编排组</th><th>状态</th><th>WAN→LAN 字节</th><th>WAN→LAN 速率</th><th>LAN→WAN 字节</th><th>LAN→WAN 速率</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="orchestrator-empty">暂无编排组流量</td></tr>'}</tbody></table></div></section></section>`;
+    const placeholders = Array.from({ length: Math.max(0, 10 - Math.max(1, (payload.orchestration_groups || []).length)) }, () => '<tr class="telemetry-placeholder"><td colspan="6"></td></tr>').join("");
+    return `<section class="page-body list-page"><section class="list-content telemetry-list"><div class="orchestrator-toolbar"><div><strong>流量概况</strong><span>按编排组查看上下行流量。</span></div></div><section class="orch-flow-summary"><div><span>编排组总数</span><strong>${safeText(payload.orchestration_groups?.length || 0)}</strong></div><div><span>累计流量</span><strong>${safeText(formatMegabytes(totals))}</strong></div><div><span>统计周期</span><strong>当前</strong></div></section><div class="orchestrator-table-wrap telemetry-table-wrap"><table class="data-table orchestrator-table telemetry-table"><thead><tr><th>编排组</th><th>状态</th><th>WAN→LAN 流量</th><th>WAN→LAN 速率</th><th>LAN→WAN 流量</th><th>LAN→WAN 速率</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="orchestrator-empty">暂无编排组流量</td></tr>'}${placeholders}</tbody></table></div></section></section>`;
   }
 
   shell = createProductShell({
     sections,
     initialPage: "dashboard/overview",
     renderPage(page) {
-      return `<article class="page-card"><header class="page-title"><h1>${safeText(page.title)}</h1></header>${pageBody(page)}</article>`;
+      const action = page.id === "orchestrator/policy" ? `<button class="primary page-title-action" type="button" data-create-policy-group ${state.busy || !state.topology?.interfaces?.some((item) => item.role === "lan") || !state.topology?.interfaces?.some((item) => item.role === "wan") ? "disabled" : ""}>新增策略组</button>` : "";
+      return `<article class="page-card"><header class="page-title"><h1>${safeText(page.title)}</h1>${action}</header>${pageBody(page)}</article>`;
     },
   });
+  const shellRender = shell.render.bind(shell);
+  shell.render = () => { shellRender(); enhanceTablePagers(); };
 
   async function readTopology() {
     try {
@@ -1303,6 +1471,22 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
     return `<form class="orchestrator-rate-form" data-ip-group-form><label>名称<input required data-ip-group-name value="${safeText(item.name || "")}" placeholder="办公终端"></label><label>地址成员<textarea required data-ip-group-entries rows="7" placeholder="192.168.1.10&#10;192.168.2.0/24&#10;192.168.3.10-192.168.3.20">${safeText((item.entries || item.members || []).join("\n"))}</textarea></label></form>`;
   }
 
+  function ipEntryForm() {
+    const groups = (state.ipGroups?.items || []).filter((item) => item.kind === "ip");
+    return `<form class="orchestrator-form pa-config-form" data-ip-entry-form><section class="pa-form-section"><h3>添加方式</h3><div class="pa-form-rows"><label><span>目标 IP 组</span><select data-ip-entry-mode><option value="append">追加到已有 IP 组</option><option value="create">创建新的 IP 组</option></select></label><label data-ip-entry-existing><span>选择 IP 组</span><select data-ip-entry-group>${groups.map((item) => `<option value="${safeText(item.id)}">${safeText(item.name || item.id)}</option>`).join("") || '<option value="">暂无 IP 组，请先创建</option>'}</select></label><label data-ip-entry-new hidden><span>IP 组名称</span><input data-ip-entry-name placeholder="例如：办公终端"></label></div></section><section class="pa-form-section"><h3>IP 内容</h3><div class="pa-form-rows"><label><span>每行一个 IP</span><textarea required data-ip-entry-values rows="7" placeholder="192.168.1.10&#10;192.168.1.0/24&#10;192.168.1.10-192.168.1.20"></textarea></label></div></section></form>`;
+  }
+
+  function wireIPEntryForm(body) {
+    const form = body.querySelector("[data-ip-entry-form]");
+    if (!form) return;
+    const mode = form.querySelector("[data-ip-entry-mode]");
+    const existing = form.querySelector("[data-ip-entry-existing]");
+    const creating = form.querySelector("[data-ip-entry-new]");
+    const sync = () => { const create = mode.value === "create"; existing.hidden = create; creating.hidden = !create; existing.style.display = create ? "none" : "grid"; creating.style.display = create ? "grid" : "none"; form.querySelector("[data-ip-entry-group]").disabled = create; form.querySelector("[data-ip-entry-name]").disabled = !create; form.querySelector("[data-ip-entry-name]").required = create; };
+    mode.addEventListener("change", sync);
+    sync();
+  }
+
   function aclForm(item = {}) {
     const match = item.match || {};
     return `<form class="orchestrator-rate-form pa-config-form" data-acl-form><section class="pa-form-section"><h3>基本设置</h3><div class="pa-form-rows"><label><span>名称</span><input required data-acl-name value="${safeText(item.name || "")}"></label><label><span>方向</span><select data-acl-direction><option value="any" ${match.direction === "any" ? "selected" : ""}>任意</option><option value="wan_to_lan" ${match.direction === "wan_to_lan" ? "selected" : ""}>WAN 到 LAN</option><option value="lan_to_wan" ${match.direction === "lan_to_wan" ? "selected" : ""}>LAN 到 WAN</option></select></label></div></section><section class="pa-form-section"><h3>匹配条件</h3><div class="pa-form-rows"><label><span>源 / 目的地址</span><span class="pa-address-summary-pair">${rateConditionEditor("acl-source", "源地址", match.src_ip ? [match.src_ip] : [])}<em>/</em>${rateConditionEditor("acl-destination", "目的地址", match.dst_ip ? [match.dst_ip] : [])}</span></label><label><span>源 / 目的端口</span><span class="pa-port-pair"><input data-acl-source-port value="${safeText(match.src_port || '')}" placeholder="0"><em>/</em><input data-acl-destination-port value="${safeText(match.dst_port || '')}" placeholder="0"></span></label><label><span>协议</span><select data-acl-protocol><option value="any" ${match.protocol === "any" || !match.protocol ? "selected" : ""}>Any</option><option value="tcp" ${match.protocol === "tcp" ? "selected" : ""}>TCP</option><option value="udp" ${match.protocol === "udp" ? "selected" : ""}>UDP</option><option value="icmp" ${match.protocol === "icmp" ? "selected" : ""}>ICMP</option></select></label></div></section><section class="pa-form-section"><h3>执行动作</h3><div class="pa-form-rows"><label><span>动作</span><select data-acl-action><option value="deny" ${item.action === "deny" || !item.action ? "selected" : ""}>拒绝</option><option value="allow" ${item.action === "allow" ? "selected" : ""}>允许</option></select></label><label><span>状态</span><label class="pa-inline-check"><input type="checkbox" data-acl-enabled ${item.enabled === false ? "" : "checked"}>启用</label></label></div></section></form>`;
@@ -1331,6 +1515,19 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
   }
 
   async function importIPGroups(body) {
+    const entryForm = body.querySelector("[data-ip-entry-form]");
+    if (entryForm) {
+      const mode = entryForm.querySelector("[data-ip-entry-mode]").value;
+      const entries = splitAddressValues(entryForm.querySelector("[data-ip-entry-values]").value);
+      if (!entries.length) throw new Error("请至少填写一条 IP、网段或 IP 范围");
+      const existing = mode === "append" ? (state.ipGroups.items || []).find((item) => item.id === entryForm.querySelector("[data-ip-entry-group]").value) : null;
+      const name = mode === "create" ? entryForm.querySelector("[data-ip-entry-name]").value.trim() : existing?.name;
+      if (!name) throw new Error(mode === "create" ? "请输入 IP 组名称" : "请选择 IP 组");
+      const payload = { id: existing?.id || stableID("ip", name), name, kind: "ip", entries: [...new Set([...(existing?.entries || existing?.members || []), ...entries])] };
+      try { state.busy = true; await client.saveIPGroup(payload, Boolean(existing)); state.ipGroups = await client.ipGroups(); state.notice = { tone: "success", text: mode === "append" ? "IP 内容已追加并完成回读" : "IP 组已创建并完成回读" }; return true; }
+      catch (error) { state.notice = { tone: "error", text: model.errorMessage(error) }; return false; }
+      finally { state.busy = false; render(); }
+    }
     const file = body.querySelector('[data-ip-import-file]')?.files?.[0];
     const content = file ? await file.text() : body.querySelector('[data-ip-import-lines]').value;
     let lines;
@@ -1472,11 +1669,20 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
   elements.workspace.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    const pagerAction = target.closest("[data-pager-prev], [data-pager-next]");
+    if (pagerAction) {
+      const pager = pagerAction.closest(".table-pager");
+      const current = Number(pager?.dataset.page || 1);
+      updateTablePager(pager, current + (pagerAction.hasAttribute("data-pager-next") ? 1 : -1));
+      return;
+    }
     const openPage = target.closest("[data-open-page]");
     if (openPage) {
       activePage = openPage.dataset.openPage;
       shell.state.active = activePage;
-      return shell.render();
+      shell.render();
+      enhanceTablePagers();
+      return;
     }
     if (activePage === "object/ip" && target.closest("[data-add-ip-group]")) return modal.open({ title: "新增 IP 组", html: ipGroupForm(), onSubmit: (body) => saveIPGroup(null, body), trigger: target.closest("[data-add-ip-group]") });
     if (activePage === "object/ip" && target.closest("[data-edit-ip-group]")) {
@@ -1493,7 +1699,7 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
     }
     if (activePage === "security/policies" && target.closest("[data-delete-acl]")) return deleteAndReadback(client.deleteSecurityACL, client.securityACLs, "securityACLs", target.closest("[data-delete-acl]").dataset.deleteAcl, "安全策略已删除并回读确认");
     if (activePage === "object/ip" && target.closest("[data-export-ip-groups]")) return exportIPGroups();
-    if (activePage === "object/ip" && target.closest("[data-import-ip-groups]")) return modal.open({ title: "批量导入 IP 组", html: '<form class="orchestrator-form pa-config-form"><section class="pa-form-section"><h3>导入内容</h3><div class="pa-form-rows"><label><span>选择文件</span><input type="file" data-ip-import-file accept=".txt,.csv,.json"></label><label><span>每行一个组</span><textarea data-ip-import-lines rows="10" placeholder="办公终端|192.168.1.10,192.168.1.0/24\n访客网络|192.168.2.0/24"></textarea></label></div></section></form>', submitLabel: "开始导入", onSubmit: importIPGroups, trigger: target.closest("[data-import-ip-groups]") });
+    if (activePage === "object/ip" && target.closest("[data-import-ip-groups]")) { modal.open({ title: "新增IP", html: ipEntryForm(), submitLabel: "确定", onSubmit: importIPGroups, trigger: target.closest("[data-import-ip-groups]") }); wireIPEntryForm(document.getElementById("modalBody")); return; }
     if (activePage === "system/users" && target.closest("[data-add-user]")) return modal.open({ title: "新增系统用户", html: userForm(), onSubmit: (body) => saveUser(null, body), trigger: target.closest("[data-add-user]") });
     if (activePage === "system/users" && target.closest("[data-edit-user]")) {
       const item = (state.users.items || []).find((entry) => entry.username === target.closest("[data-edit-user]").dataset.editUser);
@@ -1557,22 +1763,22 @@ window.LY_ROUTE_PRODUCT_ENTRYPOINT = "orchestrator";
   });
   let draggedPolicyGroup = "";
   elements.workspace.addEventListener("dragstart", (event) => {
-    const card = event.target instanceof Element ? event.target.closest("[data-policy-group-card]") : null;
-    if (!card || activePage !== "orchestrator/policy") return;
-    draggedPolicyGroup = card.dataset.policyGroupCard || "";
+    const bar = event.target instanceof Element ? event.target.closest("[data-policy-group-drag]") : null;
+    if (!bar || activePage !== "orchestrator/policy") return;
+    draggedPolicyGroup = bar.dataset.policyGroupDrag || "";
     event.dataTransfer?.setData("text/plain", draggedPolicyGroup);
-    event.dataTransfer?.setDragImage(card, 24, 18);
+    event.dataTransfer?.setDragImage(bar, 24, 18);
   });
   elements.workspace.addEventListener("dragover", (event) => {
     if (activePage !== "orchestrator/policy" || !draggedPolicyGroup) return;
-    const card = event.target instanceof Element ? event.target.closest("[data-policy-group-card]") : null;
-    if (!card || card.dataset.policyGroupCard === draggedPolicyGroup) return;
+    const bar = event.target instanceof Element ? event.target.closest("[data-policy-group-drag]") : null;
+    if (!bar || bar.dataset.policyGroupDrag === draggedPolicyGroup) return;
     event.preventDefault();
   });
   elements.workspace.addEventListener("drop", async (event) => {
     if (activePage !== "orchestrator/policy") return;
-    const card = event.target instanceof Element ? event.target.closest("[data-policy-group-card]") : null;
-    const targetGroup = card?.dataset.policyGroupCard || "";
+    const bar = event.target instanceof Element ? event.target.closest("[data-policy-group-drag]") : null;
+    const targetGroup = bar?.dataset.policyGroupDrag || "";
     if (!draggedPolicyGroup || !targetGroup || targetGroup === draggedPolicyGroup) return;
     event.preventDefault();
     const sourceGroup = draggedPolicyGroup;

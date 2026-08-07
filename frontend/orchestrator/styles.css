@@ -124,6 +124,32 @@ label { color: var(--ui-muted); }
 .data-table td small { display: block; color: var(--ui-muted); }
 .orchestrator-table-wrap { min-width: 0; overflow-x: auto; }
 .orchestrator-table { min-width: 720px; }
+.table-pager { display: flex; justify-content: flex-end; align-items: center; gap: 7px; min-height: 42px; padding: 8px 0 0; }
+.table-pager button { min-width: 68px; min-height: 30px; padding: 0 10px; }
+.table-pager span { display: grid; place-items: center; min-width: 32px; min-height: 30px; padding: 0 9px; border: 1px solid var(--ui-blue); border-radius: var(--ui-radius); background: var(--ui-blue); color: #fff; font-weight: 700; }
+.table-pager button:disabled { cursor: default; opacity: .48; }
+.data-table tbody tr.telemetry-placeholder td { color: transparent; }
+.data-table tbody tr:has(td.orchestrator-empty) td, .data-table tbody tr.orchestrator-empty td { height: 250px; text-align: center; vertical-align: middle; }
+.orchestrator-summary { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(220px, 1.2fr); gap: 10px; margin-bottom: 12px; }
+.orchestrator-summary > div { display: grid; align-content: center; gap: 5px; min-height: 104px; padding: 14px 16px; border: 1px solid var(--ui-line); border-top: 3px solid var(--ui-blue); border-radius: var(--ui-radius); background: #fff; }
+.orchestrator-summary > div:nth-child(2) { border-top-color: var(--ui-green); background: #fbfffd; }
+.orchestrator-summary > div:nth-child(3) { border-top-color: var(--ui-amber); background: #fffdf8; }
+.orchestrator-summary span { color: var(--ui-muted); font-size: 12px; }
+.orchestrator-summary strong { color: var(--ui-text); font-size: 20px; }
+.orchestrator-summary small { color: var(--ui-muted); }
+.orchestrator-summary button { justify-self: start; min-height: 29px; padding: 0 12px; border-color: #bdd8f2; background: var(--ui-panel-blue); color: var(--ui-blue-deep); }
+label[data-bond-field] > span:first-child { font-size: 0; }
+label[data-bond-field] > span:first-child::after { content: "链路名称"; font-size: 13px; }
+.orchestrator-settings { min-height: calc(100vh - 142px); display: flex; flex-direction: column; }
+.orchestrator-settings .orchestrator-table-wrap { flex: 1 1 auto; min-height: 420px; }
+.orchestrator-settings .orchestrator-table { height: 100%; table-layout: fixed; }
+.orchestrator-settings .orchestrator-table tbody tr { height: 52px; }
+.orchestrator-settings .orchestrator-table tbody td { border-bottom-color: var(--ui-line) !important; }
+.orchestrator-settings .table-pager { margin-top: auto; }
+.orchestrator-group-table tbody tr { height: 52px; }
+.orchestrator-group-table tbody td { border-bottom-color: var(--ui-line) !important; }
+.policy-workbench { min-height: calc(100vh - 142px); }
+.policy-group-list { min-height: 420px; align-content: start; }
 
 @media (min-width: 721px) {
   .telemetry-list { min-height: calc(100vh - 156px); display: flex; flex-direction: column; }
@@ -221,4 +247,156 @@ label { color: var(--ui-muted); }
   .management-mode { display: grid; gap: 8px; }
   .management-network-form > button { width: 100%; }
   .modal { top: 2vh; max-height: 94vh; }
+  .orchestrator-summary { grid-template-columns: 1fr; }
+  .orchestrator-settings { min-height: calc(100vh - 110px); }
+  .orchestrator-settings .orchestrator-table-wrap { min-height: 360px; }
+  .table-pager { padding-bottom: 4px; }
+}
+
+/* Overview and telemetry use the same full-height appliance table rhythm as the gateway. */
+@media (min-width: 981px) {
+  .orch-overview-grid { grid-template-columns: minmax(0, 1.55fr) minmax(360px, .85fr); min-height: 438px; }
+  .orch-status-panel, .orch-boundary-panel { min-height: 438px; }
+  .orch-status-panel .orchestrator-table-wrap { min-height: 382px; }
+  .orch-status-panel .orchestrator-table { height: 100%; table-layout: fixed; }
+  .orch-status-panel .orchestrator-table tbody tr { height: 58px; }
+  .orch-status-panel .orchestrator-table tbody td { border-bottom-color: var(--ui-line) !important; }
+  .orch-boundary-panel header { min-height: 68px; }
+  .orch-boundary-panel dl div { min-height: 62px; align-items: center; border-bottom-color: var(--ui-line); }
+}
+
+.orch-path-flow { display: grid; grid-template-columns: minmax(58px, 1fr) auto minmax(76px, 1.3fr) auto minmax(58px, 1fr); align-items: center; gap: 8px; margin: 13px; padding: 13px 10px; border: 1px solid #cfe2f5; background: var(--ui-panel-blue); color: var(--ui-blue-deep); text-align: center; font-weight: 700; }
+.orch-path-flow span { display: grid; place-items: center; min-height: 34px; padding: 0 7px; border: 1px solid #c3d9ed; background: #fff; }
+.orch-path-flow b { color: var(--ui-blue); font-size: 18px; }
+
+@media (min-width: 721px) {
+  .telemetry-list { min-height: calc(100vh - 136px); }
+  .telemetry-list .orchestrator-toolbar { min-height: 48px; }
+  .telemetry-list .telemetry-table-wrap { min-height: 520px; }
+  .telemetry-list .telemetry-table tbody tr { height: clamp(50px, calc((100vh - 360px) / 10), 70px); }
+  .telemetry-list .telemetry-table tbody td { height: clamp(50px, calc((100vh - 360px) / 10), 70px); border-bottom-color: var(--ui-line) !important; }
+  .telemetry-list .telemetry-table th, .telemetry-list .telemetry-table td { padding-left: 14px; padding-right: 14px; }
+  .telemetry-list .telemetry-table .telemetry-placeholder td { color: transparent; }
+}
+
+.orch-flow-summary { min-height: 76px; }
+.orch-flow-summary > div { display: grid; align-content: center; min-height: 76px; border-color: var(--ui-line); }
+.orch-flow-summary strong { color: var(--ui-blue-deep); }
+
+/* Keep the overview inside the viewport and prevent the narrow path panel from overflowing. */
+@media (min-width: 981px) {
+  .orch-overview-grid { height: min(560px, calc(100vh - 260px)); min-height: 430px; }
+  .orch-status-panel, .orch-boundary-panel { min-height: 0; height: 100%; }
+  .orch-status-panel .orchestrator-table-wrap { min-height: 0; height: calc(100% - 68px); }
+  .orch-status-panel .orchestrator-table tbody tr { height: auto; }
+  .orch-status-panel .orchestrator-table tbody td { height: 49px; }
+  .orch-boundary-panel { min-width: 0; }
+  .orch-boundary-panel header { min-height: 68px; }
+  .orch-path-flow { grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1.2fr) 20px minmax(0, 1fr); gap: 4px; margin: 13px; padding: 12px 7px; }
+  .orch-path-flow span { min-width: 0; padding: 0 4px; white-space: nowrap; }
+}
+
+/* All configuration lists share the gateway's viewport fill and ten-row rhythm. */
+@media (min-width: 721px) {
+  .page-body.list-page:has(.orchestrator-table-wrap) { min-height: calc(100vh - 122px); }
+  .page-body.list-page:has(.orchestrator-table-wrap) > .list-content { min-height: calc(100vh - 156px); display: flex; flex-direction: column; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table-wrap { flex: 1 1 auto; min-height: 0; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table { height: 100%; min-height: 520px; table-layout: fixed; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody tr { height: clamp(48px, calc((100vh - 300px) / 10), 66px); }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody td { height: clamp(48px, calc((100vh - 300px) / 10), 66px); border-bottom-color: var(--ui-line) !important; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody tr.orchestrator-empty td { height: clamp(48px, calc((100vh - 300px) / 10), 66px); text-align: center; vertical-align: middle; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .table-pager { margin-top: auto; }
+  .policy-workbench { min-height: calc(100vh - 156px); }
+}
+
+/* Empty data is a centered row, while the remaining rows keep their grid lines. */
+.data-table tbody tr.orchestrator-empty td { height: 52px !important; text-align: center !important; vertical-align: middle !important; }
+.data-table tbody tr.telemetry-placeholder td { height: 52px !important; }
+
+@media (min-width: 721px) {
+  .orchestrator-table-wrap { overflow-x: hidden; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table { height: auto !important; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody tr,
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody tr.telemetry-placeholder { height: clamp(48px, calc((100vh - 300px) / 10), 66px) !important; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody td,
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody tr.telemetry-placeholder td { height: clamp(48px, calc((100vh - 300px) / 10), 66px) !important; }
+  .orch-status-panel .orchestrator-table { height: auto !important; }
+  .orch-status-panel .orchestrator-table tbody tr { height: clamp(48px, calc((100vh - 300px) / 10), 66px) !important; }
+}
+
+/* Final sizing pass: rows stay fixed from the first paint and never create a scrollbar. */
+@media (min-width: 981px) {
+  .orch-overview-grid { align-items: start; }
+  .orch-status-panel .orchestrator-table-wrap { height: calc(100% - 68px); overflow-y: hidden !important; }
+  .orch-status-panel .orchestrator-table { min-height: 0 !important; height: auto !important; }
+  .orch-status-panel .orchestrator-table tbody tr,
+  .orch-status-panel .orchestrator-table tbody td { height: 43px !important; }
+  .orch-boundary-panel { height: auto !important; min-height: 0 !important; }
+}
+
+@media (min-width: 981px) {
+  .orch-boundary-panel { height: 100% !important; display: flex; flex-direction: column; }
+  .orch-boundary-panel dl { flex: 1 1 auto; display: flex; flex-direction: column; }
+  .orch-boundary-panel dl div { flex: 1 1 0; min-height: 0; }
+}
+
+@media (min-width: 721px) {
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table { min-height: 0 !important; height: auto !important; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody tr,
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table tbody td { height: 52px !important; }
+  .page-body.list-page:has(.orchestrator-table-wrap) .orchestrator-table-wrap { overflow-y: hidden !important; }
+  .orchestrator-settings .orchestrator-table { min-height: 0 !important; height: auto !important; }
+.orchestrator-settings .orchestrator-table tbody tr,
+  .orchestrator-settings .orchestrator-table tbody td { height: 52px !important; }
+}
+
+@media (min-width: 981px) {
+  .orch-status-panel .orchestrator-table-wrap { height: calc(100% - 110px) !important; overflow-y: hidden !important; }
+  .orch-status-panel .orchestrator-table tbody tr,
+  .orch-status-panel .orchestrator-table tbody td { height: clamp(36px, calc((100vh - 450px) / 10), 44px) !important; }
+  .orch-status-panel .table-pager { min-height: 42px; margin: 0 12px; padding-top: 8px; }
+}
+
+@media (min-width: 981px) {
+  .orch-status-panel .orchestrator-table tbody tr,
+  .orch-status-panel .orchestrator-table tbody td { height: 40px !important; }
+  .orch-status-panel .orchestrator-table tbody tr.telemetry-placeholder,
+  .orch-status-panel .orchestrator-table tbody tr.telemetry-placeholder td { height: 40px !important; }
+  .orch-status-panel .orchestrator-table-wrap { overflow: hidden !important; }
+}
+
+/* Keep configuration operations visually aligned with the gateway console. */
+.config-ops { display: grid; gap: 11px; }
+.config-ops > .config-op { margin-bottom: 0; }
+.config-export-state { margin: -2px 0 0; color: var(--ui-muted); font-size: 12px; }
+.config-quick-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.config-quick-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 46px; margin: 0; padding: 8px 10px; }
+.config-quick-item > span { grid-column: 1 / -1; color: var(--ui-muted); font-size: 12px; }
+.config-quick-item > button { grid-column: 2; grid-row: 1; min-height: 30px; }
+.config-time-op { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.config-time-op .config-op-copy { margin: 0; }
+.config-time-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.config-time-controls input { width: 190px; }
+.config-snapshot-table { min-height: 0; }
+.policy-group-toggle { min-width: 52px; min-height: 30px; padding: 0 8px; border: 1px solid var(--ui-line); border-radius: var(--ui-radius); background: #fff; color: var(--ui-blue); cursor: pointer; }
+.page-title-action { min-height: 32px; padding: 0 15px; }
+.policy-group-toggle { order: 2; display: grid; place-items: center; flex: 0 0 18px; width: 18px; min-width: 18px; height: 20px; min-height: 20px; margin-left: auto; padding: 0; border: 0; border-radius: 2px; background: transparent; color: #2f7fd0; font-size: 13px; line-height: 1; }
+.policy-group-card.is-collapsed > header { border-bottom: 0; }
+.policy-group-detail-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-height: 42px; padding: 7px 10px; border-bottom: 1px solid var(--ui-line); background: var(--ui-panel-soft); color: var(--ui-muted); }
+.policy-group-detail-toolbar .primary { min-height: 30px; }
+.policy-group-toolbar { display: flex; justify-content: flex-end; min-height: 42px; margin-bottom: 10px; }
+.policy-group-bar { display: flex; align-items: center; gap: 8px; height: 38px; min-height: 38px; padding: 0 10px 0 12px; border: 1px solid #c7def4; border-left: 3px solid #2f7fd0; border-radius: 2px; background: #edf6ff; color: #1f68ac; cursor: grab; box-sizing: border-box; }
+.policy-group-bar:active { cursor: grabbing; }
+.policy-group-bar .policy-group-name { order: 1; flex: 1; min-width: 0; padding: 0; color: #1f68ac; text-align: left; font-weight: 700; }
+.policy-group-add-detail { display: none; }
+.policy-operation-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; white-space: nowrap; }
+.policy-table-add-detail { min-height: 29px; margin-left: 8px; padding: 0 11px; vertical-align: middle; }
+.policy-group-actions { display: flex; align-items: center; gap: 6px; }
+.policy-group-actions .icon-btn { background: #fff; }
+.policy-group-card.is-collapsed .policy-group-bar { margin-bottom: 0; }
+@media (max-width: 600px) {
+  .config-quick-actions { grid-template-columns: 1fr; }
+  .config-time-op { align-items: stretch; flex-direction: column; }
+  .config-time-controls { justify-content: stretch; }
+  .config-time-controls input, .config-time-controls button { flex: 1; width: auto; }
 }

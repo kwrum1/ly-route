@@ -14,7 +14,16 @@
 #define LY_SQ_MAX_BURST 64
 #define LY_SQ_INVALID_INDEX ((u32) ~0)
 #define LY_SQ_HASH_SEED 0x6c797371
-#define LY_SQ_REINJECT_FLAG VNET_BUFFER_F_AVAIL9
+#define LY_SQ_FEATURE_CONFIG_MAGIC 0x6c797366
+
+/* The output feature runs after a tunnel has selected its logical interface.
+ * Carry the physical interface selected by the control plane in the feature
+ * configuration so delayed packets can always resume on the real carrier. */
+typedef struct
+{
+  u32 sw_if_index;
+  u32 magic;
+} ly_sq_feature_config_t;
 
 typedef enum
 {

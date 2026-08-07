@@ -62,6 +62,52 @@ func TestRestartEvidenceRejectsAfterPayloadDifferentFromPersistedDesiredResource
 	}
 }
 
+func TestGatewayEvidenceTreatsNilAndEmptyOptionalFieldsAsEquivalent(t *testing.T) {
+	type resource struct {
+		ID      string   `json:"id"`
+		Options []string `json:"options,omitempty"`
+	}
+	actual := []resource{{ID: "route-40", Options: []string{}}}
+	desired := []resource{{ID: "route-40", Options: nil}}
+	if !equalGatewaySlice(actual, desired) {
+		t.Fatal("JSON-equivalent optional fields were treated as runtime drift")
+	}
+	desired[0].ID = "route-41"
+	if equalGatewaySlice(actual, desired) {
+		t.Fatal("different persisted resource identities were treated as equal")
+	}
+}
+
+func TestGatewayEvidenceAcceptsRuntimeOwnedIPv6OnStaticInterface(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	desired := vpp.Plan{Interfaces: []vpp.InterfaceState{{
+		Name: "lyroute-ens192", AdminState: "up", LinkState: "up",
+		Addresses: []string{"10.1.18.1/24"},
+	}}}
+	before := completeOracleSnapshot(t, vpp.Snapshot{
+		RequestID: "txn-runtime-ipv6-evidence", TransactionID: "txn-runtime-ipv6-evidence", ReadbackAt: now,
+	})
+	after := completeOracleSnapshot(t, vpp.Snapshot{
+		RequestID: "txn-runtime-ipv6-evidence", TransactionID: "txn-runtime-ipv6-evidence", ReadbackAt: now,
+		Interfaces: []vpp.InterfaceState{{
+			Name: "lyroute-ens192", AdminState: "up", LinkState: "up",
+			Addresses: []string{"10.1.18.1/24", "2001:db8:100::1/64"},
+		}},
+	})
+	evidence := apply.GatewayResourceEvidence{
+		Resource: "interfaces", Capability: "interfaces", TransactionID: "txn-runtime-ipv6-evidence",
+		Before: before, After: after, BeforeHash: before.Hash, AfterHash: after.Hash,
+		ApplyReceipt: apply.ApplyReceipt{TransactionID: "txn-runtime-ipv6-evidence", Capability: "interfaces", Status: apply.ReceiptApplied, AppliedAt: now},
+		Readback:     apply.Readback{TransactionID: "txn-runtime-ipv6-evidence", Capability: "interfaces", Timestamp: now, Fresh: true},
+	}
+	if err := completeGatewayRuntimeEvidence(RuntimeApplyResult{
+		TransactionID: "txn-runtime-ipv6-evidence", GatewayPlan: &desired,
+		GatewayEvidence: []apply.GatewayResourceEvidence{evidence},
+	}, now); err != nil {
+		t.Fatalf("runtime-owned IPv6 was rejected as interface evidence drift: %v", err)
+	}
+}
+
 func TestRestartEvidenceRejectsSupplementalPayloadHashDifferentFromPersistedDesiredPlan(t *testing.T) {
 	// Given
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)

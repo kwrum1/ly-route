@@ -410,6 +410,13 @@ func validatedSourcePrefixes(label string, values []string) ([]string, error) {
 		if value == "" {
 			continue
 		}
+		// The UI uses an explicit Any selector for readability. In the
+		// canonical policy, an empty source list means any source; accepting the
+		// alias here keeps persisted/UI-authored policies valid while retaining
+		// one normalized representation for SmartDNS and decision evaluation.
+		if strings.EqualFold(value, "any") || value == "*" {
+			continue
+		}
 		prefix, err := parseSourcePrefix(value)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s source selector %q is not a valid IP or prefix", ErrInvalidPolicy, label, value)
@@ -509,14 +516,13 @@ func compileOutcome(label string, outcome Outcome, proxyIDs map[string]struct{})
 		}
 		upstreamID := strings.TrimSpace(outcome.UpstreamID)
 		wanEgressID := strings.TrimSpace(outcome.WANEgressID)
-		if (upstreamID == "") == (wanEgressID == "") {
-			return CompiledOutcome{}, fmt.Errorf("%w: %s direct outcome must select exactly one explicit upstream or WAN egress", ErrInvalidPolicy, label)
+		if upstreamID == "" && wanEgressID == "" {
+			return CompiledOutcome{}, fmt.Errorf("%w: %s direct outcome must select an upstream or WAN egress", ErrInvalidPolicy, label)
 		}
 		resolverPath := ""
 		if upstreamID != "" {
 			resolverPath = "upstream:" + upstreamID
-		}
-		if wanEgressID != "" {
+		} else if wanEgressID != "" {
 			resolverPath = "wan:" + wanEgressID
 		}
 		return CompiledOutcome{Kind: ResolverOutcomeDirect, PolicyPrecedence: DNSPolicyPrecedence, ResolverPath: resolverPath, UpstreamID: upstreamID, WANEgressID: wanEgressID}, nil

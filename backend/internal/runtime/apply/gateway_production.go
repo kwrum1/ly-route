@@ -36,6 +36,12 @@ func (reconciler *productionGatewayReconciler) prepare(ctx context.Context, plan
 	}
 	request := vpp.GatewayDiffSnapshotRequest(plan.Request.TransactionID, prior, plan.GatewayPlan)
 	live := vpp.Snapshot{RequestID: plan.Request.TransactionID, TransactionID: plan.Request.TransactionID}
+	// A stale TAP can make even a no-op snapshot ambiguous. Clean managed
+	// service handoffs before deciding whether the snapshot needs capabilities;
+	// this is deliberately independent of the diff list.
+	if err := reconciler.adapter.CleanupManagedTAPs(ctx, plan.GatewayPlan); err != nil {
+		return fmt.Errorf("managed TAP cleanup: %w", err)
+	}
 	if len(request.Capabilities) > 0 {
 		readback, err := reconciler.adapter.Snapshot(ctx, request)
 		if err != nil {
@@ -135,6 +141,18 @@ func (adapter *productionGatewayAdapter) supplementalOwner() vpp.SupplementalOwn
 func (adapter *productionGatewayAdapter) hasSupplemental(plan vpp.Plan) bool {
 	owner := adapter.supplementalOwner()
 	return owner != "" && vpp.HasSupplementalOperations(plan, owner)
+}
+
+func (adapter *productionGatewayAdapter) supplementalChanged(plan Plan) (bool, error) {
+	owner := adapter.supplementalOwner()
+	if owner == "" {
+		return false, nil
+	}
+	if plan.Previous.GatewayPlan == nil {
+		return vpp.HasSupplementalOperations(plan.GatewayPlan, owner), nil
+	}
+	equal, err := vpp.SupplementalOperationsEqual(plan.GatewayPlan, *plan.Previous.GatewayPlan, owner)
+	return !equal, err
 }
 
 func (adapter *productionGatewayAdapter) applySupplemental(ctx context.Context, plan vpp.Plan) ([]vpp.SupplementalOperationReadback, error) {

@@ -41,7 +41,17 @@ func (e Executor) previousState(ctx context.Context, snapshotID string) (Previou
 	if err := flow.ValidateIntent(payload.Flow); err != nil {
 		return PreviousState{}, fmt.Errorf("validate previous snapshot flow: %w", err)
 	}
-	if err := validateGatewayEvidence(payload.GatewayEvidence, snapshot.SourceTransactionID, e.now()); err != nil {
+	// Gateway evidence proves that a generation was healthy when it was
+	// committed.  Re-validating that immutable evidence against the current
+	// wall clock makes every committed generation unusable as a rollback
+	// target after ReadbackFreshnessWindow.  Validate it at the snapshot's
+	// commit time instead; candidate readback freshness is still checked
+	// against the live clock before a new generation is committed.
+	validationTime := snapshot.CreatedAt
+	if validationTime.IsZero() || validationTime.After(e.now()) {
+		validationTime = e.now()
+	}
+	if err := validateGatewayEvidence(payload.GatewayEvidence, snapshot.SourceTransactionID, validationTime); err != nil {
 		return PreviousState{}, fmt.Errorf("validate previous snapshot gateway evidence: %w", err)
 	}
 	return PreviousState{Available: true, ProxyEgress: payload.Proxy, FlowIntent: payload.Flow, GatewayPlan: payload.GatewayPlan, SnapshotHash: snapshot.PayloadHash}, nil

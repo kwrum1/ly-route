@@ -6,6 +6,14 @@ import (
 	"testing"
 )
 
+func TestParsePolicy_acceptsChineseEmptyGroup(t *testing.T) {
+	input := validPolicyInput()
+	input.Groups = []PolicyGroupInput{{ID: "中文策略组", Position: 10}}
+	if _, err := ParsePolicy(validPolicyTopology(t), input); err != nil {
+		t.Fatalf("ParsePolicy Chinese empty group: %v", err)
+	}
+}
+
 func TestParsePolicy_rejects_invalid_boundary_values(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -55,7 +63,6 @@ func TestParsePolicy_rejects_invalid_boundary_values(t *testing.T) {
 		}, ErrDuplicatePolicyGroup},
 		{"zero position", func(input PolicyInput) PolicyInput { input.Groups[0].Position = 0; return input }, ErrInvalidPolicyPosition},
 		{"duplicate position", func(input PolicyInput) PolicyInput { input.Groups[1].Position = input.Groups[0].Position; return input }, ErrInvalidPolicyPosition},
-		{"empty group", func(input PolicyInput) PolicyInput { input.Groups[0].Rules = nil; return input }, ErrInvalidPolicyGroup},
 		{"invalid rule ID", func(input PolicyInput) PolicyInput { input.Groups[0].Rules[0].ID = ""; return input }, ErrInvalidPolicyRule},
 		{"duplicate rule ID", func(input PolicyInput) PolicyInput {
 			input.Groups[0].Rules = append(input.Groups[0].Rules, input.Groups[0].Rules[0])

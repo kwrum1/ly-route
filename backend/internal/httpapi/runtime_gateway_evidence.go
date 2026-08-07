@@ -1,7 +1,9 @@
 package httpapi
 
 import (
-	"reflect"
+	"bytes"
+	"encoding/json"
+	"sort"
 	"time"
 
 	"ly-route/backend/internal/runtime/apply"
@@ -63,32 +65,79 @@ func proveDesiredGatewayResource(evidence apply.GatewayResourceEvidence, desired
 	matched := false
 	switch evidence.Resource {
 	case "interfaces":
-		matched = reflect.DeepEqual(evidence.After.Interfaces, desired.Interfaces)
+		matched = vpp.InterfaceStatesMatchDesired(evidence.After.Interfaces, desired.Interfaces)
 	case "bonds":
-		matched = reflect.DeepEqual(evidence.After.Bonds, desired.Bonds)
+		matched = equalGatewaySlice(evidence.After.Bonds, desired.Bonds)
 	case "wan-groups":
-		matched = reflect.DeepEqual(evidence.After.WANGroups, desired.Policy.WANGroups)
+		matched = equalGatewaySlice(evidence.After.WANGroups, desired.Policy.WANGroups)
 	case "routes":
-		matched = reflect.DeepEqual(evidence.After.RoutePolicies, desired.Policy.RoutePolicies)
+		// VPP readback emits route policies in its own stable order, while the
+		// persisted plan keeps product priority order. Priority is a field, not
+		// slice order, so a harmless readback reorder must not mark the apply
+		// degraded.
+		matched = equalGatewaySliceUnordered(evidence.After.RoutePolicies, desired.Policy.RoutePolicies)
 	case "acls":
-		matched = reflect.DeepEqual(evidence.After.ACLs, desired.Policy.SecurityACLs)
+		matched = equalGatewaySlice(evidence.After.ACLs, desired.Policy.SecurityACLs)
 	case "qos":
-		matched = reflect.DeepEqual(evidence.After.QoS, desired.Flow.VPPGroups)
+		matched = equalGatewaySlice(evidence.After.QoS, desired.Flow.VPPGroups)
 	case "nat44":
-		matched = reflect.DeepEqual(evidence.After.NAT.StaticMappings, desired.NAT.StaticMappings)
+		matched = equalGatewaySlice(evidence.After.NAT.StaticMappings, desired.NAT.StaticMappings)
 	case "port-maps":
-		matched = reflect.DeepEqual(evidence.After.NAT.PortMappings, desired.NAT.PortMappings)
+		matched = equalGatewaySlice(evidence.After.NAT.PortMappings, desired.NAT.PortMappings)
 	}
 	if matched {
 		owner := vpp.SupplementalOwner(evidence.Resource)
 		if owner == vpp.SupplementalInterfaces || owner == vpp.SupplementalRoutes || owner == vpp.SupplementalQoS {
-			if err := vpp.ValidateSupplementalReadback(desired, owner, evidence.SupplementalReadback, evidence.Readback.Timestamp); err != nil {
+			evidencePlan := desired
+			// A committed gateway transaction has already completed the privileged
+			// DPDK bind/restart/readback phase. Reconstruct supplemental operations
+			// in that prepared state instead of re-triggering the pre-apply gate.
+			evidencePlan.DataplanePrepared = true
+			if err := vpp.ValidateSupplementalReadback(evidencePlan, owner, evidence.SupplementalReadback, evidence.Readback.Timestamp); err != nil {
 				return gatewayEvidenceError(apply.GatewayEvidenceSnapshotMismatch, evidence.Resource, "supplemental_readback", "persisted desired operation payloads", err.Error())
 			}
 		}
 		return nil
 	}
 	return gatewayEvidenceError(apply.GatewayEvidenceSnapshotMismatch, evidence.Resource, "after", "persisted desired resource payload", "different live payload")
+}
+
+func equalGatewaySlice[T any](actual, desired []T) bool {
+	if len(actual) == 0 && len(desired) == 0 {
+		return true
+	}
+	actualJSON, actualErr := json.Marshal(actual)
+	desiredJSON, desiredErr := json.Marshal(desired)
+	return actualErr == nil && desiredErr == nil && bytes.Equal(actualJSON, desiredJSON)
+}
+
+func equalGatewaySliceUnordered[T any](actual, desired []T) bool {
+	if len(actual) != len(desired) {
+		return false
+	}
+	canonical := func(items []T) ([]string, bool) {
+		values := make([]string, 0, len(items))
+		for _, item := range items {
+			encoded, err := json.Marshal(item)
+			if err != nil {
+				return nil, false
+			}
+			values = append(values, string(encoded))
+		}
+		sort.Strings(values)
+		return values, true
+	}
+	actualValues, actualOK := canonical(actual)
+	desiredValues, desiredOK := canonical(desired)
+	if !actualOK || !desiredOK {
+		return false
+	}
+	for index := range actualValues {
+		if actualValues[index] != desiredValues[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func proveDeletedGatewayResource(evidence apply.GatewayResourceEvidence) error {
@@ -124,7 +173,15 @@ func gatewaySnapshotPayloadPresence(resource string, snapshot vpp.Snapshot) bool
 
 func gatewayPlanResources(plan vpp.Plan) map[string]struct{} {
 	resources := make(map[string]struct{})
-	if len(plan.Interfaces) > 0 {
+	// Resource inventory is evaluated after the privileged dataplane phase. The
+	// persisted plan intentionally does not carry that transient flag, so use a
+	// prepared copy only for discovering supplemental-only resource ownership.
+	prepared := plan
+	prepared.DataplanePrepared = true
+	hasSupplemental := func(owner vpp.SupplementalOwner) bool {
+		return vpp.HasSupplementalOperations(prepared, owner)
+	}
+	if len(plan.Interfaces) > 0 || hasSupplemental(vpp.SupplementalInterfaces) {
 		resources["interfaces"] = struct{}{}
 	}
 	if len(plan.Bonds) > 0 {
@@ -133,13 +190,15 @@ func gatewayPlanResources(plan vpp.Plan) map[string]struct{} {
 	if len(plan.Policy.WANGroups) > 0 {
 		resources["wan-groups"] = struct{}{}
 	}
-	if len(plan.Policy.RoutePolicies) > 0 {
+	// DNS interception and proxy steering are route-owned VPP operations even
+	// when the persisted core route-policy list is empty.
+	if len(plan.Policy.RoutePolicies) > 0 || hasSupplemental(vpp.SupplementalRoutes) {
 		resources["routes"] = struct{}{}
 	}
-	if len(plan.Policy.SecurityACLs) > 0 {
+	if len(plan.Policy.SecurityACLs) > 0 || hasSupplemental(vpp.SupplementalSecurity) {
 		resources["acls"] = struct{}{}
 	}
-	if len(plan.Flow.VPPGroups) > 0 {
+	if len(plan.Flow.VPPGroups) > 0 || len(plan.SmartQoSAssignments) > 0 || hasSupplemental(vpp.SupplementalQoS) {
 		resources["qos"] = struct{}{}
 	}
 	if len(plan.NAT.StaticMappings) > 0 {

@@ -8,15 +8,15 @@ import (
 )
 
 func selectNAT44(readback NAT44Readback, request SnapshotRequest) ([]nat.StaticMapping, []nat.PortMapping, error) {
-	static, err := selectNAT44StaticMappings(readback.StaticMappings, request.NATStaticMappings)
+	static, err := selectNAT44StaticMappings(readback.StaticMappings, request.NATStaticMappings, request.AllowMissing)
 	if err != nil {
 		return nil, nil, err
 	}
-	ports, err := selectNAT44PortMappings(readback.PortMappings, request.NATPortMappings)
+	ports, err := selectNAT44PortMappings(readback.PortMappings, request.NATPortMappings, request.AllowMissing)
 	return static, ports, err
 }
 
-func selectNAT44StaticMappings(mappings []nat.StaticMapping, requested []string) ([]nat.StaticMapping, error) {
+func selectNAT44StaticMappings(mappings []nat.StaticMapping, requested []string, allowMissing bool) ([]nat.StaticMapping, error) {
 	available := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
 		id := strings.TrimSpace(mapping.ID)
@@ -25,13 +25,13 @@ func selectNAT44StaticMappings(mappings []nat.StaticMapping, requested []string)
 		}
 		available[id] = struct{}{}
 	}
-	if err := requireNames(requested, available, "NAT44 static mapping"); err != nil {
+	if err := requireNamesAllowMissing(requested, available, "NAT44 static mapping", allowMissing); err != nil {
 		return nil, err
 	}
 	return mappings, nil
 }
 
-func selectNAT44PortMappings(mappings []nat.PortMapping, requested []string) ([]nat.PortMapping, error) {
+func selectNAT44PortMappings(mappings []nat.PortMapping, requested []string, allowMissing bool) ([]nat.PortMapping, error) {
 	available := make(map[string]struct{}, len(mappings))
 	for _, mapping := range mappings {
 		id := strings.TrimSpace(mapping.ID)
@@ -40,7 +40,7 @@ func selectNAT44PortMappings(mappings []nat.PortMapping, requested []string) ([]
 		}
 		available[id] = struct{}{}
 	}
-	if err := requireNames(requested, available, "NAT44 port mapping"); err != nil {
+	if err := requireNamesAllowMissing(requested, available, "NAT44 port mapping", allowMissing); err != nil {
 		return nil, err
 	}
 	return mappings, nil
