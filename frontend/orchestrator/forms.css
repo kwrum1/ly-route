@@ -141,7 +141,7 @@ textarea:focus-visible {
   .policy-group-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 
-/* Dense appliance configuration patterns inspired by Panabit's list-first UI. */
+/* Dense appliance configuration patterns for list-first workflows. */
 .pa-list-toolbar { min-height: 40px; padding: 5px 8px 5px 12px; background: #f5f8fb; }
 .pa-list-toolbar > div:first-child { display: flex; align-items: baseline; gap: 12px; }
 .pa-list-toolbar > div:first-child span { margin: 0; font-size: 12px; }
