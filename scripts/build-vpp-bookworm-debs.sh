@@ -44,6 +44,12 @@ mount -t proc proc "$rootfs/proc"
 mount -t sysfs sysfs "$rootfs/sys"
 mounted=1
 cp -a "$source_dir/." "$rootfs/src/vpp/"
+source_version=$(git -C "$source_dir" describe --long --match 'v*' HEAD 2>/dev/null || true)
+if [ -z "$source_version" ]; then
+  source_commit=$(git -C "$source_dir" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)
+  source_version="v25.10-0-g$source_commit"
+fi
+printf '%s\n' "$source_version" > "$rootfs/src/vpp/src/scripts/.version"
 rm -rf "$rootfs/src/vpp/build-root"/build-* \
   "$rootfs/src/vpp/build-root"/install-* \
   "$rootfs/src/vpp/build-root"/.deps.ok
