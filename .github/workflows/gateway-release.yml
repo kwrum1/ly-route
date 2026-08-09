@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 env:
-  LY_ROUTE_MIRROR: https://deb.debian.org/debian
-  LY_ROUTE_SECURITY_MIRROR: https://security.debian.org/debian-security
+  LY_ROUTE_MIRROR: https://mirrors.ustc.edu.cn/debian
+  LY_ROUTE_SECURITY_MIRROR: https://mirrors.ustc.edu.cn/debian-security
   LY_ROUTE_SMARTDNS_REF: Release48.3
   LY_ROUTE_XRAY_REF: v26.3.27
   LY_ROUTE_VPP_COMMIT: 744d3c7159ae130fb57f669a826ff1e45ed51836
@@ -46,17 +46,43 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
             build-essential cmake dpkg-dev git curl gdisk parted dosfstools rsync \
-            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux
+            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux \
+            xorriso isolinux syslinux-common
+          curl -fsSL https://deb.debian.org/debian/pool/main/l/live-build/live-build_20230502_all.deb \
+            -o /tmp/live-build_20230502_all.deb
+          echo 'a863905724e7b69d45066ebab113cb6de12a11984349847ad49f6151c10f017d  /tmp/live-build_20230502_all.deb' \
+            | sha256sum -c -
+          sudo dpkg -i /tmp/live-build_20230502_all.deb || true
+          sudo apt-get install -f -y
+          lb --version
+      - name: Fetch pinned VPP source
+        run: |
+          git init vpp-master
+          git -C vpp-master remote add origin https://github.com/FDio/vpp.git
+          git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" \
+            '+refs/tags/v25.10:refs/tags/v25.10'
+          git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
+          test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
+          git -C vpp-master describe --long --match 'v*' "$LY_ROUTE_VPP_COMMIT"
       - name: Build pinned x86 runtime packages
         run: |
-          sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR ./scripts/build-runtime-debs.sh smartdns
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR env \
+            LY_ROUTE_RUNTIME_DEB_ARCH=amd64 \
+            LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
+            LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
+            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen \
+            ./scripts/build-vpp-bookworm-debs.sh
+          sudo chown -R "$USER:$USER" runtime-debs vpp-master
+          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64
+          export LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs"
+          export LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
           ./scripts/build-runtime-debs.sh vpp-apply
-          ./scripts/build-runtime-debs.sh vpp-fdio
-          ./scripts/build-runtime-debs.sh vpp-smart-qos
-          ./scripts/build-runtime-debs.sh vpp-security-guard
+          sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-smart-qos
+          sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-security-guard
       - name: Build gateway rootfs and upgrade
         run: |
           sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
@@ -70,6 +96,12 @@ jobs:
             ./scripts/build-disk-image.sh --product gateway \
               --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst \
               --out dist/x86 --size 4G
+      - name: Build hardware-aware installer ISO
+        run: |
+          sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR \
+            ./scripts/build-auto-install-iso.sh --product gateway \
+              --image dist/x86/ly-route-gateway-bookworm-amd64-4g.img.zst \
+              --out dist/iso
       - name: Upload x86 artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -81,6 +113,10 @@ jobs:
             dist/x86/*.img.zst.sha256
             dist/x86/*.manifest.json
             dist/x86/*.manifest.json.sha256
+            dist/iso/ly-route-gateway-x86_64-installer.iso
+            dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
+            dist/iso/ly-route-gateway-x86_64-installer.iso.manifest.json
+            dist/iso/ly-route-gateway-x86_64-installer.iso.manifest.json.sha256
             dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
             dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
 
@@ -118,6 +154,7 @@ jobs:
             LY_ROUTE_RUNTIME_DEB_ARCH=arm64 \
             LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
             LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
+            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen \
             ./scripts/build-vpp-bookworm-debs.sh
           sudo chown -R "$USER:$USER" runtime-debs vpp-master
           export LY_ROUTE_RUNTIME_DEB_ARCH=arm64
