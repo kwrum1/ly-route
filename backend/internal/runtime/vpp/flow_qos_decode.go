@@ -13,7 +13,7 @@ func verifyDynamicFlowACL(results []VPPCTLCommandResult, object flow.VPPObject, 
 	if !found {
 		return snapshotDecodeError("flow QoS ACL %q tagged runtime object is missing", object.RuleID)
 	}
-	return verifyACLOutput(output, aclCandidateProof{numericID: aclID, id: object.RuleID, action: action, match: policyMatch(object.Match)})
+	return verifyACLOutput(output, aclCandidateProof{numericID: aclID, id: object.RuleID, action: action, match: policyMatch(object.Match), allowUnmatched: action == "permit"})
 }
 
 func policyMatch(match flow.Match) trafficpolicy.Match {

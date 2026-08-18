@@ -35,7 +35,8 @@ static int first_udp_response = 1;
 
 #define MAX_SOURCE_ROUTES 4096
 #define MAX_DNS_NAME 255
-#define UPSTREAM_ATTEMPTS 2
+#define UPSTREAM_ATTEMPTS 3
+#define SERVFAIL_RETRY_DELAY_US 1200000
 struct source_route {
     int family;
     uint8_t address[16];
@@ -255,7 +256,9 @@ static int domain_matches(const struct source_route *route, const char *domain) 
 static int source_route_port(const uint8_t *query, size_t length, const struct sockaddr *client) {
     char domain[MAX_DNS_NAME + 1];
     if (refresh_source_routes() < 0 || parse_query_domain(query, length, domain) < 0) return -1;
-    int port = 1053;
+    // The normal SmartDNS listener is the loopback stub at 127.0.0.53:53.
+    // Source-route entries use dedicated 127.0.0.1 ports and override this.
+    int port = 53;
     for (size_t i = 0; i < source_route_count; i++) {
         if (domain_matches(&source_routes[i], domain) && source_matches(&source_routes[i], client)) {
             port = source_routes[i].port;
@@ -274,12 +277,17 @@ static int source_route_port(const uint8_t *query, size_t length, const struct s
     return port;
 }
 
+static int dns_response_is_servfail(const uint8_t *response, size_t length) {
+    return length >= 12 && (response[3] & 0x0f) == 2;
+}
+
 static int open_upstream(uint16_t port, int type) {
 	struct sockaddr_in address = {
 		.sin_family = AF_INET,
 		.sin_port = htons(port),
-		.sin_addr = { .s_addr = htonl(INADDR_LOOPBACK) },
 	};
+	const char *host = port == 53 ? "127.0.0.53" : "127.0.0.1";
+	if (inet_pton(AF_INET, host, &address.sin_addr) != 1) return -1;
 	int fd = libc_socket(AF_INET, type, 0);
 	if (fd < 0 || libc_connect(fd, (const struct sockaddr *)&address, sizeof(address)) < 0) {
 		int saved_errno = errno;
@@ -321,6 +329,10 @@ static int relay_udp(int listener) {
 		ssize_t answer_length = libc_recvfrom(upstream, answer, sizeof(answer), 0, NULL, NULL);
 		libc_close(upstream);
 		if (answer_length < 12) continue;
+		if (dns_response_is_servfail(answer, (size_t)answer_length) && attempt + 1 < UPSTREAM_ATTEMPTS) {
+			usleep(SERVFAIL_RETRY_DELAY_US);
+			continue;
+		}
 		(void)sendto(listener, answer, (size_t)answer_length, 0,
 		             (const struct sockaddr *)&client, client_length);
 		if (first_udp_response) {
@@ -407,6 +419,10 @@ static void relay_tcp_client(int client, const struct sockaddr *peer) {
 			continue;
 		}
 		libc_close(upstream);
+		if (dns_response_is_servfail(answer + 2, answer_length) && attempt + 1 < UPSTREAM_ATTEMPTS) {
+			usleep(SERVFAIL_RETRY_DELAY_US);
+			continue;
+		}
 		(void)write_full(client, answer, answer_length + 2);
 		return;
 	}

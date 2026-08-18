@@ -1,9 +1,7 @@
 package vpp
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -36,12 +34,22 @@ func (client VPPCTLClient) OpenChannel(context.Context) (Channel, error) {
 	if _, err := exec.LookPath(client.Binary); err != nil {
 		return nil, fmt.Errorf("vppctl binary %q is unavailable: %w", client.Binary, err)
 	}
-	return vppctlChannel{binary: client.Binary, dynamicACL: client.dynamicACL}, nil
+	return &vppctlChannel{binary: client.Binary, dynamicACL: client.dynamicACL}, nil
 }
 
 type vppctlChannel struct {
-	binary     string
-	dynamicACL bool
+	binary                string
+	dynamicACL            bool
+	natReturnGuardIngress string
+	lanVPPInterface       string
+}
+
+func (channel *vppctlChannel) setNATReturnGuardIngress(ingress string) {
+	channel.natReturnGuardIngress = strings.TrimSpace(ingress)
+}
+
+func (channel *vppctlChannel) setLANVPPInterface(ingress string) {
+	channel.lanVPPInterface = strings.TrimSpace(ingress)
 }
 
 type VPPCTLCommandResult struct {
@@ -65,9 +73,7 @@ const (
 )
 
 func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply, error) {
-	if attachment, ok := operation.Payload.(NativeAttachment); ok && attachment.Hook == NativeHookVMXNET3 {
-		return channel.doVMXNET3Lifecycle(ctx, operation, attachment)
-	}
+	operation = rewriteOperationLANInterface(operation, channel.lanVPPInterface)
 	if channel.dynamicACL && operation.Name == "vpp.security-acl.snapshot" {
 		operation.VPPCtlCommands = []string{"show acl-plugin acl"}
 	}
@@ -89,13 +95,30 @@ func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply
 		return channel.doProxyABFLifecycle(ctx, operation, steering)
 	}
 	if channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.route-policy") && !strings.HasSuffix(operation.Name, ".snapshot") {
+		// The native pre-NAT route classifier owns ordinary IPv4 policy routing.
+		// Some persisted plans created before that classifier still carry ABF
+		// commands, including full-rebuild cleanup operations. Sending those
+		// commands through the VPP 25.x ABF lifecycle can tear down a referenced
+		// FIB and crash the data plane. Prefer the native lifecycle whenever the
+		// policy can be represented by the classifier, regardless of the age of
+		// the serialized operation.
+		if policy, ok := operation.Payload.(trafficpolicy.RoutePolicy); ok && (routePolicySupportsNativePreNAT(policy) || operationHasCommand(operation, "set ly-route pre-nat-route add")) {
+			return channel.doPreNATRoutePolicyLifecycle(ctx, operation)
+		}
+		if operationHasCommand(operation, "set ly-route pre-nat-route add") {
+			return channel.doPreNATRoutePolicyLifecycle(ctx, operation)
+		}
 		return channel.doRoutePolicyLifecycle(ctx, operation)
 	}
 	if mapping, ok := operation.Payload.(nat.PortMapping); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.nat44-ed.port-map") {
-		return channel.doNAT44MappingLifecycle(ctx, operation, natReturnGuardForPortMapping(mapping))
+		guard := natReturnGuardForPortMapping(mapping)
+		guard.ingressVPPInterface = channel.natReturnGuardIngress
+		return channel.doNAT44MappingLifecycle(ctx, operation, guard)
 	}
 	if mapping, ok := operation.Payload.(nat.StaticMapping); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.nat44-ed.static-mapping") {
-		return channel.doNAT44MappingLifecycle(ctx, operation, natReturnGuardForStaticMapping(mapping))
+		guard := natReturnGuardForStaticMapping(mapping)
+		guard.ingressVPPInterface = channel.natReturnGuardIngress
+		return channel.doNAT44MappingLifecycle(ctx, operation, guard)
 	}
 	if interception, ok := operation.Payload.(DNSTransparentInterception); ok && channel.dynamicACL && strings.HasPrefix(operation.Name, "vpp.dns-transparent-interception") {
 		if strings.HasSuffix(operation.Name, ".rollback-delete") {
@@ -112,11 +135,11 @@ func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply
 	if smartQoS, ok := operation.Payload.(SmartQoSInterface); ok && strings.HasPrefix(operation.Name, "vpp.smart-qos") {
 		return channel.doSmartQoSLifecycle(ctx, operation, smartQoS)
 	}
-	if group, ok := operation.Payload.(flow.VPPObjectGroup); ok && channel.dynamicACL && flowGroupUsesACL(group) {
+	if group, ok := operation.Payload.(flow.VPPObjectGroup); ok && channel.dynamicACL && flowGroupNeedsDynamicLifecycle(group) {
 		deleting := strings.Contains(operation.Name, "rollback-delete") || operationHasCommand(operation, "delete acl-plugin acl") || operationHasCommand(operation, "policer del")
 		return channel.doFlowQoSGroupLifecycle(ctx, operation, group, deleting)
 	}
-	if target, ok := operation.Payload.(flow.Target); ok && channel.dynamicACL && flowTargetUsesACL(target) {
+	if target, ok := operation.Payload.(flow.Target); ok && channel.dynamicACL && flowTargetNeedsDynamicLifecycle(target) {
 		deleting := strings.Contains(operation.Name, "rollback-delete") || operationHasCommand(operation, "delete acl-plugin acl") || operationHasCommand(operation, "policer del")
 		return channel.doFlowQoSTargetLifecycle(ctx, operation, target, deleting)
 	}
@@ -131,86 +154,48 @@ func (channel vppctlChannel) Do(ctx context.Context, operation Operation) (Reply
 	return channel.doCommands(ctx, operation)
 }
 
-func (channel vppctlChannel) doVMXNET3Lifecycle(ctx context.Context, operation Operation, attachment NativeAttachment) (Reply, error) {
-	results := make([]VPPCTLCommandResult, 0, 6)
-	run := func(command string, args ...string) (string, error) {
-		var stdout bytes.Buffer
-		var stderr bytes.Buffer
-		cmd := exec.CommandContext(ctx, channel.binary, args...)
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		retval := int32(0)
-		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				retval = int32(exitErr.ExitCode())
-			} else {
-				retval = -1
-			}
-		}
-		results = append(results, VPPCTLCommandResult{Command: command, Stdout: stdout.String(), Stderr: stderr.String(), Retval: retval})
-		if err != nil {
-			return stdout.String(), fmt.Errorf("vppctl %s failed with retval %d: %w: %s", command, retval, err, strings.TrimSpace(stderr.String()))
-		}
-		return stdout.String(), nil
+func rewriteOperationLANInterface(operation Operation, ingress string) Operation {
+	ingress = strings.TrimSpace(ingress)
+	if ingress == "" {
+		return operation
 	}
-
-	if strings.HasSuffix(operation.Name, ".rollback-delete") {
-		if strings.TrimSpace(attachment.VPPInterface) != "" {
-			_, _ = run("delete interface vmxnet3 "+attachment.VPPInterface, "delete", "interface", "vmxnet3", attachment.VPPInterface)
-		}
-		if _, err := run("show interface", "show", "interface"); err != nil {
-			return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
-		}
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, nil
+	operation.VPPCtlCommands = append([]string(nil), operation.VPPCtlCommands...)
+	for index, command := range operation.VPPCtlCommands {
+		operation.VPPCtlCommands[index] = strings.ReplaceAll(command, "lyroute-$LY_ROUTE_LAN_INTERFACE", ingress)
+		operation.VPPCtlCommands[index] = strings.ReplaceAll(operation.VPPCtlCommands[index], "host-$LY_ROUTE_LAN_INTERFACE", ingress)
 	}
-	if strings.TrimSpace(attachment.PCIAddress) == "" {
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, errors.New("VMXNET3 attachment has no PCI address")
+	switch payload := operation.Payload.(type) {
+	case flow.VPPObjectGroup:
+		operation.Payload = rewriteFlowObjectGroupLANInterface(payload, ingress)
+	case flow.Target:
+		operation.Payload = rewriteFlowTargetLANInterface(payload, ingress)
+	case SnapshotRequest:
+		payload.LANVPPInterface = ingress
+		operation.Payload = payload
 	}
-	_, _ = run("create interface vmxnet3 "+attachment.PCIAddress, "create", "interface", "vmxnet3", attachment.PCIAddress)
-	vmxnet3Output, err := run("show vmxnet3", "show", "vmxnet3")
-	if err != nil {
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
-	}
-	actual := parseVMXNET3Interface(vmxnet3Output, attachment.PCIAddress)
-	if actual == "" {
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, fmt.Errorf("VPP VMXNET3 interface for PCI %s was not found", attachment.PCIAddress)
-	}
-	desired := strings.TrimSpace(attachment.VPPInterface)
-	if desired == "" {
-		desired = actual
-	}
-	if actual != desired {
-		if _, err := run("set interface name "+actual+" "+desired, "set", "interface", "name", actual, desired); err != nil {
-			return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
-		}
-	}
-	if _, err := run("set interface state "+desired+" up", "set", "interface", "state", desired, "up"); err != nil {
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
-	}
-	if _, err := run("show hardware-interfaces "+desired, "show", "hardware-interfaces", desired); err != nil {
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
-	}
-	if _, err := run("show interface "+desired, "show", "interface", desired); err != nil {
-		return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, err
-	}
-	return Reply{Operation: operation.Name, Payload: VPPCTLReplyPayload{CommandResults: results}}, nil
+	return operation
 }
 
-func parseVMXNET3Interface(output, pci string) string {
-	current := ""
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "Interface:" {
-			current = fields[1]
-			continue
-		}
-		if len(fields) >= 3 && fields[0] == "PCI" && fields[1] == "Address:" && fields[2] == pci {
-			return current
+func rewriteFlowObjectGroupLANInterface(group flow.VPPObjectGroup, ingress string) flow.VPPObjectGroup {
+	group.Objects = append([]flow.VPPObject(nil), group.Objects...)
+	for index := range group.Objects {
+		object := &group.Objects[index]
+		object.Attachments = append([]string(nil), object.Attachments...)
+		for attachmentIndex, attachment := range object.Attachments {
+			object.Attachments[attachmentIndex] = strings.ReplaceAll(attachment, "host-$LY_ROUTE_LAN_INTERFACE", ingress)
+			object.Attachments[attachmentIndex] = strings.ReplaceAll(object.Attachments[attachmentIndex], "lyroute-$LY_ROUTE_LAN_INTERFACE", ingress)
 		}
 	}
-	return ""
+	return group
+}
+
+func rewriteFlowTargetLANInterface(target flow.Target, ingress string) flow.Target {
+	target.Attachments = append([]string(nil), target.Attachments...)
+	for index, attachment := range target.Attachments {
+		target.Attachments[index] = strings.ReplaceAll(attachment, "host-$LY_ROUTE_LAN_INTERFACE", ingress)
+		target.Attachments[index] = strings.ReplaceAll(target.Attachments[index], "lyroute-$LY_ROUTE_LAN_INTERFACE", ingress)
+	}
+	return target
 }
 
 func operationHasCommand(operation Operation, fragment string) bool {

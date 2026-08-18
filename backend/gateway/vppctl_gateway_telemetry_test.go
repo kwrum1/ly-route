@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"testing"
 	"time"
 
 	"ly-route/backend/internal/httpapi"
 	"ly-route/backend/internal/persistence"
 	"ly-route/backend/internal/runtime/proxy"
+	serviceRuntime "ly-route/backend/internal/runtime/service"
 )
 
 type memoryGatewayTelemetryConfig struct {
@@ -55,6 +57,8 @@ func TestVPPCTLGatewayTelemetryUsesVPPLogicalCountersAndLANObservations(t *testi
        external host 203.0.113.20:443
        total pkts 8, total bytes 4096
 `, nil
+		case "[show nat44 ei sessions]":
+			return "NAT44 sessions:\n-------- thread 0 vpp_main: 0 sessions --------\n", nil
 		default:
 			return "", fmt.Errorf("unexpected VPP command %v", args)
 		}
@@ -89,6 +93,19 @@ func TestVPPCTLGatewayTelemetryUsesVPPLogicalCountersAndLANObservations(t *testi
 	}
 }
 
+func TestParseGatewayNATEISummariesReportsLANConnectionCounts(t *testing.T) {
+	now := time.Date(2026, 8, 12, 8, 0, 0, 0, time.UTC)
+	output := `NAT44 sessions:
+-------- thread 1 vpp_wk_0: 79 sessions --------
+  192.168.50.100: 2 dynamic translations, 1 static translations
+  198.19.195.174: 75 dynamic translations, 0 static translations
+`
+	items := parseGatewayNATEISummaries(output, now, []netip.Prefix{netip.MustParsePrefix("192.168.50.0/24")})
+	if len(items) != 1 || items[0].SourceIP != "192.168.50.100" || items[0].ConnectionCount != 3 || !items[0].ObservedAt.Equal(now) {
+		t.Fatalf("EI connection summaries = %#v", items)
+	}
+}
+
 func telemetryConfigDocument(t *testing.T, resourceType, id string, payload map[string]any) persistence.ConfigDocument {
 	t.Helper()
 	raw, err := json.Marshal(payload)
@@ -116,11 +133,11 @@ lyroute-ens224 2 up 9000/0/0/0 rx packets 10
  rx bytes %d
  tx packets 10
  tx bytes %d
-pppoe_session0 5 up 0/0/0/0 rx packets 10
- rx bytes 1000
+	%s 5 up 0/0/0/0 rx packets 10
+ rx bytes %d
  tx packets 10
- tx bytes 1000
-`, wanRX, wanTX, network.IngressVPPInterface, proxyInRX, proxyInTX, network.EgressVPPInterface, proxyOutRX, proxyOutTX)
+ tx bytes %d
+`, wanRX, wanTX, network.IngressVPPInterface, proxyInRX, proxyInTX, network.EgressVPPInterface, proxyOutRX, proxyOutTX, serviceRuntime.PPPoEInterfaceName("wan0"), wanRX, wanTX)
 }
 
 func logicalEgressByID(t *testing.T, items []httpapi.LogicalEgressCounter, id string) httpapi.LogicalEgressCounter {

@@ -54,7 +54,7 @@ func TestMain(m *testing.M) {
 func useVPPProof(t *testing.T, management string) {
 	t.Helper()
 	proofPath := filepath.Join(t.TempDir(), "capabilities.json")
-	proof := `{"management_interface":` + fmt.Sprintf("%q", management) + `,"proofs":[` + testProofs("eth1", "eth2", "eth3", "eth4", "enp2s0", "enp3s0", "enp4s0", "lan-bridge-1", "wan0", "wan1") + `]}`
+	proof := `{"management_interface":` + fmt.Sprintf("%q", management) + `,"proofs":[` + testProofs("eth1", "eth2", "eth3", "eth4", "enp2s0", "enp3s0", "enp4s0", "lan0", "lan-bridge-1", "wan0", "wan1") + `]}`
 	proof = strings.ReplaceAll(proof, `\"`, `"`)
 	if err := os.WriteFile(proofPath, []byte(proof), 0600); err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestDashboardSummaryReportsSystemResourcesAndDependencies(t *testing.T) {
 	}
 }
 
-func TestDNSPoliciesMergeByPriorityAndUseFinalMiss(t *testing.T) {
+func TestDNSPoliciesMergeByPriorityAndUseDedicatedDefaultMiss(t *testing.T) {
 	store, err := persistence.Open(context.Background(), "file:dns-policy-merge-test?mode=memory&cache=shared")
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +137,13 @@ func TestDNSPoliciesMergeByPriorityAndUseFinalMiss(t *testing.T) {
 	defaultPolicy := `{"id":"dns-default","name":"缺省","priority":100,"enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"direct","upstream_id":"cf","wan_egress_id":"proxy"},"rules":[]}}`
 	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", defaultPolicy, cookie); res.Code != http.StatusOK {
 		t.Fatalf("default DNS policy status = %d: %s", res.Code, res.Body.String())
+	}
+	// A later client-specific policy defaults to reject for requests that
+	// reach its own listener. It must not replace the global fallback used
+	// by SmartDNS's shared listener.
+	clientScoped := `{"id":"client-scoped","name":"client scoped","priority":320,"enabled":true,"policy":{"engine":"smartdns","miss":{"kind":"reject"},"rules":[{"id":"client-rule","source_prefixes":["192.168.50.101/32"],"domains":["client.example"],"outcome":{"kind":"direct","upstream_id":"ali","wan_egress_id":"pppoe"}}]}}`
+	if res := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/dns/policies", clientScoped, cookie); res.Code != http.StatusOK {
+		t.Fatalf("client-scoped DNS policy status = %d: %s", res.Code, res.Body.String())
 	}
 	matched := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/dns/resolve?domain=cn.example", "", cookie)
 	if matched.Code != http.StatusOK || !strings.Contains(matched.Body.String(), `"rule_id":"cn-rule"`) {
@@ -752,7 +759,7 @@ func TestRuntimePreviewDHCPWANOverridesStaleStaticAlias(t *testing.T) {
 	if preview.Code != http.StatusOK {
 		t.Fatalf("preview status = %d, want 200: %s", preview.Code, preview.Body.String())
 	}
-	for _, required := range []string{"set interface ip address lyroute-enp4s0 10.10.10.6/24 del", "set dhcp client intfc lyroute-enp4s0", `"mode":"dhcp4"`} {
+	for _, required := range []string{"set interface ip address del lyroute-enp4s0 10.10.10.6/24", "set dhcp client intfc lyroute-enp4s0", `"mode":"dhcp4"`} {
 		if !strings.Contains(preview.Body.String(), required) {
 			t.Fatalf("runtime preview missing %q: %s", required, preview.Body.String())
 		}
@@ -1003,6 +1010,33 @@ func TestNATPortMapCRUDDecoratesStatsAndUpdatesRuntimePreview(t *testing.T) {
 	}
 }
 
+func TestNATPortMapRejectsDuplicateInternalEndpointBeforeSave(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-nat-duplicate-endpoint-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	first := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/gateway/nat/port-maps", `{"id":"existing","external_address":"203.0.113.10","external_port":18080,"internal_host":"192.168.50.101","internal_port":8080,"protocol":"tcp"}`, cookie)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first port map status = %d, want 200: %s", first.Code, first.Body.String())
+	}
+	duplicate := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/gateway/nat/port-maps", `{"id":"duplicate","external_address":"203.0.113.10","external_port":37140,"internal_host":"192.168.50.101","internal_port":8080,"protocol":"tcp"}`, cookie)
+	if duplicate.Code != http.StatusUnprocessableEntity || !strings.Contains(duplicate.Body.String(), "one mapping per internal endpoint") {
+		t.Fatalf("duplicate port map = %d %s", duplicate.Code, duplicate.Body.String())
+	}
+	list := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/gateway/nat/port-maps", "", cookie)
+	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), `"id":"duplicate"`) {
+		t.Fatalf("duplicate port map was persisted: %d %s", list.Code, list.Body.String())
+	}
+}
+
 func TestNATUnsupportedIPv6AndUPnPRoutesAbsent(t *testing.T) {
 	ctx := context.Background()
 	store, err := persistence.Open(ctx, "file:httpapi-nat-unsupported-test?mode=memory&cache=shared")
@@ -1153,6 +1187,46 @@ func TestProxyWANRequiresUnderlayWAN(t *testing.T) {
 	rejected := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/proxy/egresses", `{"id":"proxy-no-underlay","kind":"egress","semantic_type":"proxy_egress","display_list":"wan","proxy_profile_id":"xray-tproxy-outbound"}`, login.Result().Cookies()[0])
 	if rejected.Code != http.StatusUnprocessableEntity || !strings.Contains(rejected.Body.String(), "underlay_wan_id") {
 		t.Fatalf("proxy underlay status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+}
+
+func TestProxyEgressPatchRejectsNonCanonicalPayloadAndPreservesRuntimeFields(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-proxy-egress-patch-canonical-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	wan := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/gateway/wan-links", `{"id":"wan-static","name":"WAN Static","enabled":true,"type":"static","interface_id":"eth1","ipv4":{"mode":"static","address":"198.51.100.10/30"}}`, cookie)
+	if wan.Code != http.StatusOK {
+		t.Fatalf("WAN status = %d, want 200: %s", wan.Code, wan.Body.String())
+	}
+	create := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/proxy/egresses", `{"id":"proxy-egress-test","kind":"egress","name":"Proxy WAN","enabled":true,"semantic_type":"proxy_egress","display_list":"wan","proxy_profile_id":"xray-tproxy-outbound","underlay_wan_id":"wan-static"}`, cookie)
+	if create.Code != http.StatusOK {
+		t.Fatalf("proxy egress create status = %d, want 200: %s", create.Code, create.Body.String())
+	}
+	bad := authenticatedJSONRequest(t, server, http.MethodPatch, "/api/v1/proxy/egresses/proxy-egress-test", `{"id":"proxy-egress-test","name":"Proxy WAN","underlay_wan_id":"wan-static","node_id":"proxy-node-test"}`, cookie)
+	if bad.Code != http.StatusUnprocessableEntity || !strings.Contains(bad.Body.String(), "runtime_profile") {
+		t.Fatalf("non-canonical proxy patch status = %d, want 422 with runtime_profile error: %s", bad.Code, bad.Body.String())
+	}
+	good := authenticatedJSONRequest(t, server, http.MethodPatch, "/api/v1/proxy/egresses/proxy-egress-test", `{"id":"proxy-egress-test","name":"Proxy WAN","enabled":true,"semantic_type":"proxy_egress","display_list":"wan","runtime_profile":"xray-tproxy-outbound","capture_path":"vpp_service_interface","engine":"xray","handoff":"vpp_to_service","listener_mode":"vpp-service","underlay_wan_id":"wan-static","node_id":"proxy-node-test"}`, cookie)
+	if good.Code != http.StatusOK {
+		t.Fatalf("canonical proxy patch status = %d, want 200: %s", good.Code, good.Body.String())
+	}
+	item := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/proxy/egresses/proxy-egress-test", "", cookie)
+	if item.Code != http.StatusOK {
+		t.Fatalf("proxy egress read status = %d, want 200: %s", item.Code, item.Body.String())
+	}
+	for _, required := range []string{"runtime_profile", "capture_path", "engine", "handoff", "node_id"} {
+		if !strings.Contains(item.Body.String(), required) {
+			t.Fatalf("proxy egress readback missing %q: %s", required, item.Body.String())
+		}
 	}
 }
 
@@ -1349,7 +1423,22 @@ func TestPPPAddressFromStatusJSON(t *testing.T) {
 	}
 }
 
-func TestFullConeNATRequiresBehaviorGate(t *testing.T) {
+func TestPPPACMACFromStatusJSON(t *testing.T) {
+	if got := pppACMACFromStatusJSON([]byte(`{"state":"connected","session":{"ac_mac":[0,80,86,181,202,154]}}`)); got != "00:50:56:b5:ca:9a" {
+		t.Fatalf("AC MAC = %q", got)
+	}
+	for _, input := range []string{
+		`{"state":"disconnected","session":{"ac_mac":[0,80,86,181,202,154]}}`,
+		`{"state":"connected","session":{"ac_mac":[0,80,86]}}`,
+		`{"state":"connected","session":{"ac_mac":[0,80,86,181,202,256]}}`,
+	} {
+		if got := pppACMACFromStatusJSON([]byte(input)); got != "" {
+			t.Fatalf("invalid status exposed AC MAC %q for %s", got, input)
+		}
+	}
+}
+
+func TestFullConeNATIsAcceptedForRuntimeCompilation(t *testing.T) {
 	ctx := context.Background()
 	store, err := persistence.Open(ctx, "file:httpapi-full-cone-gate-test?mode=memory&cache=shared")
 	if err != nil {
@@ -1363,11 +1452,11 @@ func TestFullConeNATRequiresBehaviorGate(t *testing.T) {
 	}
 	cookie := login.Result().Cookies()[0]
 	portMap := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/gateway/nat/port-maps", `{"id":"full-cone-map","full_cone":true,"external_address":"203.0.113.10","external_port":9443,"internal_host":"192.168.10.30","internal_port":443,"protocol":"tcp"}`, cookie)
-	if portMap.Code != http.StatusUnprocessableEntity || !strings.Contains(portMap.Body.String(), "full-cone NAT requires") {
+	if portMap.Code != http.StatusOK {
 		t.Fatalf("full-cone port map status=%d body=%s", portMap.Code, portMap.Body.String())
 	}
 	route := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/gateway/policies/routes", `{"id":"full-cone-route","enabled":true,"match":{"src_ip":"192.168.1.0/24"},"action":"nat","egress":"wan0","nat_behavior":"full-cone"}`, cookie)
-	if route.Code != http.StatusUnprocessableEntity || !strings.Contains(route.Body.String(), "full-cone NAT requires") {
+	if route.Code != http.StatusOK {
 		t.Fatalf("full-cone route status=%d body=%s", route.Code, route.Body.String())
 	}
 }
@@ -1555,6 +1644,8 @@ func TestObjectGroupMultipartImport(t *testing.T) {
 }
 
 func TestRuntimePreviewCompilesDesiredRoutePolicyAndSecurityACLToVPPOperations(t *testing.T) {
+	t.Setenv("LY_ROUTE_MANAGEMENT_INTERFACE", "mgmt0")
+	useVPPProof(t, "mgmt0")
 	ctx := context.Background()
 	store, err := persistence.Open(ctx, "file:httpapi-runtime-policy-preview-test?mode=memory&cache=shared")
 	if err != nil {
@@ -1567,6 +1658,10 @@ func TestRuntimePreviewCompilesDesiredRoutePolicyAndSecurityACLToVPPOperations(t
 		t.Fatalf("login status = %d, want 200: %s", login.Code, login.Body.String())
 	}
 	cookie := login.Result().Cookies()[0]
+	lan := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/interfaces", `{"id":"lan0","name":"lan0","interface_id":"lan0","gateway_role":"lan","cidr":"192.168.20.1/24"}`, cookie)
+	if lan.Code != http.StatusOK {
+		t.Fatalf("assign lan0 status = %d: %s", lan.Code, lan.Body.String())
+	}
 	for _, interfaceName := range []string{"wan0", "wan1"} {
 		assigned := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/interfaces", fmt.Sprintf(`{"id":%q,"name":%q,"interface_id":%q,"gateway_role":"wan"}`, interfaceName, interfaceName, interfaceName), cookie)
 		if assigned.Code != http.StatusOK {
@@ -1589,10 +1684,13 @@ func TestRuntimePreviewCompilesDesiredRoutePolicyAndSecurityACLToVPPOperations(t
 	if preview.Code != http.StatusOK {
 		t.Fatalf("runtime preview status = %d, want 200: %s", preview.Code, preview.Body.String())
 	}
-	for _, required := range []string{"compiled_policy", "vpp.route-policy", "vpp.security-acl", "vpp.pbr.next-hop-group", "set acl-plugin acl", "ip table add", "show ip fib table", "deny src 192.168.20.0/24 dst 10.0.0.0/8", "via ip4-lookup-in-table", "via lyroute-wan1"} {
+	for _, required := range []string{"compiled_policy", "vpp.route-policy", "vpp.security-generation", "vpp.pbr.next-hop-group", "set acl-plugin acl", "ip table add", "show ip fib table", "deny src 192.168.20.0/24 dst 10.0.0.0/8", "via ip4-lookup-in-table", "via lyroute-wan1"} {
 		if !strings.Contains(preview.Body.String(), required) {
 			t.Fatalf("runtime preview missing %q: %s", required, preview.Body.String())
 		}
+	}
+	if strings.Contains(preview.Body.String(), `"name":"vpp.security-acl"`) {
+		t.Fatalf("runtime preview contains duplicate legacy security ACL operation: %s", preview.Body.String())
 	}
 }
 
@@ -1726,7 +1824,7 @@ func TestDNSIPSetObservationTriggersGatewayPolicyWithDNSPrecedence(t *testing.T)
 	for _, route := range transaction.plan.GatewayPlan.Policy.RoutePolicies {
 		switch route.ID {
 		case "dns-override-updates":
-			overrideFound = route.Priority < 10 && route.Egress == "wan-primary" && len(route.Match.Destinations) == 1 && route.Match.Destinations[0] == "203.0.113.53/32"
+			overrideFound = route.Priority == 0 && route.Priority < 10 && route.Egress == "wan-primary" && len(route.Match.Destinations) == 1 && route.Match.Destinations[0] == "203.0.113.53/32"
 		case "ordinary-pbr":
 			ordinaryFound = route.Egress == "wan-secondary"
 		}
@@ -2268,6 +2366,8 @@ func TestManagementNetworkCanBeReadAndUpdated(t *testing.T) {
 	}
 	t.Cleanup(func() { store.Close() })
 	t.Setenv("LY_ROUTE_LAN_INTERFACE", "enp1s0")
+	t.Setenv("LY_ROUTE_LAN_CIDR", "10.1.18.125/24")
+	t.Setenv("LY_ROUTE_MANAGEMENT_GATEWAY", "10.1.18.1")
 	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()))
 	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
 	if login.Code != http.StatusOK {
@@ -2275,7 +2375,7 @@ func TestManagementNetworkCanBeReadAndUpdated(t *testing.T) {
 	}
 	cookie := login.Result().Cookies()[0]
 	get := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/management/network", "", cookie)
-	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"interface_id":"enp1s0"`) || !strings.Contains(get.Body.String(), `"cidr":"192.168.88.1/24"`) {
+	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), `"interface_id":"enp1s0"`) || !strings.Contains(get.Body.String(), `"cidr":"10.1.18.125/24"`) || !strings.Contains(get.Body.String(), `"gateway":"10.1.18.1"`) {
 		t.Fatalf("management network get = %d %s", get.Code, get.Body.String())
 	}
 	invalid := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/management/network", `{"interface_id":"enp1s0","cidr":"192.168.99.1/24","gateway":"10.0.0.1","confirm_change":true}`, cookie)

@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ly Route <ly-route@example.invalid>
+Date: Sun, 16 Aug 2026 18:00:00 +0800
+Subject: [PATCH] pppoe: allow sessions to select their encap interface
+
+The upstream PPPoE control path stores one global control interface and
+discovers an encapsulation interface from an AC-MAC-only table. That cannot
+represent concurrent CPE sessions on separate WAN links reliably. Preserve the
+legacy lookup when no interface is supplied, while allowing the native Ly Route
+client to bind a negotiated session to its exact WAN interface.
+
+---
+ src/plugins/pppoe/pppoe.c | 26 ++++++++++++++++++--------
+ 1 file changed, 18 insertions(+), 8 deletions(-)
+
+diff --git a/src/plugins/pppoe/pppoe.c b/src/plugins/pppoe/pppoe.c
+index 7ac1111..8599bb5 100644
+--- a/src/plugins/pppoe/pppoe.c
++++ b/src/plugins/pppoe/pppoe.c
+@@ -341,12 +341,18 @@ int vnet_pppoe_add_del_session
+       pfx.fp_proto = FIB_PROTOCOL_IP6;
+     }
+
+-  /* Get encap_if_index and local mac address from link_table */
+-  pppoe_lookup_1 (&pem->link_table, &cached_key, &cached_result,
+-		  a->client_mac, 0, &key, &bucket, &result);
+-  a->encap_if_index = result.fields.sw_if_index;
++  /* Legacy callers discover the encapsulation interface from the learned
++   * AC-MAC table. Native multi-WAN clients provide the exact interface so a
++   * later control session cannot replace an earlier WAN binding. */
++  if (a->encap_if_index == 0 || a->encap_if_index == ~0)
++    {
++      pppoe_lookup_1 (&pem->link_table, &cached_key, &cached_result,
++		      a->client_mac, 0, &key, &bucket, &result);
++      a->encap_if_index = result.fields.sw_if_index;
++    }
+
+-  if (a->encap_if_index == ~0)
++  if (a->encap_if_index == ~0 ||
++      vnet_get_sw_interface_or_null (vnm, a->encap_if_index) == 0)
+     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+   si = vnet_get_sw_interface (vnm, a->encap_if_index);
+@@ -499,7 +505,8 @@ pppoe_add_del_session_command_fn (vlib_main_t * vm,
+   u8 client_ip_set = 0;
+   u8 ipv4_set = 0;
+   u8 ipv6_set = 0;
+-  u32 encap_if_index = 0;
++  vnet_main_t *vnm = vnet_get_main ();
++  u32 encap_if_index = ~0;
+   u32 decap_fib_index = 0;
+   u8 client_mac[6] = { 0 };
+   u8 client_mac_set = 0;
+@@ -550,10 +557,11 @@ pppoe_add_del_session_command_fn (vlib_main_t * vm,
+ 	      goto done;
+ 	    }
+ 	}
+-      else
+-	if (unformat
+-	    (line_input, "client-mac %U", unformat_ethernet_address,
+-	     client_mac))
++      else if (unformat (line_input, "encap-interface %U",
++			 unformat_vnet_sw_interface, vnm, &encap_if_index))
++	;
++      else if (unformat (line_input, "client-mac %U",
++			 unformat_ethernet_address, client_mac))
+ 	client_mac_set = 1;
+       else
+ 	{
+@@ -643,6 +651,7 @@ VLIB_CLI_COMMAND (create_pppoe_session_command, static) = {
+   .path = "create pppoe session",
+   .short_help =
+   "create pppoe session client-ip <client-ip> session-id <nn>"
+-  " client-mac <client-mac> [decap-vrf-id <nn>] [del]",
++  " client-mac <client-mac> [encap-interface <interface>]"
++  " [decap-vrf-id <nn>] [del]",
+   .function = pppoe_add_del_session_command_fn,
+ };
+--
+2.39.2

@@ -1161,9 +1161,11 @@ async function deleteResourceRows(endpoints, title) {
       await apiJSON(endpoint, { method: 'DELETE' });
       recordLocalLineEvent(endpoint, 'delete');
     }
+    const applyResult = await applyRuntimeConfiguration();
     state.checkedRows.clear();
     closeModal(true);
-    toast(`${title} 已删除`);
+    toast(`${title} 已删除并下发`);
+    state.controlPlane.runtimeApply = applyResult;
     await refreshControlPlane({ resourcesOnly: true });
   } catch (error) {
     toast(error.message || `${title} 删除失败`);
@@ -1173,13 +1175,13 @@ async function deleteResourceRow(endpoint, title) {
   try {
     await apiJSON(endpoint, { method: 'DELETE' });
     recordLocalLineEvent(endpoint, 'delete');
+    const applyResult = await applyRuntimeConfiguration();
+    state.controlPlane.runtimeApply = applyResult;
     closeModal(true);
     if (endpoint.includes('/interface-bonds/')) {
-      const applyResult = await apiJSON(controlApi.runtimeApply, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      state.controlPlane.runtimeApply = applyResult;
       toast(`${title} 已删除，成员网卡已释放`);
     } else {
-      toast(`${title} 已删除`);
+      toast(`${title} 已删除并下发`);
     }
     await refreshControlPlane({ resourcesOnly: true });
   } catch (error) {
@@ -1242,6 +1244,10 @@ async function submitResourceModal(page, action = 'add', rowIndex = null) {
       if (!side?.resourceKey || !resourceEndpoints[side.resourceKey] || !side.payload) continue;
       await apiJSON(resourceEndpoints[side.resourceKey], { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(side.payload) });
       recordLocalLineEvent(`${resourceEndpoints[side.resourceKey]}/${side.payload.id || ''}`, 'create');
+      if (side.resourceKey === 'proxySubscriptions' && side.payload.id) {
+        await apiJSON(`${resourceEndpoints.proxySubscriptions}/${encodeURIComponent(side.payload.id)}/refresh`, { method: 'POST' });
+        recordLocalLineEvent(`${resourceEndpoints.proxySubscriptions}/${side.payload.id}/refresh`, 'refresh');
+      }
       const bindField = side.bindField || (side.resourceKey === 'proxyNodes' ? 'node_id' : side.resourceKey === 'proxySubscriptions' ? 'subscription_id' : '');
       if (resourceKey === 'proxyEgresses' && bindField && payload?.id) {
         payload[bindField] = side.payload.id;
@@ -1254,10 +1260,15 @@ async function submitResourceModal(page, action = 'add', rowIndex = null) {
     recordLocalLineEvent(`${resourceEndpoints[resourceKey]}/${payload.id || endpointID || ''}`, method === 'PATCH' ? 'update' : 'create');
     await confirmResourceReadback(resourceKey, mutation.item || mutation, payload, endpointID);
     const applyResult = await applyRuntimeAfterNetworkSave(resourceKey, payload);
+    const refreshOptions = applyResult || resourceKey === 'interfaces' ? { settleInterfaces: resourceKey === 'interfaces' } : { resourcesOnly: true };
+    // Interface roles feed the LAN/WAN selectors. Keep the modal busy until
+    // the refreshed inventory is rendered so the next action never sees the
+    // pre-save interface list.
+    if (resourceKey === 'interfaces') await refreshControlPlane(refreshOptions);
     closeModal(true);
     if (applyResult) toast(`${page.title} 已保存并下发，已从 API 回读确认`);
     else toast(page.id === 'monitor/interface_list' ? '角色已从 API 回读确认，请到 LAN/WAN 页面补全参数' : `${page.title} 已从 API 回读确认`);
-    await refreshControlPlane(applyResult || resourceKey === 'interfaces' ? { settleInterfaces: resourceKey === 'interfaces' } : { resourcesOnly: true });
+    if (resourceKey !== 'interfaces') await refreshControlPlane(refreshOptions);
   } catch (error) {
     toast(error.message || `${page.title} 保存失败`);
   }
@@ -1280,6 +1291,21 @@ async function confirmResourceReadback(resourceKey, mutationItem, payload, endpo
     const expectedRole = normalizeInterfaceRole(payload.gateway_role || payload.mode_role?.gateway || '');
     const actualRole = normalizeInterfaceRole(item?.gateway_role || item?.mode_role?.gateway || '');
     if (!item || !expectedRole || expectedRole !== actualRole) throw new Error('保存响应与 API 回读不一致');
+    state.controlPlane.resources = { ...state.controlPlane.resources, [resourceKey]: readback };
+    return;
+  }
+  if (resourceKey === 'interfaces' && payload.gateway_role === 'lan') {
+    const interfaceID = payload.interface_id || payload.id || '';
+    const lanItem = envelopeItems(readback).find((candidate) => interfaceIdentifiersMatch(interfaceID, candidate.id) || interfaceIdentifiersMatch(interfaceID, candidate.system_name));
+    const expectedRole = normalizeInterfaceRole(payload.gateway_role || payload.mode_role?.gateway || '');
+    const actualRole = normalizeInterfaceRole(lanItem?.gateway_role || lanItem?.mode_role?.gateway || '');
+    const expectedName = String(payload.display_name || payload.name || '').trim();
+    const actualName = String(lanItem?.display_name || '').trim();
+    const expectedCIDR = String(payload.cidr || '').trim();
+    const actualCIDR = String(lanItem?.cidr || lanItem?.address || '').trim();
+    if (!lanItem || expectedRole !== actualRole || (expectedName && expectedName !== actualName) || (expectedCIDR && expectedCIDR !== actualCIDR)) {
+      throw new Error('保存响应与 API 回读不一致');
+    }
     state.controlPlane.resources = { ...state.controlPlane.resources, [resourceKey]: readback };
     return;
   }
@@ -1348,13 +1374,19 @@ async function applyRuntimeAfterNetworkSave(resourceKey, payload = {}) {
   const runtimeResources = [
     'interfaces', 'interfaceBonds', 'wanLinks', 'wanGroups', 'proxyEgresses', 'proxyNodes', 'proxySubscriptions',
     'routePolicies', 'portMaps', 'dnsPolicies', 'dhcpServers', 'dhcpBindings', 'trafficControl',
-    'securityAcls', 'securityIpMac', 'securityThreatIntel', 'securityAttackRules'
+    'objectGroups', 'securityAcls', 'securityIpMac', 'securityThreatIntel', 'securityAttackRules'
   ];
   if (!runtimeResources.includes(resourceKey)) return null;
   if (resourceKey === 'interfaces' && payload.runtime_state === 'role_configured') return null;
+  return applyRuntimeConfiguration();
+}
+
+async function applyRuntimeConfiguration() {
   const result = await apiJSON(controlApi.runtimeApply, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   state.controlPlane.runtimeApply = result;
-  if (result?.status === 'apply_failed') throw new Error(result.reason || '配置下发失败');
+  if (result?.status !== 'committed' || (result.runtime_state && result.runtime_state !== 'running')) {
+    throw new Error(result?.reason || `配置下发未完成：${result?.status || '未知状态'}`);
+  }
   return result;
 }
 
@@ -1524,7 +1556,7 @@ function proxyInterfacePayload(rowIndex = null) {
       const underlay = form?.querySelector('[data-proxy-underlay]')?.value.trim() || '';
       const businessAddress = form?.querySelector('[data-proxy-address]')?.value.trim() || '';
       const businessName = form?.querySelector('[data-proxy-business-name]')?.value.trim() || name;
-      const payload = { id: `proxy-egress-${slugID(name)}`, kind: 'egress', name, enabled: true, semantic_type: 'proxy_egress', display_list: 'wan', proxy_profile_id: 'xray-tproxy-outbound', underlay_wan_id: underlay, low_copy: false, description };
+      const payload = { id: `proxy-egress-${slugID(name)}`, kind: 'egress', name, enabled: true, semantic_type: 'proxy_egress', display_list: 'wan', proxy_profile_id: 'xray-tproxy-outbound', runtime_profile: 'xray-tproxy-outbound', capture_path: 'vpp_service_interface', engine: 'xray', handoff: 'vpp_to_service', listener_mode: 'vpp-service', underlay_wan_id: underlay, low_copy: false, description };
       const sideResource = proxyBusinessSideResource(businessAddress, businessName);
       if (sideResource) payload._sideResources = [sideResource];
       else if (row?._resource?.node_id) payload.node_id = row._resource.node_id;
@@ -1627,7 +1659,10 @@ function dnsPolicyPayload(rowIndex = null) {
   if (upstreamAddress && !isDNSUpstreamAddress(upstreamAddress)) throw new Error('解析上游必须是单个 IP 或 HTTPS DoH 地址');
   const upstreamID = `dns-policy-${id}-upstream`;
   const outcome = rejected ? { kind: 'reject' } : { kind: 'direct', upstream_id: upstreamID, wan_egress_id: wanEgressID };
-  const policy = { engine: 'smartdns', miss: anyDomain ? outcome : { kind: 'reject' }, rules: anyDomain ? [] : [{ id: `${id}-rule`, source_prefixes: sources, domains: [], domain_set_ids: domainSetIDs, outcome }] };
+  // The API normalizes the policy name into the nested policy document.
+  // Include it in the submitted shape so save-readback verification does not
+  // reject a successful DNS mutation before runtime apply is triggered.
+  const policy = { name, engine: 'smartdns', miss: anyDomain ? outcome : { kind: 'reject' }, rules: anyDomain ? [] : [{ id: `${id}-rule`, source_prefixes: sources, domains: [], domain_set_ids: domainSetIDs, outcome }] };
   const payload = { id, kind: 'policy', name, priority, enabled: true, policy };
   if (!rejected) {
     payload._sideResources = [{
@@ -1640,7 +1675,9 @@ function dnsPolicyPayload(rowIndex = null) {
         enabled: true,
         servers: [upstreamAddress],
         bootstrap_profile: bootstrapProfile,
-        bootstrap_servers: /^(https|h3):\/\//i.test(upstreamAddress) ? [...bootstrapDefaults.bootstrap] : [],
+        bootstrap_servers: /^(https|h3):\/\//i.test(upstreamAddress)
+          ? [...(dnsBootstrapProfiles[bootstrapProfile] || dnsBootstrapProfiles.foreign).bootstrap]
+          : [],
         wan_egress_id: wanEgressID,
         cache_size: 32768,
         ttl_min_seconds: 60,
@@ -1683,7 +1720,7 @@ function objectGroupPayload(page, rowIndex = null) {
   const description = form?.querySelector('[data-object-group-description]')?.value.trim() || row?.[1] || '';
   const text = form?.querySelector('[data-object-group-members]')?.value || '';
   const members = text.split(/[\s,]+/).filter(Boolean);
-  const payload = { id: row?._resourceId || slugID(name), name, kind, description, members, enabled: true };
+  const payload = { id: row?._resourceId || `${kind}-${slugID(name)}`, name, kind, description, members, enabled: true };
   const file = form?.querySelector('[data-object-group-file]')?.files?.[0];
   if (!file && !members.length && row?._resource?.source) payload.source = row._resource.source;
   if (file) {
@@ -1709,7 +1746,16 @@ function trafficControlPayload(rowIndex = null) {
 }
 
 function slugID(value) {
-  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || `item-${Date.now()}`;
+  const text = String(value || '').trim();
+  const ascii = text.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!text) return `item-${Date.now().toString(36)}`;
+  let hash = 2166136261;
+  for (const character of text) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  const unicodeSuffix = `u${hash.toString(36)}`;
+  return /[^\x00-\x7f]/.test(text) ? `${ascii || 'item'}-${unicodeSuffix}` : ascii || `item-${unicodeSuffix}`;
 }
 
 function dhcpServerPayload(rowIndex = null) {
@@ -2101,7 +2147,10 @@ function dnsPolicyFormHtml(row = 0) {
   const rowData = rows[row % rows.length] || rows[0] || [];
   const resource = rowData._resource || {};
   const rule = resource.policy?.rules?.[0] || {};
-  const outcome = rule.outcome || {};
+  // A catch-all DNS policy stores its resolver in policy.miss and has no rule
+  // row. Rehydrate the modal from that miss outcome so editing an existing
+  // catch-all policy keeps its WAN, upstream and bootstrap selections.
+  const outcome = rule.outcome || resource.policy?.miss || {};
   const upstream = dnsUpstreamByID(outcome.upstream_id);
   const action = outcome.kind === 'reject' ? '拉黑' : '解析';
   const selectedDomainGroup = rule.domain_set_ids?.[0] || (resource.policy?.rules?.length ? '' : '__any__');

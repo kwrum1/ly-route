@@ -25,7 +25,11 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 	if err := requireNATCandidates(request); err != nil {
 		return NAT44Readback{}, err
 	}
-	output, err := commandOutput(results, "show nat44 static mappings")
+	showCommand := "show nat44 static mappings"
+	if request.NATBehavior == nat.BehaviorFullCone {
+		showCommand = "show nat44 ei static mappings"
+	}
+	output, err := commandOutput(results, showCommand)
 	if err != nil {
 		return NAT44Readback{}, err
 	}
@@ -33,7 +37,7 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 	if err != nil {
 		return NAT44Readback{}, err
 	}
-	readback := NAT44Readback{}
+	readback := NAT44Readback{Behavior: request.NATBehavior}
 	matchedStatic := make(map[string]struct{})
 	for _, row := range statics {
 		matches := make([]nat.StaticMapping, 0, 1)
@@ -41,6 +45,14 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 			if candidate.InternalAddress == row.internal && candidate.ExternalAddress == row.external {
 				matches = append(matches, candidate)
 			}
+		}
+		// Gateway resource transactions read back the complete VPP NAT table,
+		// while their candidate set intentionally contains only this resource's
+		// changed, deleted, and required mappings. Leave unrelated live rows
+		// alone; requested mappings are still required below and deleted ones
+		// remain candidates so they are detected if they survive the delete.
+		if len(matches) == 0 {
+			continue
 		}
 		if len(matches) != 1 {
 			return NAT44Readback{}, snapshotDecodeError("NAT44 static row %s -> %s maps to %d candidates", row.internal, row.external, len(matches))
@@ -51,7 +63,9 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 		matchedStatic[matches[0].ID] = struct{}{}
 		observed := matches[0]
 		if request.VerifyNATReturnGuards {
-			guardErr := verifyNATReturnGuardReadback(results, natReturnGuardForStaticMapping(matches[0]))
+			guard := natReturnGuardForStaticMapping(matches[0])
+			guard.ingressVPPInterface = request.NATIngressVPPInterface
+			guardErr := verifyNATReturnGuardReadback(results, guard)
 			if guardErr != nil {
 				if request.AllowMissing && isNATReturnGuardDrift(guardErr) {
 					observed.ReturnPathGuard = false
@@ -72,6 +86,9 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 				matches = append(matches, candidate)
 			}
 		}
+		if len(matches) == 0 {
+			continue
+		}
 		if len(matches) != 1 {
 			return NAT44Readback{}, snapshotDecodeError("NAT44 port row maps to %d candidates", len(matches))
 		}
@@ -81,7 +98,9 @@ func decodeVPPCTLNAT44(request SnapshotRequest, results []VPPCTLCommandResult) (
 		matchedPorts[matches[0].ID] = struct{}{}
 		observed := matches[0]
 		if request.VerifyNATReturnGuards {
-			guardErr := verifyNATReturnGuardReadback(results, natReturnGuardForPortMapping(matches[0]))
+			guard := natReturnGuardForPortMapping(matches[0])
+			guard.ingressVPPInterface = request.NATIngressVPPInterface
+			guardErr := verifyNATReturnGuardReadback(results, guard)
 			if guardErr != nil {
 				if request.AllowMissing && isNATReturnGuardDrift(guardErr) {
 					observed.ReturnPathGuard = false

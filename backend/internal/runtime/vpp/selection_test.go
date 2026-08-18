@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,6 +143,72 @@ func TestNativePath_unsupported_or_copy_only_hook_is_locked(t *testing.T) {
 	}
 }
 
+func TestNativePath_vmxnet3AFPacketAcceptanceBuildsHostInterface(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	proof := CapabilityProof{
+		Tier: DataplaneTierNative, Hook: NativeHookAFPacket, Mode: NativeModeAFPacket,
+		Source: ProofSourceRuntimeProbe, RuntimeVerified: true, Native: true,
+		ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Minute),
+		KernelDriver: "vmxnet3", MACAddress: "00:0c:29:16:5b:1e", AcceptanceOnly: true, SmartQoSPluginAvailable: true,
+	}
+	request := NativePathRequest{
+		ManagementInterface: "eth0", AcceptanceAFPacket: true, RequireSmartQoS: true, Now: now,
+		Assignments: []NativeAssignment{
+			{LinuxInterface: "eth1", Explicit: true, Candidates: []CapabilityProof{proof}},
+			{LinuxInterface: "eth2", Explicit: true, Candidates: []CapabilityProof{proof}},
+		},
+	}
+	path, err := SelectNativePath(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(path.Attachments) != 2 || path.Attachments[0].Hook != NativeHookAFPacket || path.Attachments[1].Hook != NativeHookAFPacket || !path.SmartQoS {
+		t.Fatalf("path = %#v", path)
+	}
+	operations, err := BuildOperations(Plan{RequestID: "vmxnet3-af-packet", NativePath: request, AddressAssignments: []AddressAssignment{
+		{ID: "lan", LinuxInterface: "eth1", VPPInterface: "lyroute-eth1", CIDR: "192.0.2.1/24", Role: "lan", BandwidthKbps: 100000},
+		{ID: "wan", LinuxInterface: "eth2", VPPInterface: "lyroute-eth2", CIDR: "198.51.100.2/24", Role: "wan", BandwidthKbps: 100000},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundHostInterface := false
+	foundMACRewrite := false
+	for _, operation := range operations {
+		if operation.Name == "vpp.dataplane.attach" && len(operation.VPPCtlCommands) > 0 && operation.VPPCtlCommands[0] == "?create host-interface name eth1 cksum-gso-disable" {
+			foundHostInterface = true
+			for _, command := range operation.VPPCtlCommands {
+				if strings.HasPrefix(command, "set interface mac address ") {
+					foundMACRewrite = true
+				}
+			}
+		}
+	}
+	if !foundHostInterface || !foundMACRewrite {
+		t.Fatalf("operations = %#v", operations)
+	}
+}
+
+func TestNativePath_vmxnet3AFPacketAcceptanceRequiresLinuxMAC(t *testing.T) {
+	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	proof := CapabilityProof{
+		Tier: DataplaneTierNative, Hook: NativeHookAFPacket, Mode: NativeModeAFPacket,
+		Source: ProofSourceRuntimeProbe, RuntimeVerified: true, Native: true,
+		ObservedAt: now.Add(-time.Minute), ValidUntil: now.Add(time.Minute),
+		KernelDriver: "vmxnet3", AcceptanceOnly: true, SmartQoSPluginAvailable: true,
+	}
+	request := NativePathRequest{ManagementInterface: "eth0", AcceptanceAFPacket: true, Now: now, Assignments: []NativeAssignment{{LinuxInterface: "eth1", Explicit: true, Candidates: []CapabilityProof{proof}}}}
+	path, err := SelectNativePath(request)
+	assertDataplaneLocked(t, path, err, "common_dataplane_tier")
+	var locked *DataplaneLockedError
+	if !errors.As(err, &locked) || len(locked.Candidates) != 1 || locked.Candidates[0].Eligible {
+		t.Fatalf("candidates = %#v, want rejected AF_PACKET candidate", locked)
+	}
+	if !strings.Contains(strings.Join(locked.Candidates[0].Reasons, " "), "MAC") {
+		t.Fatalf("reasons = %#v, want missing MAC", locked.Candidates[0].Reasons)
+	}
+}
+
 func TestNativePath_missing_hook_proof_is_locked(t *testing.T) {
 	// Given
 	request := NativePathRequest{ManagementInterface: "eth0", Now: time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC), Assignments: []NativeAssignment{{LinuxInterface: "eth1", Explicit: true}}}
@@ -223,8 +290,8 @@ func TestNativePath_stale_or_static_driver_hint_is_locked(t *testing.T) {
 			proof.Source = ProofSource("driver_hint")
 			return proof
 		}},
-		{name: "overlong runtime proof", failedName: "short_lived_runtime_proof", mutate: func(proof CapabilityProof) CapabilityProof {
-			proof.ValidUntil = now.Add(10 * time.Minute)
+		{name: "invalid runtime proof lifetime", failedName: "valid_runtime_proof_lifetime", mutate: func(proof CapabilityProof) CapabilityProof {
+			proof.ValidUntil = proof.ObservedAt
 			return proof
 		}},
 	}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Ly Route data interface ownership preflight
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service ly-route-firstboot.service ly-route-vpp-tune.service
+Before=vpp.service ly-route-runtime-check.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/ly-route/prepare-vfio.sh
+
+[Install]
+WantedBy=multi-user.target

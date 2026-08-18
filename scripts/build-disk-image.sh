@@ -65,8 +65,10 @@ case "$size_suffix" in G|g|M|m) ;; *) echo "Unsupported image size: $size" >&2; 
 size_label=$(printf '%s%s' "$size_number" "$size_suffix" | tr '[:upper:]' '[:lower:]')
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_root/packaging/runtime-boundaries/gateway.sh"
 . "$repo_root/scripts/lib/product-build-profile.sh"
 load_product_build_profile "$repo_root" "$product" ""
+export LY_ROUTE_SOURCE_FINGERPRINT=$(product_source_fingerprint "$repo_root")
 
 rootfs_dir=$(CDPATH= cd -- "$(dirname -- "$rootfs")" && pwd)
 rootfs_name=$(basename "$rootfs")
@@ -76,6 +78,24 @@ if ! (cd "$rootfs_dir" && sha256sum -c "$rootfs_name.sha256" >/dev/null); then
   product_build_fail "Rootfs checksum validation failed: $rootfs_name"
 fi
 rootfs_hash=$(sha256sum "$rootfs" | cut -d' ' -f1)
+rootfs_source_fingerprint=$(node - "$rootfs" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const archive = process.argv[2];
+const child = require("child_process");
+let list;
+if (archive.endsWith(".tar.zst")) list = child.execFileSync("tar", ["--use-compress-program=unzstd", "-xOf", archive, "./usr/share/ly-route/artifact-manifest.json"], {encoding: "utf8"});
+else if (archive.endsWith(".tar.gz")) list = child.execFileSync("tar", ["-xOf", archive, "./usr/share/ly-route/artifact-manifest.json"], {encoding: "utf8"});
+else list = child.execFileSync("tar", ["-xOf", archive, "./usr/share/ly-route/artifact-manifest.json"], {encoding: "utf8"});
+const manifest = JSON.parse(list);
+if (!manifest.source_fingerprint || manifest.source_fingerprint === "unknown") {
+  throw new Error("rootfs source fingerprint is missing; rebuild the rootfs");
+}
+process.stdout.write(manifest.source_fingerprint);
+NODE
+)
+[ "$rootfs_source_fingerprint" = "$LY_ROUTE_SOURCE_FINGERPRINT" ] ||
+  product_build_fail "Rootfs source fingerprint is stale: expected $LY_ROUTE_SOURCE_FINGERPRINT, got $rootfs_source_fingerprint"
 
 rootfs_tar_list() {
   case "$rootfs_name" in
@@ -170,6 +190,30 @@ product_build_require_file "$root_tree/opt/ly-route/admin/capabilities.json"
 product_build_require_file "$root_tree/opt/ly-route/admin/app.js"
 product_build_require_file "$root_tree/etc/systemd/system/ly-route-control-api.service"
 product_build_require_file "$root_tree/usr/lib/ly-route/firstboot.sh"
+
+if [ "$product" = gateway ]; then
+  case "$rootfs_name" in
+    *-amd64.tar|*-amd64.tar.gz|*-amd64.tar.zst) plugin_multiarch=x86_64-linux-gnu ;;
+    *-arm64.tar|*-arm64.tar.gz|*-arm64.tar.zst) plugin_multiarch=aarch64-linux-gnu ;;
+    *) product_build_fail "cannot infer gateway plugin architecture from rootfs: $rootfs_name" ;;
+  esac
+  for package in $LY_ROUTE_GATEWAY_RUNTIME_PACKAGES; do
+    grep -Eq "^Package: $package$" "$root_tree/var/lib/dpkg/status" ||
+      product_build_fail "gateway disk image is missing installed runtime package: $package"
+  done
+  for plugin in $LY_ROUTE_GATEWAY_VPP_PLUGINS; do
+    plugin_path="$root_tree/usr/lib/$plugin_multiarch/vpp_plugins/$plugin"
+    [ -s "$plugin_path" ] || product_build_fail "gateway disk image is missing VPP plugin: $plugin_path"
+  done
+  for runtime_file in $LY_ROUTE_GATEWAY_RUNTIME_FILES_COMMON; do
+    [ -e "$root_tree$runtime_file" ] ||
+      product_build_fail "gateway disk image is missing required runtime file: $runtime_file"
+  done
+  for unit in $LY_ROUTE_GATEWAY_RUNTIME_UNITS; do
+    [ -e "$root_tree/lib/systemd/system/$unit" ] || [ -e "$root_tree/usr/lib/systemd/system/$unit" ] ||
+      product_build_fail "gateway disk image is missing required runtime unit: $unit"
+  done
+fi
 
 source_commit=$(node - "$PRODUCT_BUILD_PROFILE" "$PRODUCT_MANIFEST" "$rootfs_manifest" \
   "$root_tree/etc/ly-route/product-manifest.json" "$root_tree/opt/ly-route/admin/capabilities.json" \
@@ -307,7 +351,9 @@ EOF
 fi
 
 write_artifact_checksum "$image"
-zstd -T2 -19 -f "$image" -o "$compressed"
+# Keep ISO iteration fast and deterministic enough for release validation.  The
+# payload is protected by the raw-image and compressed-artifact SHA-256 files.
+zstd -T0 -3 -f "$image" -o "$compressed"
 write_artifact_checksum "$compressed"
 image_hash=$(sha256sum "$image" | cut -d' ' -f1)
 compressed_hash=$(sha256sum "$compressed" | cut -d' ' -f1)
@@ -323,6 +369,13 @@ manifest.checksums = {
   image_sha256: imageHash,
   compressed_sha256: compressedHash,
 };
+if (manifest.product === "gateway") {
+  const envList = (name) => (process.env[name] || "").split(/\s+/).filter(Boolean);
+  manifest.runtime_packages = envList("LY_ROUTE_GATEWAY_RUNTIME_PACKAGES");
+  manifest.runtime_plugins = envList("LY_ROUTE_GATEWAY_VPP_PLUGINS");
+  manifest.runtime_files = envList("LY_ROUTE_GATEWAY_RUNTIME_FILES_COMMON");
+  manifest.runtime_units = envList("LY_ROUTE_GATEWAY_RUNTIME_UNITS");
+}
 writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
 write_artifact_checksum "$image_manifest"

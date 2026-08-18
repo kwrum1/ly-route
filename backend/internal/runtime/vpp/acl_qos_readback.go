@@ -18,7 +18,7 @@ func selectACLs(states []trafficpolicy.SecurityACL, request SnapshotRequest) ([]
 		}
 		available[states[index].ID] = struct{}{}
 	}
-	if err := requireNames(request.ACLs, available, "ACL"); err != nil {
+	if err := requireNamesAllowMissing(request.ACLs, available, "ACL", request.AllowMissing); err != nil {
 		return nil, err
 	}
 	sort.Slice(states, func(left, right int) bool { return states[left].ID < states[right].ID })
@@ -34,7 +34,7 @@ func selectQoS(states []flow.VPPObjectGroup, request SnapshotRequest) ([]flow.VP
 		}
 		available[kind] = struct{}{}
 	}
-	if err := requireNames(request.QoS, available, "QoS group"); err != nil {
+	if err := requireNamesAllowMissing(request.QoS, available, "QoS group", request.AllowMissing); err != nil {
 		return nil, err
 	}
 	sort.Slice(states, func(left, right int) bool { return states[left].Kind < states[right].Kind })

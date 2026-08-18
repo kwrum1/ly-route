@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"ly-route/backend/internal/runtime/nat"
 	"ly-route/backend/internal/runtime/proxy"
 	"ly-route/backend/internal/runtime/vpp"
 )
@@ -45,7 +46,7 @@ func TestFilesystemController_policy_readback_rejects_wrong_mark_priority_route_
 		RuleSelector: proxy.LinuxRuleSelector{Family: "inet", Mark: "0x7", Mask: "0xffffffff", Table: 1701},
 		DefaultRoute: proxy.LinuxDefaultRoute{Destination: "default", Table: 1701, Device: "lo", Scope: "link"},
 	}
-	artifacts, err := RenderLinuxPolicyRouting(plan)
+	artifacts, err := RenderLinuxPolicyRouting(plan, nat.BehaviorEndpointDependent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +71,8 @@ func TestFilesystemController_nftables_readback_rejects_missing_DNS_bypass_and_T
 		Rules: []proxy.NftablesRule{
 			{Order: 1, EgressID: "edge-blue", Chain: "capture_pre", Expression: "tcp dport 53", Action: "return"},
 			{Order: 2, EgressID: "edge-blue", Chain: "capture_pre", Expression: "udp dport 53", Action: "return"},
-			{Order: 3, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto tcp", Action: "tproxy to :15432 mark set 0x7 accept"},
-			{Order: 4, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto udp", Action: "tproxy to :15432 mark set 0x7 accept"},
+			{Order: 3, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto tcp", Action: "meta mark set 0x7 tproxy to :15432 accept"},
+			{Order: 4, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto udp", Action: "meta mark set 0x7 tproxy to :15432 accept"},
 		},
 	}
 	artifacts, err := RenderNftablesCapture(plan)

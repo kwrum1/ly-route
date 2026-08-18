@@ -1,12 +1,39 @@
 # Build outputs
-dist/
-runtime-debs/
-tmp/
-vpp-master/
+/dist/
+/runtime-debs/
+/tmp/
+/vpp-master/
+/govpp-master/
+/build/
 *.log
+
+# Firmware, package, plugin, and VM outputs are reproducible artifacts.
+*.iso
+*.img
+*.img.zst
+*.qcow2
+*.vmdk
+*.deb
+*.so
+*.tar
+*.tar.gz
+*.tar.zst
+
+# Local compiler and acceptance scratch directories.
+/.codex-tmp/
+/.acceptance/
+/.codex-build/
+/.tmp*/
+/config/build/
+/deploy/*/artifacts/
+
+# CI downloads are fetched on demand and must never enter Git history.
+/third_party/ophub-cache/
 
 # Local/browser verification artifacts
 .playwright-mcp/
+/.sisyphus/
+/panabit-real/
 
 # Python/runtime caches
 __pycache__/
@@ -19,5 +46,3 @@ PanabitOEM_TANGr7p8_20260414_Linux3.tar.gz
 # Dependencies and OS/editor noise
 node_modules/
 .DS_Store
-
-panabit-real/admin/.htpasswd

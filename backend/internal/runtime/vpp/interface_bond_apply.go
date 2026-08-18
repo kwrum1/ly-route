@@ -166,7 +166,7 @@ func cleanupInterfaceBond(ctx context.Context, channel Channel, transactionID st
 func deleteInterfaceCommands(state InterfaceState) []string {
 	commands := []string{fmt.Sprintf("set interface state %s down", state.Name)}
 	for _, cidr := range state.Addresses {
-		commands = append(commands, fmt.Sprintf("set interface ip address %s %s del", state.Name, cidr))
+		commands = append(commands, fmt.Sprintf("set interface ip address del %s %s", state.Name, cidr))
 	}
 	return commands
 }

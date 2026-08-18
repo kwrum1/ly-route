@@ -10,10 +10,12 @@ import (
 )
 
 type aclCandidateProof struct {
-	numericID int
-	id        string
-	action    string
-	match     trafficpolicy.Match
+	numericID        int
+	id               string
+	action           string
+	match            trafficpolicy.Match
+	localDestinations []string
+	allowUnmatched bool
 }
 
 func decodeVPPCTLACLs(request SnapshotRequest, results []VPPCTLCommandResult) (ACLReadback, error) {
@@ -115,26 +117,48 @@ func verifyACLOutput(output string, proof aclCandidateProof) error {
 	}
 	actual := make([]string, 0, len(lines)-1)
 	seen := make(map[string]struct{}, len(lines)-1)
+	ipv6Fallback := "permit src ::/0 dst ::/0 proto 0 sport 0-65535 dport 0-65535"
+	foundIPv6Fallback := false
 	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
-		if len(fields) != 13 || !strings.HasSuffix(fields[0], ":") || fields[1] != "ipv4" || fields[3] != "src" || fields[5] != "dst" || fields[7] != "proto" || fields[9] != "sport" || fields[11] != "dport" {
+		if len(fields) != 13 || !strings.HasSuffix(fields[0], ":") || (fields[1] != "ipv4" && fields[1] != "ipv6") || fields[3] != "src" || fields[5] != "dst" || fields[7] != "proto" || fields[9] != "sport" || fields[11] != "dport" {
 			return snapshotDecodeError("unknown ACL rule grammar %q", line)
 		}
 		fields[10] = aclReadbackPort(fields[10])
 		fields[12] = aclReadbackPort(fields[12])
 		canonical := strings.Join(fields[2:], " ")
+		if fields[1] == "ipv6" {
+			if !proof.allowUnmatched || canonical != ipv6Fallback || foundIPv6Fallback {
+				return snapshotDecodeError("ACL %q contains an unexpected IPv6 rule", proof.id)
+			}
+			foundIPv6Fallback = true
+			continue
+		}
 		if _, duplicate := seen[canonical]; duplicate {
 			return snapshotDecodeError("ACL %q contains duplicate rules", proof.id)
 		}
 		seen[canonical] = struct{}{}
 		actual = append(actual, canonical)
 	}
-	expected, err := expectedACLRules(proof.action, proof.match)
+	if proof.allowUnmatched && !foundIPv6Fallback {
+		return snapshotDecodeError("ACL %q is missing its IPv6 unmatched-traffic permit", proof.id)
+	}
+	expected, err := expectedACLRulesWithLocalBypass(proof.action, proof.match, proof.allowUnmatched, proof.localDestinations)
 	if err != nil {
 		return err
 	}
 	sort.Strings(actual)
 	if strings.Join(actual, "\n") != strings.Join(expected, "\n") {
+		// A live gateway can legitimately carry the pre-local-bypass ACL while
+		// the reconciler is preparing the first upgrade to this compiler. Accept
+		// that exact legacy form so reconciliation can replace it; any unrelated
+		// rule drift still fails closed.
+		if len(proof.localDestinations) > 0 {
+			legacy, legacyErr := expectedACLRulesWithFallback(proof.action, proof.match, proof.allowUnmatched)
+			if legacyErr == nil && strings.Join(actual, "\n") == strings.Join(legacy, "\n") {
+				return nil
+			}
+		}
 		return snapshotDecodeError("ACL %q rules do not match candidate: actual=%q expected=%q", proof.id, actual, expected)
 	}
 	return nil
@@ -175,6 +199,41 @@ func taggedACLOutput(results []VPPCTLCommandResult, tag string) (string, int, bo
 	return matched, matchedID, matched != "", nil
 }
 
+// indexedACLOutput extracts a single ACL block from the inventory. It is used
+// only when an ABF policy has already proved ownership of the numeric ACL id;
+// a duplicate tag alone is never accepted as authoritative.
+func indexedACLOutput(results []VPPCTLCommandResult, wantedID int) (string, bool, error) {
+	output, err := vppctlOutputAllowEmpty(results, "show acl-plugin acl")
+	if err != nil {
+		return "", false, err
+	}
+	lines := nonBlankLines(output)
+	var matched string
+	for index := 0; index < len(lines); {
+		fields := strings.Fields(lines[index])
+		if len(fields) != 6 || fields[0] != "acl-index" || fields[2] != "count" || fields[4] != "tag" {
+			index++
+			continue
+		}
+		id, idErr := strconv.Atoi(fields[1])
+		count, countErr := strconv.Atoi(fields[3])
+		if idErr != nil || countErr != nil || count < 0 || index+count >= len(lines) {
+			return "", false, snapshotDecodeError("malformed ACL inventory header %q", lines[index])
+		}
+		if id == wantedID {
+			if matched != "" {
+				return "", false, snapshotDecodeError("ACL index %d is ambiguous", wantedID)
+			}
+			matched = strings.Join(lines[index:index+count+1], "\n")
+		}
+		index += count + 1
+		for index < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[index]), "used in lookup context index:") {
+			index++
+		}
+	}
+	return matched, matched != "", nil
+}
+
 func vppctlOutputAllowEmpty(results []VPPCTLCommandResult, command string) (string, error) {
 	var output string
 	matches := 0
@@ -195,9 +254,39 @@ func vppctlOutputAllowEmpty(results []VPPCTLCommandResult, command string) (stri
 }
 
 func expectedACLRules(action string, match trafficpolicy.Match) ([]string, error) {
+	return expectedACLRulesWithFallback(action, match, false)
+}
+
+func expectedACLRulesWithLocalBypass(action string, match trafficpolicy.Match, allowUnmatched bool, localDestinations []string) ([]string, error) {
+	rules, err := expectedACLRulesWithFallback(action, match, allowUnmatched)
+	if err != nil || action != "permit" || len(localDestinations) == 0 || !routePolicyHasIPv4CatchAll(match.Destinations) {
+		return rules, err
+	}
+	for _, source := range nonEmptyList(match.Sources, "0.0.0.0/0") {
+		for _, destination := range localDestinations {
+			for _, protocol := range nonEmptyList(match.Protocols, "any") {
+				protocol, protocolErr := vppProtocol(protocol)
+				if protocolErr != nil {
+					return nil, protocolErr
+				}
+				for _, sourcePort := range nonEmptyList(match.SourcePorts, "any") {
+					for _, destinationPort := range nonEmptyList(match.DestPorts, "any") {
+						rules = append(rules, fmt.Sprintf("deny src %s dst %s proto %s sport %s dport %s", aclAddressValue(source), aclAddressValue(destination), protocol, aclReadbackPort(sourcePort), aclReadbackPort(destinationPort)))
+					}
+				}
+			}
+		}
+	}
+	sort.Strings(rules)
+	return rules, nil
+}
+
+func expectedACLRulesWithFallback(action string, match trafficpolicy.Match, allowUnmatched bool) ([]string, error) {
 	var rules []string
 	for _, source := range nonEmptyList(match.Sources, "0.0.0.0/0") {
 		for _, destination := range nonEmptyList(match.Destinations, "0.0.0.0/0") {
+			source = aclAddressValue(source)
+			destination = aclAddressValue(destination)
 			for _, protocol := range nonEmptyList(match.Protocols, "any") {
 				protocol, err := vppProtocol(protocol)
 				if err != nil {
@@ -209,6 +298,19 @@ func expectedACLRules(action string, match trafficpolicy.Match) ([]string, error
 					}
 				}
 			}
+		}
+	}
+	if action == "permit" && allowUnmatched {
+		fallback := "permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535"
+		seen := false
+		for _, rule := range rules {
+			if rule == fallback {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			rules = append(rules, fallback)
 		}
 	}
 	sort.Strings(rules)

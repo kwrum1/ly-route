@@ -9,7 +9,18 @@ import (
 )
 
 func GatewayDiffSnapshotRequest(transactionID string, prior, desired Plan) SnapshotRequest {
-	request := SnapshotRequest{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, AllowMissing: true}
+	request := SnapshotRequest{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, LANVPPInterface: gatewayLANVPPInterface(desired), AllowMissing: true}
+	request.LocalDestinations = routePolicyLocalDestinations(desired.AddressAssignments)
+	if len(request.LocalDestinations) == 0 {
+		request.LocalDestinations = routePolicyLocalDestinations(prior.AddressAssignments)
+	}
+	if request.LANVPPInterface == "" {
+		request.LANVPPInterface = gatewayLANVPPInterface(prior)
+	}
+	request.NATIngressVPPInterface = gatewayLANVPPInterface(desired)
+	if request.NATIngressVPPInterface == "" {
+		request.NATIngressVPPInterface = gatewayLANVPPInterface(prior)
+	}
 	request.Interfaces = interfaceNames(prior.Interfaces)
 	request.Candidates.Interfaces = unionCandidates(prior.Interfaces, desired.Interfaces, interfaceContract())
 	request.Bonds = bondNames(prior.Bonds)
@@ -18,14 +29,25 @@ func GatewayDiffSnapshotRequest(transactionID string, prior, desired Plan) Snaps
 	request.Candidates.RoutePolicies = unionCandidates(prior.Policy.RoutePolicies, desired.Policy.RoutePolicies, routeContract())
 	request.WANGroups = wanGroupIDs(prior.Policy.WANGroups)
 	request.Candidates.WANGroups = unionCandidates(prior.Policy.WANGroups, desired.Policy.WANGroups, wanGroupContract())
-	request.ACLs = aclIDs(prior.Policy.SecurityACLs)
-	request.Candidates.ACLs = unionCandidates(prior.Policy.SecurityACLs, desired.Policy.SecurityACLs, aclContract())
+	if securityGenerationOwnsACLs(desired) {
+		// A gateway upgraded from individual security ACL objects to the
+		// aggregate security generation can legitimately have no legacy ACL tag
+		// left in VPP. Keep the prior plan intact so reconciliation still emits
+		// idempotent deletes and rollback can restore it, but do not require the
+		// superseded object to exist before the migration can start.
+		request.ACLs = nil
+		request.Candidates.ACLs = nil
+	} else {
+		request.ACLs = aclIDs(prior.Policy.SecurityACLs)
+		request.Candidates.ACLs = unionCandidates(prior.Policy.SecurityACLs, desired.Policy.SecurityACLs, aclContract())
+	}
 	request.QoS = qosIDs(prior.Flow.VPPGroups)
 	request.Candidates.QoS = unionCandidates(prior.Flow.VPPGroups, desired.Flow.VPPGroups, qosContract())
 	request.NATStaticMappings = natStaticIDs(prior.NAT.StaticMappings)
 	request.Candidates.NATStaticMappings = unionCandidates(prior.NAT.StaticMappings, desired.NAT.StaticMappings, natStaticContract())
 	request.NATPortMappings = portMapIDs(prior.NAT.PortMappings)
 	request.Candidates.NATPortMappings = unionCandidates(prior.NAT.PortMappings, desired.NAT.PortMappings, portMapContract())
+	request.NATBehavior = desired.NAT.Behavior
 	request.VerifyNATReturnGuards = len(request.Candidates.NATStaticMappings)+len(request.Candidates.NATPortMappings) > 0
 	if len(request.Interfaces) > 0 {
 		request.Capabilities = append(request.Capabilities, SnapshotCapabilityInterfaces)
@@ -49,6 +71,10 @@ func GatewayDiffSnapshotRequest(transactionID string, prior, desired Plan) Snaps
 		request.Capabilities = append(request.Capabilities, SnapshotCapabilityNAT44)
 	}
 	return request
+}
+
+func securityGenerationOwnsACLs(plan Plan) bool {
+	return len(plan.Security.ACLs) > 0
 }
 
 func GatewayResourceSnapshotRequest(transactionID, resource string, desired Plan) (SnapshotRequest, error) {

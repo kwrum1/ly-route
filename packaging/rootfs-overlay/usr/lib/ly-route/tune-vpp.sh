@@ -235,6 +235,9 @@ EOF
   printf 'buffers {\n  buffers-per-numa %s\n}\n\n' "$buffers_per_numa"
   cat <<'EOF'
 plugins {
+  # DPDK is enabled by the ownership preflight only when it is the selected
+  # fallback.  Loading it by default makes VPP probe every PCI device.
+  plugin dpdk_plugin.so { disable }
   plugin linux_cp_plugin.so { enable }
   plugin linux_nl_plugin.so { enable }
 }

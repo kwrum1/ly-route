@@ -1,7 +1,8 @@
 [Unit]
 Description=Ly Route first boot management defaults
-After=network-pre.target
+After=network-pre.target systemd-networkd.service
 Before=network-online.target nginx.service
+Before=vpp.service ly-route-runtime-check.service ly-route-vpp-apply.service
 Wants=network-online.target
 
 [Service]

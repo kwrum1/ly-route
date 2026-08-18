@@ -16,6 +16,12 @@ func (a Adapter) snapshot(ctx context.Context, request SnapshotRequest) (Snapsho
 		return Snapshot{}, fmt.Errorf("%w: open snapshot channel: %v", ErrVPPUnavailable, err)
 	}
 	defer channel.Close()
+	if ingress, ok := channel.(interface{ setNATReturnGuardIngress(string) }); ok {
+		ingress.setNATReturnGuardIngress(request.NATIngressVPPInterface)
+	}
+	if ingress, ok := channel.(interface{ setLANVPPInterface(string) }); ok {
+		ingress.setLANVPPInterface(request.LANVPPInterface)
+	}
 	return a.snapshotOnChannel(ctx, channel, request)
 }
 
@@ -126,6 +132,7 @@ func (a Adapter) snapshotOnChannel(ctx context.Context, channel Channel, request
 				return Snapshot{}, parseErr
 			}
 			snapshot.NAT.StaticMappings, snapshot.NAT.PortMappings, err = selectNAT44(natState, request)
+			snapshot.NAT.Behavior = natState.Behavior
 		default:
 			return Snapshot{}, fmt.Errorf("%w: unsupported capability %q", ErrSnapshotIncomplete, capability)
 		}

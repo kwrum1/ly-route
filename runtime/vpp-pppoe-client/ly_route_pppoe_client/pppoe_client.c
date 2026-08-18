@@ -3,17 +3,34 @@
 #include <vnet/feature/feature.h>
 #include <vnet/interface.h>
 #include <vnet/plugin/plugin.h>
+#include <vppinfra/bihash_8_8.h>
 #include <vpp/app/version.h>
+#include <dlfcn.h>
+
+typedef struct
+{
+  u32 control_sw_if_index;
+  u32 wan_sw_if_index;
+  u64 discovery_packets;
+  u64 control_packets;
+  u64 dhcp6_packets;
+} ly_pppoe_client_binding_t;
 
 typedef struct
 {
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
-  u32 control_sw_if_index;
-  u32 wan_sw_if_index;
-  u64 discovery_packets;
-  u64 dhcp6_packets;
+  ly_pppoe_client_binding_t *bindings;
 } ly_pppoe_client_main_t;
+
+/* VPP's PPPoE plugin keeps its learned AC-MAC to WAN association in this
+ * leading portion of pppoe_main_t. Resolve it at runtime instead of linking
+ * against the stock plugin so the Ly Route plugin remains load-order safe. */
+typedef struct
+{
+  void *sessions;
+  clib_bihash_8_8_t link_table;
+} ly_pppoe_stock_main_t;
 
 typedef enum
 {
@@ -25,72 +42,117 @@ typedef enum
 {
   LY_PPPOE_CLIENT_ERROR_PASSED,
   LY_PPPOE_CLIENT_ERROR_DISCOVERY_FORWARDED,
+  LY_PPPOE_CLIENT_ERROR_CONTROL_FORWARDED,
   LY_PPPOE_CLIENT_ERROR_DHCP6_FORWARDED,
   LY_PPPOE_CLIENT_N_ERROR,
 } ly_pppoe_client_error_t;
 
 static char *ly_pppoe_client_error_strings[] = {
   "packets passed",
-  "PPPoE discovery broadcasts forwarded",
+  "PPPoE discovery packets forwarded",
+  "PPPoE control packets forwarded",
   "PPPoE DHCPv6 control packets forwarded",
 };
 
 static ly_pppoe_client_main_t ly_pppoe_client_main;
+static ly_pppoe_stock_main_t *ly_pppoe_stock_main;
 
-static_always_inline int
-ly_pppoe_is_broadcast (const u8 *address)
+static_always_inline ly_pppoe_stock_main_t *
+ly_pppoe_stock_main_get (void)
 {
-  return address[0] == 0xff && address[1] == 0xff &&
-         address[2] == 0xff && address[3] == 0xff &&
-         address[4] == 0xff && address[5] == 0xff;
+  if (!ly_pppoe_stock_main)
+    ly_pppoe_stock_main = dlsym (RTLD_DEFAULT, "pppoe_main");
+  return ly_pppoe_stock_main;
 }
 
-static_always_inline int
-ly_pppoe_is_client_discovery (vlib_buffer_t *buffer)
+static_always_inline void
+ly_pppoe_learn_wan (u8 *mac, u32 wan_sw_if_index)
 {
-  ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
-  u16 type = clib_net_to_host_u16 (ethernet->type);
-  u8 *pppoe = (u8 *) (ethernet + 1);
+  ly_pppoe_stock_main_t *stock = ly_pppoe_stock_main_get ();
+  if (!stock)
+    return;
 
-  if (type == ETHERNET_TYPE_PPPOE_DISCOVERY)
-    return ly_pppoe_is_broadcast (ethernet->dst_address) || pppoe[1] == 0xa7;
-  if (type == ETHERNET_TYPE_VLAN)
-    {
-      ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) (ethernet + 1);
-      pppoe = (u8 *) (vlan + 1);
-      return clib_net_to_host_u16 (vlan->type) ==
-               ETHERNET_TYPE_PPPOE_DISCOVERY &&
-             (ly_pppoe_is_broadcast (ethernet->dst_address) ||
-              pppoe[1] == 0xa7);
-    }
-  return 0;
+  u64 mac_word = 0;
+  clib_memcpy_fast (&mac_word, mac, 6);
+  clib_bihash_kv_8_8_t entry = {
+    .key = (mac_word << 16) & ~0xffffULL,
+    .value = ((u64) ~0U << 32) | wan_sw_if_index,
+  };
+  clib_bihash_add_del_8_8 (&stock->link_table, &entry, 1);
 }
 
-static_always_inline int
-ly_pppoe_is_dhcp6 (vlib_buffer_t *buffer, int client_to_server)
+typedef struct
 {
-  u8 *frame = vlib_buffer_get_current (buffer);
+  u8 discovery;
+  u32 pppoe_offset;
+  u16 ppp_protocol;
+} ly_pppoe_packet_t;
+
+static_always_inline int
+ly_pppoe_parse (vlib_buffer_t *buffer, ly_pppoe_packet_t *packet)
+{
   u32 length = buffer->current_length;
   u32 offset = sizeof (ethernet_header_t);
-
-  if (length < offset + 8 + 40 + 8)
+  if (length < offset + 6)
     return 0;
-
-  ethernet_header_t *ethernet = (ethernet_header_t *) frame;
+  ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
   u16 type = clib_net_to_host_u16 (ethernet->type);
+
   if (type == ETHERNET_TYPE_VLAN)
     {
-      if (length < offset + sizeof (ethernet_vlan_header_t) + 8 + 40 + 8)
+      if (length < offset + sizeof (ethernet_vlan_header_t) + 6)
         return 0;
-      ethernet_vlan_header_t *vlan =
-        (ethernet_vlan_header_t *) (frame + offset);
+      ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) (ethernet + 1);
       type = clib_net_to_host_u16 (vlan->type);
       offset += sizeof (*vlan);
     }
-  if (type != ETHERNET_TYPE_PPPOE_SESSION)
+  if (type != ETHERNET_TYPE_PPPOE_DISCOVERY &&
+      type != ETHERNET_TYPE_PPPOE_SESSION)
     return 0;
 
-  u8 *pppoe = frame + offset;
+  u8 *pppoe = (u8 *) ethernet + offset;
+  if (pppoe[0] != 0x11)
+    return 0;
+  packet->discovery = type == ETHERNET_TYPE_PPPOE_DISCOVERY;
+  packet->pppoe_offset = offset;
+  packet->ppp_protocol = 0;
+  if (!packet->discovery)
+    {
+      if (length < offset + 8 || pppoe[1] != 0)
+        return 0;
+      packet->ppp_protocol = ((u16) pppoe[6] << 8) | pppoe[7];
+    }
+  return 1;
+}
+
+static_always_inline int
+ly_pppoe_is_control_protocol (u16 protocol)
+{
+  switch (protocol)
+    {
+    case 0xc021: /* LCP */
+    case 0xc023: /* PAP */
+    case 0xc223: /* CHAP */
+    case 0xc227: /* EAP */
+    case 0x8021: /* IPCP */
+    case 0x8057: /* IPv6CP */
+    case 0x80fd: /* CCP */
+    case 0x8053: /* ECP */
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+static_always_inline int
+ly_pppoe_is_dhcp6 (vlib_buffer_t *buffer, u32 pppoe_offset,
+                   int client_to_server)
+{
+  u8 *frame = vlib_buffer_get_current (buffer);
+  u32 length = buffer->current_length;
+  if (length < pppoe_offset + 8 + 40 + 8)
+    return 0;
+  u8 *pppoe = frame + pppoe_offset;
   u16 ppp_protocol = ((u16) pppoe[6] << 8) | pppoe[7];
   if (pppoe[0] != 0x11 || pppoe[1] != 0 || ppp_protocol != 0x0057)
     return 0;
@@ -104,6 +166,27 @@ ly_pppoe_is_dhcp6 (vlib_buffer_t *buffer, int client_to_server)
   if (client_to_server)
     return source == 546 && destination == 547;
   return source == 547 && destination == 546;
+}
+
+static_always_inline ly_pppoe_client_binding_t *
+ly_pppoe_binding_for_interface (ly_pppoe_client_main_t *main,
+                                u32 sw_if_index, int *from_control)
+{
+  ly_pppoe_client_binding_t *binding;
+  vec_foreach (binding, main->bindings)
+    {
+      if (binding->control_sw_if_index == sw_if_index)
+        {
+          *from_control = 1;
+          return binding;
+        }
+      if (binding->wan_sw_if_index == sw_if_index)
+        {
+          *from_control = 0;
+          return binding;
+        }
+    }
+  return 0;
 }
 
 static_always_inline void
@@ -124,65 +207,82 @@ VLIB_NODE_FN (ly_pppoe_client_node) (vlib_main_t *vm,
     {
       vlib_buffer_t *buffer = vlib_get_buffer (vm, from[index]);
       u32 rx_sw_if_index = vnet_buffer (buffer)->sw_if_index[VLIB_RX];
+      int from_control = 0;
+      ly_pppoe_client_binding_t *binding =
+        ly_pppoe_binding_for_interface (main, rx_sw_if_index, &from_control);
 
       vnet_feature_next_u16 (&nexts[index], buffer);
-      if (main->control_sw_if_index == ~0 || main->wan_sw_if_index == ~0)
+      if (!binding)
         {
           vlib_node_increment_counter (vm, node->node_index,
                                        LY_PPPOE_CLIENT_ERROR_PASSED, 1);
           continue;
         }
 
-      int discovery =
-        rx_sw_if_index == main->control_sw_if_index &&
-        ly_pppoe_is_client_discovery (buffer);
-      int dhcp6_upstream =
-        rx_sw_if_index == main->control_sw_if_index &&
-        ly_pppoe_is_dhcp6 (buffer, 1);
-      int dhcp6_downstream =
-        rx_sw_if_index == main->wan_sw_if_index &&
-        ly_pppoe_is_dhcp6 (buffer, 0);
-      if (!discovery && !dhcp6_upstream && !dhcp6_downstream)
+      ly_pppoe_packet_t packet = { 0 };
+      if (!ly_pppoe_parse (buffer, &packet))
         {
           vlib_node_increment_counter (vm, node->node_index,
                                        LY_PPPOE_CLIENT_ERROR_PASSED, 1);
           continue;
         }
 
-      if (dhcp6_downstream)
+      int dhcp6 = !packet.discovery && packet.ppp_protocol == 0x0057 &&
+                  ly_pppoe_is_dhcp6 (buffer, packet.pppoe_offset,
+                                     from_control);
+      int control =
+        !packet.discovery && ly_pppoe_is_control_protocol (packet.ppp_protocol);
+      if (!from_control && !packet.discovery && !control && !dhcp6)
         {
+          vlib_node_increment_counter (vm, node->node_index,
+                                       LY_PPPOE_CLIENT_ERROR_PASSED, 1);
+          continue;
+        }
+
+      if (from_control)
+        {
+          vnet_sw_interface_t *wan = vnet_get_sw_interface (
+            main->vnet_main, binding->wan_sw_if_index);
+          if (wan->type == VNET_SW_INTERFACE_TYPE_SUB)
+            wan =
+              vnet_get_sw_interface (main->vnet_main, wan->sup_sw_if_index);
+          vnet_hw_interface_t *hardware =
+            vnet_get_hw_interface (main->vnet_main, wan->hw_if_index);
+          ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
+          clib_memcpy_fast (ethernet->src_address, hardware->hw_address, 6);
+          ly_pppoe_forward_to_interface (buffer, binding->wan_sw_if_index);
+        }
+      else
+        {
+          /* The stock PPPoE session creator resolves its egress interface
+           * from this learned AC MAC. Our per-WAN relay owns control frames,
+           * so it performs the same learning before VPP creates the session. */
+          ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
+          ly_pppoe_learn_wan (ethernet->src_address,
+                              binding->wan_sw_if_index);
           ly_pppoe_forward_to_interface (buffer,
-                                         main->control_sw_if_index);
-          nexts[index] = LY_PPPOE_CLIENT_NEXT_INTERFACE_OUTPUT;
-          main->dhcp6_packets++;
-          vlib_node_increment_counter (
-            vm, node->node_index, LY_PPPOE_CLIENT_ERROR_DHCP6_FORWARDED, 1);
-          continue;
+                                         binding->control_sw_if_index);
         }
 
-      vnet_sw_interface_t *wan =
-        vnet_get_sw_interface (main->vnet_main, main->wan_sw_if_index);
-      if (wan->type == VNET_SW_INTERFACE_TYPE_SUB)
-        wan = vnet_get_sw_interface (main->vnet_main, wan->sup_sw_if_index);
-      vnet_hw_interface_t *hardware =
-        vnet_get_hw_interface (main->vnet_main, wan->hw_if_index);
-      ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
-      clib_memcpy_fast (ethernet->src_address, hardware->hw_address, 6);
-
-      ly_pppoe_forward_to_interface (buffer, main->wan_sw_if_index);
       nexts[index] = LY_PPPOE_CLIENT_NEXT_INTERFACE_OUTPUT;
-      if (discovery)
+      if (packet.discovery)
         {
-          main->discovery_packets++;
+          binding->discovery_packets++;
           vlib_node_increment_counter (
             vm, node->node_index,
             LY_PPPOE_CLIENT_ERROR_DISCOVERY_FORWARDED, 1);
         }
-      else
+      else if (dhcp6)
         {
-          main->dhcp6_packets++;
+          binding->dhcp6_packets++;
           vlib_node_increment_counter (
             vm, node->node_index, LY_PPPOE_CLIENT_ERROR_DHCP6_FORWARDED, 1);
+        }
+      else
+        {
+          binding->control_packets++;
+          vlib_node_increment_counter (
+            vm, node->node_index, LY_PPPOE_CLIENT_ERROR_CONTROL_FORWARDED, 1);
         }
     }
 
@@ -232,14 +332,43 @@ ly_pppoe_client_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 
   if (disable)
     {
-      if (main->control_sw_if_index != ~0)
-        vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
-                                     main->control_sw_if_index, 0, 0, 0);
-      if (main->wan_sw_if_index != ~0)
-        vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
-                                     main->wan_sw_if_index, 0, 0, 0);
-      main->control_sw_if_index = ~0;
-      main->wan_sw_if_index = ~0;
+      if ((control_sw_if_index == ~0) != (wan_sw_if_index == ~0))
+        return clib_error_return (
+          0, "control-interface and wan-interface must be specified together");
+      vlib_worker_thread_barrier_sync (vm);
+      if (control_sw_if_index == ~0)
+        {
+          ly_pppoe_client_binding_t *binding;
+          vec_foreach (binding, main->bindings)
+            {
+              vnet_feature_enable_disable (
+                "device-input", "ly-route-pppoe-client",
+                binding->control_sw_if_index, 0, 0, 0);
+              vnet_feature_enable_disable (
+                "device-input", "ly-route-pppoe-client",
+                binding->wan_sw_if_index, 0, 0, 0);
+            }
+          vec_free (main->bindings);
+        }
+      else
+        {
+          u32 index;
+          vec_foreach_index (index, main->bindings)
+            if (main->bindings[index].control_sw_if_index ==
+                  control_sw_if_index &&
+                main->bindings[index].wan_sw_if_index == wan_sw_if_index)
+              {
+                vnet_feature_enable_disable (
+                  "device-input", "ly-route-pppoe-client",
+                  control_sw_if_index, 0, 0, 0);
+                vnet_feature_enable_disable (
+                  "device-input", "ly-route-pppoe-client", wan_sw_if_index, 0,
+                  0, 0);
+                vec_del1 (main->bindings, index);
+                break;
+              }
+        }
+      vlib_worker_thread_barrier_release (vm);
       return 0;
     }
   if (control_sw_if_index == ~0 || wan_sw_if_index == ~0)
@@ -248,35 +377,57 @@ ly_pppoe_client_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
   if (control_sw_if_index == wan_sw_if_index)
     return clib_error_return (0, "control and WAN interfaces must differ");
 
-  if (main->control_sw_if_index == control_sw_if_index &&
-      main->wan_sw_if_index == wan_sw_if_index)
-    return 0;
+  u32 index;
+  vec_foreach_index (index, main->bindings)
+    if (main->bindings[index].control_sw_if_index == control_sw_if_index &&
+        main->bindings[index].wan_sw_if_index == wan_sw_if_index)
+      return 0;
 
-  if (main->control_sw_if_index != ~0)
-    vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
-                                 main->control_sw_if_index, 0, 0, 0);
-  if (main->wan_sw_if_index != ~0)
-    vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
-                                 main->wan_sw_if_index, 0, 0, 0);
-  main->control_sw_if_index = control_sw_if_index;
-  main->wan_sw_if_index = wan_sw_if_index;
+  vlib_worker_thread_barrier_sync (vm);
+  for (index = vec_len (main->bindings); index > 0; index--)
+    {
+      u32 candidate = index - 1;
+      if (main->bindings[candidate].control_sw_if_index !=
+            control_sw_if_index &&
+          main->bindings[candidate].wan_sw_if_index != wan_sw_if_index)
+        continue;
+      vnet_feature_enable_disable (
+        "device-input", "ly-route-pppoe-client",
+        main->bindings[candidate].control_sw_if_index, 0, 0, 0);
+      vnet_feature_enable_disable (
+        "device-input", "ly-route-pppoe-client",
+        main->bindings[candidate].wan_sw_if_index, 0, 0, 0);
+      vec_del1 (main->bindings, candidate);
+    }
   if (vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
                                    control_sw_if_index, 1, 0, 0) != 0)
-    return clib_error_return (0, "failed to enable PPPoE discovery forwarding");
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return clib_error_return (0,
+                                "failed to enable PPPoE control forwarding");
+    }
   if (vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
                                    wan_sw_if_index, 1, 0, 0) != 0)
     {
       vnet_feature_enable_disable ("device-input", "ly-route-pppoe-client",
                                    control_sw_if_index, 0, 0, 0);
-      return clib_error_return (0, "failed to enable PPPoE DHCPv6 forwarding");
+      vlib_worker_thread_barrier_release (vm);
+      return clib_error_return (0,
+                                "failed to enable PPPoE WAN forwarding");
     }
+  ly_pppoe_client_binding_t *binding;
+  vec_add2 (main->bindings, binding, 1);
+  clib_memset (binding, 0, sizeof (*binding));
+  binding->control_sw_if_index = control_sw_if_index;
+  binding->wan_sw_if_index = wan_sw_if_index;
+  vlib_worker_thread_barrier_release (vm);
   return 0;
 }
 
 VLIB_CLI_COMMAND (ly_pppoe_client_set_command, static) = {
   .path = "set ly-route pppoe-client",
   .short_help = "set ly-route pppoe-client control-interface <interface> "
-                "wan-interface <interface> | disable",
+                "wan-interface <interface> [disable] | disable",
   .function = ly_pppoe_client_set_command_fn,
 };
 
@@ -285,17 +436,30 @@ ly_pppoe_client_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
                                  vlib_cli_command_t *cmd)
 {
   ly_pppoe_client_main_t *main = &ly_pppoe_client_main;
-  if (main->control_sw_if_index == ~0 || main->wan_sw_if_index == ~0)
+  if (vec_len (main->bindings) == 0)
     vlib_cli_output (vm, "state disabled");
   else
-    vlib_cli_output (vm,
-                     "state enabled\ncontrol-interface %U\nwan-interface %U\n"
-                     "discovery-forwarded %llu\n"
-                     "dhcp6-forwarded %llu",
-                     format_vnet_sw_if_index_name, main->vnet_main,
-                     main->control_sw_if_index, format_vnet_sw_if_index_name,
-                     main->vnet_main, main->wan_sw_if_index,
-                     main->discovery_packets, main->dhcp6_packets);
+    {
+      vlib_cli_output (vm, "state enabled\nbindings %u",
+                       vec_len (main->bindings));
+      vlib_cli_output (vm, "stock-pppoe-link-table %s",
+                       ly_pppoe_stock_main_get () ? "ready" : "unavailable");
+      u32 index;
+      vec_foreach_index (index, main->bindings)
+        {
+          ly_pppoe_client_binding_t *binding = &main->bindings[index];
+          vlib_cli_output (
+            vm,
+            "[%u] control-interface %U wan-interface %U "
+            "discovery-forwarded %llu control-forwarded %llu "
+            "dhcp6-forwarded %llu",
+            index, format_vnet_sw_if_index_name, main->vnet_main,
+            binding->control_sw_if_index, format_vnet_sw_if_index_name,
+            main->vnet_main, binding->wan_sw_if_index,
+            binding->discovery_packets, binding->control_packets,
+            binding->dhcp6_packets);
+        }
+    }
   return 0;
 }
 
@@ -311,8 +475,7 @@ ly_pppoe_client_init (vlib_main_t *vm)
   ly_pppoe_client_main_t *main = &ly_pppoe_client_main;
   main->vlib_main = vm;
   main->vnet_main = vnet_get_main ();
-  main->control_sw_if_index = ~0;
-  main->wan_sw_if_index = ~0;
+  main->bindings = 0;
   return 0;
 }
 
@@ -320,5 +483,5 @@ VLIB_INIT_FUNCTION (ly_pppoe_client_init);
 
 VLIB_PLUGIN_REGISTER () = {
   .version = VPP_BUILD_VER,
-  .description = "Ly Route native VPP PPPoE client discovery binding",
+  .description = "Ly Route native VPP multi-WAN PPPoE control binding",
 };

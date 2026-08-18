@@ -12,6 +12,7 @@ import urllib.request
 
 API = os.environ.get("LY_ROUTE_DNS_SYNC_API", "http://127.0.0.1:8080")
 TOKEN_FILE = os.environ.get("LY_ROUTE_DNS_SYNC_TOKEN_FILE", "/etc/ly-route/dns-sync.token")
+API_TIMEOUT_SECONDS = int(os.environ.get("LY_ROUTE_DNS_SYNC_API_TIMEOUT_SECONDS", "30"))
 
 
 def request(path, data=None, token=None):
@@ -21,12 +22,18 @@ def request(path, data=None, token=None):
     if token:
         headers["X-LY-Route-DNS-Sync-Token"] = token
     body = None if data is None else json.dumps(data, separators=(",", ":")).encode()
-    with urllib.request.urlopen(urllib.request.Request(API + path, data=body, headers=headers), timeout=5) as response:
+    with urllib.request.urlopen(
+        urllib.request.Request(API + path, data=body, headers=headers),
+        timeout=API_TIMEOUT_SECONDS,
+    ) as response:
         return json.load(response)
 
 
 def timed_members(set_name):
-    result = subprocess.run(["ipset", "list", set_name, "-t"], capture_output=True, text=True, check=False)
+    # `ipset list -t` omits the Members section with ipset v7.17. Plain
+    # listing still reports each entry's remaining timeout, which is the only
+    # value this synchronizer needs to derive its TTL-bound observation.
+    result = subprocess.run(["ipset", "list", set_name], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         return []
     members = []
@@ -50,12 +57,33 @@ def timed_members(set_name):
     return members
 
 
+def configured_set_names(policies):
+    names = set()
+    for item in policies.get("items", []):
+        for rule in item.get("render", {}).get("rules", []):
+            set_name = rule.get("ipset_name", "")
+            if set_name:
+                names.add(set_name)
+    return names
+
+
+def prepare_ipsets(policies):
+    for set_name in sorted(configured_set_names(policies)):
+        subprocess.run(
+            ["ipset", "create", set_name, "hash:ip", "family", "inet", "timeout", "86400", "-exist"],
+            check=True,
+        )
+
+
 def main():
     with open(TOKEN_FILE, "r", encoding="ascii") as handle:
         token = handle.read().strip()
     if not token:
         raise RuntimeError("DNS sync token is empty")
     policies = request("/api/v1/dns/policies")
+    if "--prepare" in sys.argv[1:]:
+        prepare_ipsets(policies)
+        return
     for item in policies.get("items", []):
         for rule in item.get("render", {}).get("rules", []):
             set_name = rule.get("ipset_name", "")

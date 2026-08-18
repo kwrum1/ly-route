@@ -57,6 +57,10 @@ type resourceDiff[T any] struct {
 
 func ReconcileGatewayPlan(input GatewayReconciliationInput) (GatewayDiff, error) {
 	transactionID, prior, desired, live := input.TransactionID, input.Prior, input.Desired, input.Live
+	localDestinations := routePolicyLocalDestinations(desired.AddressAssignments)
+	if len(localDestinations) == 0 {
+		localDestinations = routePolicyLocalDestinations(prior.AddressAssignments)
+	}
 	routeIngressVPPInterface := gatewayLANVPPInterface(desired)
 	if routeIngressVPPInterface == "" {
 		// A cleanup/recovery transaction can be built from a desired snapshot
@@ -80,6 +84,27 @@ func ReconcileGatewayPlan(input GatewayReconciliationInput) (GatewayDiff, error)
 	if err != nil {
 		return GatewayDiff{}, err
 	}
+	queueWANGroupDependentRoutes(&routes, prior.Policy.RoutePolicies, desired.Policy.RoutePolicies, wanGroups.delete)
+	routes.delete = appendRetiredRoutePolicyIDs(routes.delete, desired.Policy.RoutePolicies, desired.RetiredRoutePolicyIDs)
+	// A VPP ABF readback can prove the policy/ACL identity and the named PPPoE
+	// interface, but not whether its cached L2 rewrite still carries the current
+	// PPPoE session ID. A successful reconnect is not necessarily reported as
+	// drift, therefore every explicit runtime apply must rebuild tokenized paths.
+	// This keeps a new PPPoE session from forwarding through a stale adjacency.
+	queued := make(map[string]struct{}, len(routes.apply))
+	for _, route := range routes.apply {
+		queued[route.ID] = struct{}{}
+	}
+	for _, route := range desired.Policy.RoutePolicies {
+		if route.Path == nil || strings.TrimSpace(route.Path.RuntimeToken) == "" {
+			continue
+		}
+		if _, exists := queued[route.ID]; exists {
+			continue
+		}
+		routes.apply = append(routes.apply, route)
+		queued[route.ID] = struct{}{}
+	}
 	acls, err := diffResources(resourceStates[trafficpolicy.SecurityACL]{prior: prior.Policy.SecurityACLs, desired: desired.Policy.SecurityACLs, live: live.ACLs}, aclContract(), input.RepairVerifiedDrift)
 	if err != nil {
 		return GatewayDiff{}, err
@@ -100,12 +125,90 @@ func ReconcileGatewayPlan(input GatewayReconciliationInput) (GatewayDiff, error)
 		Interfaces: InterfaceBondPlan{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, Interfaces: interfaces.apply, DeleteInterfaces: interfaces.delete},
 		Bonds:      InterfaceBondPlan{TransactionID: transactionID, ManagementInterface: desired.NativePath.ManagementInterface, Bonds: bonds.apply, DeleteBonds: bonds.delete},
 		WANGroups:  RouteWANGroupPlan{TransactionID: transactionID, WANGroups: wanGroups.apply, DeleteWANGroups: wanGroups.delete},
-		Routes:     RouteWANGroupPlan{TransactionID: transactionID, IngressVPPInterface: routeIngressVPPInterface, Routes: routes.apply, RoutePolicyContext: append([]trafficpolicy.RoutePolicy(nil), desired.Policy.RoutePolicies...), DeleteRoutes: routes.delete},
-		ACLs:       ACLQoSPlan{TransactionID: transactionID, ACLs: acls.apply, DeleteACLs: acls.delete},
-		QoS:        ACLQoSPlan{TransactionID: transactionID, QoS: qos.apply, DeleteQoS: qos.delete},
-		NAT44:      NAT44Plan{TransactionID: transactionID, StaticMappings: staticMappings.apply, DeleteStaticMappings: staticMappings.delete},
-		PortMaps:   NAT44Plan{TransactionID: transactionID, PortMappings: portMappings.apply, DeletePortMappings: portMappings.delete},
+		Routes: RouteWANGroupPlan{
+			TransactionID:       transactionID,
+			IngressVPPInterface: routeIngressVPPInterface,
+			LocalDestinations:   localDestinations,
+			Routes:              routes.apply,
+			RoutePolicyContext:  append([]trafficpolicy.RoutePolicy(nil), desired.Policy.RoutePolicies...),
+			WANGroupsContext:    NewWANGroupsContext(prior.Policy.WANGroups, desired.Policy.WANGroups),
+			DeleteRoutes:        routes.delete,
+		},
+		ACLs:     ACLQoSPlan{TransactionID: transactionID, IngressVPPInterface: routeIngressVPPInterface, ACLs: acls.apply, DeleteACLs: acls.delete},
+		QoS:      ACLQoSPlan{TransactionID: transactionID, IngressVPPInterface: routeIngressVPPInterface, QoS: qos.apply, DeleteQoS: qos.delete},
+		NAT44:    NAT44Plan{TransactionID: transactionID, Behavior: desired.NAT.Behavior, IngressVPPInterface: routeIngressVPPInterface, StaticMappings: staticMappings.apply, DeleteStaticMappings: staticMappings.delete},
+		PortMaps: NAT44Plan{TransactionID: transactionID, Behavior: desired.NAT.Behavior, IngressVPPInterface: routeIngressVPPInterface, PortMappings: portMappings.apply, DeletePortMappings: portMappings.delete},
 	}, nil
+}
+
+func queueWANGroupDependentRoutes(diff *resourceDiff[trafficpolicy.RoutePolicy], prior, desired []trafficpolicy.RoutePolicy, changedGroups []string) {
+	if diff == nil || len(changedGroups) == 0 {
+		return
+	}
+	changed := make(map[string]struct{}, len(changedGroups))
+	for _, id := range changedGroups {
+		if id = strings.TrimSpace(id); id != "" {
+			changed[id] = struct{}{}
+		}
+	}
+	deleted := make(map[string]struct{}, len(diff.delete))
+	for _, id := range diff.delete {
+		deleted[id] = struct{}{}
+	}
+	for _, route := range prior {
+		if _, depends := changed[strings.TrimSpace(route.Egress)]; !depends {
+			continue
+		}
+		if _, queued := deleted[route.ID]; queued {
+			continue
+		}
+		diff.delete = append(diff.delete, route.ID)
+		deleted[route.ID] = struct{}{}
+	}
+	applied := make(map[string]struct{}, len(diff.apply))
+	for _, route := range diff.apply {
+		applied[route.ID] = struct{}{}
+	}
+	for _, route := range desired {
+		if _, depends := changed[strings.TrimSpace(route.Egress)]; !depends {
+			continue
+		}
+		if _, queued := applied[route.ID]; queued {
+			continue
+		}
+		diff.apply = append(diff.apply, route)
+		applied[route.ID] = struct{}{}
+	}
+}
+
+func appendRetiredRoutePolicyIDs(existing []string, desired []trafficpolicy.RoutePolicy, retired []string) []string {
+	active := make(map[string]struct{}, len(desired))
+	seen := make(map[string]struct{}, len(existing)+len(retired))
+	for _, route := range desired {
+		if id := strings.TrimSpace(route.ID); id != "" {
+			active[id] = struct{}{}
+		}
+	}
+	for _, id := range existing {
+		if id = strings.TrimSpace(id); id != "" {
+			seen[id] = struct{}{}
+		}
+	}
+	for _, id := range retired {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, stillDesired := active[id]; stillDesired {
+			continue
+		}
+		if _, alreadyQueued := seen[id]; alreadyQueued {
+			continue
+		}
+		existing = append(existing, id)
+		seen[id] = struct{}{}
+	}
+	return existing
 }
 
 func gatewayLANVPPInterface(plan Plan) string {

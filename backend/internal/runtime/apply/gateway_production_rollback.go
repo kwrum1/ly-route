@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"ly-route/backend/internal/runtime/trafficpolicy"
 	"ly-route/backend/internal/runtime/vpp"
@@ -20,6 +21,15 @@ type productionPriorApply struct {
 	gateway       vpp.Plan
 	prior         vpp.Snapshot
 	attempted     vpp.GatewayDiff
+}
+
+func vppGatewayLANInterface(gateway vpp.Plan) string {
+	for _, assignment := range gateway.AddressAssignments {
+		if strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			return strings.TrimSpace(assignment.VPPInterface)
+		}
+	}
+	return ""
 }
 
 func (adapter *productionGatewayAdapter) rollback(ctx context.Context, input productionRollbackInput) error {
@@ -48,20 +58,20 @@ func (adapter *productionGatewayAdapter) runPrior(ctx context.Context, input pro
 			deleteACLs = append(deleteACLs, acl.ID)
 		}
 		if len(deleteACLs) > 0 {
-			if _, err := adapter.reconciler.adapter.ApplyACLQoS(ctx, vpp.ACLQoSPlan{TransactionID: transactionID, DeleteACLs: deleteACLs}, prior); err != nil {
+			if _, err := adapter.reconciler.adapter.ApplyACLQoS(ctx, vpp.ACLQoSPlan{TransactionID: transactionID, IngressVPPInterface: vppGatewayLANInterface(gateway), DeleteACLs: deleteACLs}, prior); err != nil {
 				return vpp.Snapshot{}, err
 			}
 		}
-		result, err := adapter.reconciler.adapter.ApplyACLQoS(ctx, vpp.ACLQoSPlan{TransactionID: transactionID, ACLs: gateway.Policy.SecurityACLs}, prior, attempted.ACLs)
+		result, err := adapter.reconciler.adapter.ApplyACLQoS(ctx, vpp.ACLQoSPlan{TransactionID: transactionID, IngressVPPInterface: vppGatewayLANInterface(gateway), ACLs: gateway.Policy.SecurityACLs}, prior, attempted.ACLs)
 		return result.Readback, err
 	case "qos":
-		result, err := adapter.reconciler.adapter.ApplyACLQoS(ctx, vpp.ACLQoSPlan{TransactionID: transactionID, QoS: gateway.Flow.VPPGroups}, prior, attempted.QoS)
+		result, err := adapter.reconciler.adapter.ApplyACLQoS(ctx, vpp.ACLQoSPlan{TransactionID: transactionID, IngressVPPInterface: vppGatewayLANInterface(gateway), QoS: gateway.Flow.VPPGroups}, prior, attempted.QoS)
 		return result.Readback, err
 	case "nat44":
-		result, err := adapter.reconciler.adapter.ApplyNAT44(ctx, vpp.NAT44Plan{TransactionID: transactionID, StaticMappings: gateway.NAT.StaticMappings}, prior, attempted.NAT44)
+		result, err := adapter.reconciler.adapter.ApplyNAT44(ctx, vpp.NAT44Plan{TransactionID: transactionID, Behavior: gateway.NAT.Behavior, IngressVPPInterface: vppGatewayLANInterface(gateway), StaticMappings: gateway.NAT.StaticMappings}, prior, attempted.NAT44)
 		return result.Readback, err
 	case "port-maps":
-		result, err := adapter.reconciler.adapter.ApplyNAT44(ctx, vpp.NAT44Plan{TransactionID: transactionID, PortMappings: gateway.NAT.PortMappings}, prior, attempted.PortMaps)
+		result, err := adapter.reconciler.adapter.ApplyNAT44(ctx, vpp.NAT44Plan{TransactionID: transactionID, Behavior: gateway.NAT.Behavior, IngressVPPInterface: vppGatewayLANInterface(gateway), PortMappings: gateway.NAT.PortMappings}, prior, attempted.PortMaps)
 		return result.Readback, err
 	default:
 		return vpp.Snapshot{}, fmt.Errorf("unsupported production gateway resource %q", adapter.name)

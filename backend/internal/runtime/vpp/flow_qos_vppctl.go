@@ -10,10 +10,18 @@ import (
 )
 
 func flowGroupUsesACL(group flow.VPPObjectGroup) bool {
-	return group.Kind == "vpp.acl.drop" || group.Kind == "vpp.behavior.rate"
+	return group.Kind == "vpp.acl.drop"
 }
 
 func flowTargetUsesACL(target flow.Target) bool {
+	return target.Kind == "vpp.acl.drop"
+}
+
+func flowGroupNeedsDynamicLifecycle(group flow.VPPObjectGroup) bool {
+	return group.Kind == "vpp.acl.drop" || group.Kind == "vpp.behavior.rate"
+}
+
+func flowTargetNeedsDynamicLifecycle(target flow.Target) bool {
 	return target.Kind == "vpp.acl.drop" || target.Kind == "vpp.behavior.rate"
 }
 
@@ -63,6 +71,9 @@ func (channel vppctlChannel) doFlowQoSTargetLifecycle(ctx context.Context, opera
 }
 
 func (channel vppctlChannel) applyFlowQoSTarget(ctx context.Context, operation Operation, target flow.Target, deleting bool) ([]VPPCTLCommandResult, error) {
+	if target.Kind == "vpp.behavior.rate" {
+		return channel.applyFlowRateTarget(ctx, operation, target, deleting)
+	}
 	tag := "ly-route-" + safeTag(target.RuleID)
 	results, err := channel.removeFlowQoSTarget(ctx, operation, target, tag)
 	if err != nil || deleting {
@@ -118,7 +129,7 @@ func (channel vppctlChannel) applyFlowQoSTarget(ctx context.Context, operation O
 	if target.Kind == "vpp.behavior.rate" {
 		action = "permit"
 	}
-	if err := verifyACLOutput(aclOutput, aclCandidateProof{numericID: actualACLID, id: target.RuleID, action: action, match: policyMatch(target.Match)}); err != nil {
+	if err := verifyACLOutput(aclOutput, aclCandidateProof{numericID: actualACLID, id: target.RuleID, action: action, match: policyMatch(target.Match), allowUnmatched: target.Kind == "vpp.behavior.rate"}); err != nil {
 		return nil, err
 	}
 	interfaceOutput := resultStdoutLast(results, "show acl-plugin interface")
@@ -134,6 +145,22 @@ func (channel vppctlChannel) applyFlowQoSTarget(ctx context.Context, operation O
 		if err := verifyPolicerResult(results, target); err != nil {
 			return nil, err
 		}
+	}
+	return results, nil
+}
+
+func (channel vppctlChannel) applyFlowRateTarget(ctx context.Context, operation Operation, target flow.Target, deleting bool) ([]VPPCTLCommandResult, error) {
+	results, err := channel.removeFlowQoSTarget(ctx, operation, target, "ly-route-"+safeTag(target.RuleID))
+	if err != nil || deleting {
+		return results, err
+	}
+	applied, err := channel.runServiceChainCommands(ctx, operation, flowTargetCommands(target)...)
+	if err != nil {
+		return nil, err
+	}
+	results = append(results, applied...)
+	if err := verifyFlowRateResult(results, target); err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -169,13 +196,23 @@ func (channel vppctlChannel) removeFlowQoSTarget(ctx context.Context, operation 
 	}
 	if target.Kind == "vpp.behavior.rate" {
 		name := "ly_route_" + safeTag(target.RuleID)
-		commands := flowDetachPolicerCommands(target, name)
-		commands = append(commands, "?policer del name "+name)
+		commands := []string{"?set ly-route flow-rate delete rule " + safeTag(target.RuleID), "?policer del name " + name}
+		// Remove objects left by the old whole-interface implementation during
+		// in-place upgrades. These commands are intentionally best-effort.
+		commands = append(flowDetachPolicerCommands(target, name), commands...)
 		removed, removeErr := channel.runServiceChainCommands(ctx, operation, commands...)
 		if removeErr != nil {
 			return nil, removeErr
 		}
 		results = append(results, removed...)
+		verified, verifyErr := channel.runServiceChainCommands(ctx, operation, "show ly-route flow-rate", "?show policer name "+name)
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
+		results = append(results, verified...)
+		if flowRateRulePresent(resultStdoutLast(results, "show ly-route flow-rate"), target.RuleID) {
+			return nil, snapshotDecodeError("flow rate rule %q remains after deletion", target.RuleID)
+		}
 	}
 	verified, err := channel.runServiceChainCommands(ctx, operation, "show acl-plugin acl")
 	if err != nil {
@@ -216,7 +253,12 @@ func flowAttachmentInterface(attachment string) string {
 }
 
 func dynamicQoSSnapshotCommands(request SnapshotRequest) []string {
-	commands := qosSnapshotCommands(request)
+	commandRequest := request
+	commandRequest.Candidates.QoS = append([]flow.VPPObjectGroup(nil), request.Candidates.QoS...)
+	for index := range commandRequest.Candidates.QoS {
+		commandRequest.Candidates.QoS[index] = rewriteFlowObjectGroupLANInterface(commandRequest.Candidates.QoS[index], request.LANVPPInterface)
+	}
+	commands := qosSnapshotCommands(commandRequest)
 	filtered := make([]string, 0, len(commands)+1)
 	usesACL := false
 	for _, group := range request.Candidates.QoS {

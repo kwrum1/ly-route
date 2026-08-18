@@ -63,13 +63,6 @@ type Host interface {
 	Restore(context.Context, Snapshot) error
 }
 
-// NativePCIHost is implemented by hosts that can hand a PCI-backed native
-// VPP device from the Linux driver to vfio-pci before VPP creates it.
-type NativePCIHost interface {
-	ConfigureNativePCI(context.Context, vpp.NativePath, Snapshot) error
-	VerifyNativePCI(context.Context, vpp.NativePath) error
-}
-
 type Transaction struct {
 	Host Host
 	Now  func() time.Time
@@ -94,72 +87,11 @@ func (transaction *Transaction) Apply(ctx context.Context, request Request) (Rec
 			if !SameNativePath(*transaction.current, request.Path) {
 				return Receipt{}, fmt.Errorf("%w: requested native path differs from the active device-wide path", ErrTransactionFailed)
 			}
-			if nativeHost, ok := transaction.Host.(NativePCIHost); ok && hasNativePCIAttachment(request.Path) {
-				if err := nativeHost.VerifyNativePCI(ctx, request.Path); err != nil {
-					// The persisted path describes ownership, not a guarantee that a
-					// restarted VPP process has recreated its devices. Re-enter the
-					// normal handoff transaction when the runtime readback is stale.
-					transaction.current = nil
-				} else {
-					receipt := transaction.receipt(request, false)
-					receipt.Status = "already_applied"
-					return receipt, nil
-				}
-			} else {
-				receipt := transaction.receipt(request, false)
-				receipt.Status = "already_applied"
-				return receipt, nil
-			}
+			receipt := transaction.receipt(request, false)
+			receipt.Status = "already_applied"
+			return receipt, nil
 		}
-		if !hasNativePCIAttachment(request.Path) {
-			return transaction.receipt(request, false), nil
-		}
-		if transaction.Host == nil {
-			return Receipt{}, fmt.Errorf("%w: privileged host adapter is unavailable", ErrTransactionFailed)
-		}
-		nativeHost, ok := transaction.Host.(NativePCIHost)
-		if !ok {
-			return Receipt{}, fmt.Errorf("%w: native PCI host adapter is unavailable", ErrTransactionFailed)
-		}
-		snapshot, err := transaction.Host.Snapshot(ctx, request)
-		if err != nil {
-			return Receipt{}, fmt.Errorf("%w: snapshot: %w", ErrTransactionFailed, err)
-		}
-		mutated := false
-		fail := func(phase string, cause error) (Receipt, error) {
-			if !mutated {
-				return Receipt{}, fmt.Errorf("%w: %s: %w", ErrTransactionFailed, phase, cause)
-			}
-			rollbackErr := transaction.Host.Restore(ctx, snapshot)
-			return Receipt{}, fmt.Errorf("%w: %s: %w", ErrTransactionFailed, phase, errors.Join(cause, rollbackErr))
-		}
-		if err := transaction.Host.StopVPP(ctx); err != nil {
-			return fail("stop-vpp", err)
-		}
-		mutated = true
-		if err := nativeHost.ConfigureNativePCI(ctx, request.Path, snapshot); err != nil {
-			return fail("configure-native-pci", err)
-		}
-		if err := transaction.Host.StartVPP(ctx); err != nil {
-			return fail("start-vpp", err)
-		}
-		if err := nativeHost.VerifyNativePCI(ctx, request.Path); err != nil {
-			return fail("native-readback", err)
-		}
-		if store, ok := transaction.Host.(ActiveStateStore); ok {
-			if err := store.SaveActiveState(ctx, ActiveState{Path: request.Path, Snapshot: snapshot, AppliedAt: transaction.now()}); err != nil {
-				return fail("persist-state", err)
-			}
-		}
-		if transaction.active == nil {
-			transaction.active = map[string]Snapshot{}
-		}
-		transaction.active[request.TransactionID] = snapshot
-		current := request.Path
-		transaction.current = &current
-		receipt := transaction.receipt(request, false)
-		receipt.Changed = true
-		return receipt, nil
+		return transaction.receipt(request, false), nil
 	}
 	if request.Path.Tier != vpp.DataplaneTierDPDK || len(request.Path.Attachments) == 0 {
 		return Receipt{}, fmt.Errorf("%w: unsupported or empty tier %q", ErrTransactionFailed, request.Path.Tier)
@@ -286,15 +218,6 @@ func SameNativePath(left, right vpp.NativePath) bool {
 		}
 	}
 	return true
-}
-
-func hasNativePCIAttachment(path vpp.NativePath) bool {
-	for _, attachment := range path.Attachments {
-		if attachment.Hook == vpp.NativeHookVMXNET3 && attachment.Mode == vpp.NativeModeVMXNET3VFIO {
-			return true
-		}
-	}
-	return false
 }
 
 func (transaction *Transaction) receipt(request Request, rolledBack bool) Receipt {

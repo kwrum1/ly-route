@@ -19,3 +19,16 @@ func TestDNSServiceResolverServersUsesBootstrapOnlyForDoH(t *testing.T) {
 		t.Fatalf("IP resolver set = %#v, want %#v", got, wantIP)
 	}
 }
+
+func TestDNSDoHHostnameAcceptsHostnamesOnly(t *testing.T) {
+	for server, want := range map[string]string{
+		"https://dns.alidns.com/dns-query": "dns.alidns.com",
+		"h3://cloudflare-dns.com/dns-query": "cloudflare-dns.com",
+		"https://1.1.1.1/dns-query":       "",
+		"8.8.8.8":                          "",
+	} {
+		if got := dnsDoHHostname(server); got != want {
+			t.Fatalf("dnsDoHHostname(%q) = %q, want %q", server, got, want)
+		}
+	}
+}

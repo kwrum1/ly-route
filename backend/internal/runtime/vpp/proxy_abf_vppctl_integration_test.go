@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"ly-route/backend/internal/runtime/nat"
 	"ly-route/backend/internal/runtime/proxy"
 )
 
@@ -19,7 +20,7 @@ func TestVPPCTLProxyABFLifecycleIntegration(t *testing.T) {
 	}
 	operation := Operation{
 		Name: steering.TargetKind, RequestID: "integration-proxy-apply", Resource: steering.EgressID,
-		Payload: steering, VPPCtlCommands: proxySteeringCommands(steering),
+		Payload: steering, VPPCtlCommands: proxySteeringCommands(steering, nat.BehaviorEndpointDependent),
 	}
 	if os.Getenv("LY_ROUTE_PROXY_ABF_ACTION") == "delete" {
 		operation.Name += ".rollback-delete"

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"ly-route/backend/internal/runtime/nat"
 )
 
 func TestDNSServiceNetworkUsesStableDedicatedVPPHandoff(t *testing.T) {
@@ -34,7 +36,10 @@ func TestDNSServiceNetworkUsesStableDedicatedVPPHandoff(t *testing.T) {
 	assertOperationCommand(t, operations, "vpp.dns-service.network", "create tap id")
 	assertOperationCommand(t, operations, "vpp.dns-service.network", "set interface mtu packet 1492 "+network.VPPInterface)
 	assertOperationCommand(t, operations, "vpp.dns-service.network", "ip route add table")
-	assertOperationCommand(t, operations, "vpp.dns-service.network", "set interface nat44 in "+network.VPPInterface+" del")
+	assertOperationCommand(t, operations, "vpp.dns-service.network", "set interface nat44 in "+network.VPPInterface+" out lyroute-wan0")
+	plan.NAT.Behavior = nat.BehaviorFullCone
+	operations = mustBuildOperations(t, plan)
+	assertOperationCommand(t, operations, "vpp.dns-service.network", "set interface nat44 ei in "+network.VPPInterface+" out lyroute-wan0")
 }
 
 func TestDNSServiceNetworkRejectsNonIPResolver(t *testing.T) {
@@ -53,7 +58,7 @@ func TestDNSServiceNetworkRejectsInvalidEffectiveMTU(t *testing.T) {
 	}
 }
 
-func TestDNSServiceNetworkReadbackRejectsDuplicateInputNAT(t *testing.T) {
+func TestDNSServiceNetworkReadbackRequiresInputNAT(t *testing.T) {
 	network, err := DNSServiceNetworkForUpstreamID("dns-primary", "wan-primary", []string{"9.9.9.9"})
 	if err != nil {
 		t.Fatal(err)
@@ -61,10 +66,11 @@ func TestDNSServiceNetworkReadbackRejectsDuplicateInputNAT(t *testing.T) {
 	results := []VPPCTLCommandResult{
 		{Command: "show interface address " + network.VPPInterface, Stdout: network.VPPInterface + " " + network.VPPAddress},
 		{Command: fmt.Sprintf("show ip fib table %d", network.TableID), Stdout: fmt.Sprintf("table %d", network.TableID)},
-		{Command: "show nat44 interfaces", Stdout: network.VPPInterface + " in"},
+		{Command: "show nat44 interfaces", Stdout: "pppoe_session0 out"},
+		{Command: "show nat44 ei interfaces", Stdout: ""},
 		{Command: "show tap", Stdout: network.VPPInterface},
 	}
-	if err := verifyDNSServiceNetworkReadback(network, results); err == nil || !strings.Contains(err.Error(), "must not be a NAT44 input") {
-		t.Fatalf("duplicate input NAT readback error = %v", err)
+	if err := verifyDNSServiceNetworkReadback(network, results); err == nil || !strings.Contains(err.Error(), "missing its NAT44 input") {
+		t.Fatalf("missing input NAT readback error = %v", err)
 	}
 }

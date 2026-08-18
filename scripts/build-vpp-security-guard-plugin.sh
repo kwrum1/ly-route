@@ -4,13 +4,13 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-$repo_root/runtime-downloads}
 out=${LY_ROUTE_VPP_SECURITY_GUARD_BUILD_DIR:-$repo_root/build/vpp-security-guard}
 sysroot=${LY_ROUTE_VPP_SECURITY_GUARD_SYSROOT:-$out/sysroot}
-for package in vpp-dev libvppinfra-dev; do
-  file="$debs/${package}_25.10-release_amd64.deb"
-  [ -f "$file" ] || { echo "missing VPP development package: $file" >&2; exit 1; }
-done
+vpp_dev=$(find "$debs" -maxdepth 1 -type f -name 'vpp-dev_*.deb' -print -quit)
+infra_dev=$(find "$debs" -maxdepth 1 -type f -name 'libvppinfra-dev_*.deb' -print -quit)
+[ -f "$vpp_dev" ] || { echo "missing VPP development package in $debs: vpp-dev" >&2; exit 1; }
+[ -f "$infra_dev" ] || { echo "missing VPP development package in $debs: libvppinfra-dev" >&2; exit 1; }
 mkdir -p "$out" "$sysroot"
-dpkg-deb -x "$debs/vpp-dev_25.10-release_amd64.deb" "$sysroot"
-dpkg-deb -x "$debs/libvppinfra-dev_25.10-release_amd64.deb" "$sysroot"
+dpkg-deb -x "$vpp_dev" "$sysroot"
+dpkg-deb -x "$infra_dev" "$sysroot"
 cmake -S "$repo_root/runtime/vpp-security-guard" -B "$out/cmake" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DVPP_DIR="$sysroot/usr/lib/x86_64-linux-gnu/cmake/vpp" \

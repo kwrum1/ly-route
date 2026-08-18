@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,344 @@ import (
 	"ly-route/backend/internal/runtime/nat"
 	"ly-route/backend/internal/runtime/trafficpolicy"
 )
+
+func TestVerifyABFPolicyIgnoresNestedDPOPathDetails(t *testing.T) {
+	results := []VPPCTLCommandResult{{
+		Command: "show abf policy 11198",
+		Stdout: "abf:[1]: policy:11198 acl:12345\n" +
+			"     path-list:[7] locks:1 flags:shared,no-uRPF, uRPF-list: None\n" +
+			"      path:[8] pl-index:7 ip4 weight=1 pref=0 attached-nexthop:  oper-flags:resolved,\n" +
+			"        198.18.34.89 lypxinffdc88 (p2p)\n" +
+			"      [@0]: ipv4 [features] via 198.18.34.89 lypxinffdc88: mtu:1460\n" +
+			"             stacked-on:\n" +
+			"               [@2]: lypxoutffdc88-tx-dpo:\n",
+	}}
+
+	if err := verifyABFPolicy(results, abfCandidateProof{policyID: 11198, aclID: 12345, via: "198.18.34.89 lypxinffdc88"}); err != nil {
+		t.Fatalf("verifyABFPolicy() error = %v", err)
+	}
+}
+
+func TestVerifyABFPolicyRejectsUnresolvedIfIndexPath(t *testing.T) {
+	results := []VPPCTLCommandResult{
+		{Command: "show abf policy 11198", Stdout: "abf:[4]: policy:11198 acl:12345\n" +
+			"     path-list:[105] locks:1 flags:shared len:1\n" +
+			"      path:[122] pl-index:105 ip4 weight=1 pref=0 attached-nexthop: oper-flags:drop,\n" +
+			"        198.18.34.90 if_index:8\n" +
+			"        unresolved\n"},
+		{Command: "show interface", Stdout: "lypxinffdc88 8 up 1460/0/0/0\n"},
+	}
+	if err := verifyABFPolicy(results, abfCandidateProof{policyID: 11198, aclID: 12345, via: "198.18.34.90 lypxinffdc88"}); err == nil || !strings.Contains(err.Error(), "unresolved") {
+		t.Fatalf("verifyABFPolicy() error = %v, want unresolved-path failure", err)
+	}
+}
+
+func TestVerifyABFPolicyRecognizesStaleUnresolvedPathForReconciliation(t *testing.T) {
+	results := []VPPCTLCommandResult{{
+		Command: "show abf policy 11198",
+		Stdout: "abf:[4]: policy:11198 acl:12345\n" +
+			"     path-list:[105] locks:1 flags:shared len:1\n" +
+			"      path:[122] pl-index:105 ip4 weight=1 pref=0 attached-nexthop: oper-flags:drop,\n" +
+			"        198.18.34.90 if_index:8\n" +
+			"        unresolved\n",
+	}}
+	if err := verifyABFPolicy(results, abfCandidateProof{policyID: 11198, aclID: 12345, via: "198.18.34.90 lypxinffdc88"}); err != nil {
+		t.Fatalf("prepare snapshot must recognize stale path for reconciliation: %v", err)
+	}
+}
+
+func TestParseFIBResultTreatsDropDPOAsMissingForwardingPath(t *testing.T) {
+	results := []VPPCTLCommandResult{{
+		Command: "show ip fib table 92258",
+		Stdout: "ipv4-VRF:92258, fib_index:5, flow hash:[src dst sport dport proto ]\n" +
+			"0.0.0.0/0\n" +
+			"  unicast-ip4-chain\n" +
+			"  [@0]: dpo-load-balance: [proto:ip4 index:63 buckets:1]\n" +
+			"    [0] [@0]: dpo-drop ip4\n",
+	}}
+	paths, err := parseFIBResult(results, 92258)
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("parseFIBResult() paths = %#v, error = %v; want known missing path", paths, err)
+	}
+}
+
+func TestParseFIBResultIgnoresMainTableFallbackAfterVPP2510WANPaths(t *testing.T) {
+	const tableID = 86417
+	results := []VPPCTLCommandResult{{
+		Command: fmt.Sprintf("show ip fib table %d", tableID),
+		Stdout: "ipv4-VRF:86417, fib_index:14, flow hash:[src dst sport dport proto ] epoch:0 flags:none locks:[CLI:1, ]\n" +
+			"0.0.0.0/0\n" +
+			"  unicast-ip4-chain\n" +
+			"  [@0]: dpo-load-balance: [proto:ip4 index:133 buckets:16 uRPF:114 to:[0:0]]\n" +
+			"    [0-2] [@6]: ipv4 via 0.0.0.0 pppoe_session9: mtu:9000 next:3 flags:[]\n" +
+			"    [3-9] [@6]: ipv4 via 0.0.0.0 pppoe_session8: mtu:9000 next:3 flags:[]\n" +
+			"    [10-15] [@14]: dst-address,unicast lookup in ipv4-VRF:0\n" +
+			"0.0.0.0/32\n" +
+			"  unicast-ip4-chain\n" +
+			"  [@0]: dpo-load-balance: [proto:ip4 index:163 buckets:1 uRPF:199 to:[0:0]]\n" +
+			"    [0] [@0]: dpo-drop ip4\n",
+	}}
+	paths, err := parseFIBResult(results, tableID)
+	if err != nil {
+		t.Fatalf("parseFIBResult() error = %v", err)
+	}
+	if len(paths) != 2 || paths[0].via != "0.0.0.0 pppoe_session9: mtu:9000 next:3 flags:[]" || paths[1].via != "0.0.0.0 pppoe_session8: mtu:9000 next:3 flags:[]" {
+		t.Fatalf("parseFIBResult() paths = %#v, want only the two configured PPPoE paths", paths)
+	}
+}
+
+func TestParseFIBResultAcceptsCoveringWANGroupDefaults(t *testing.T) {
+	const tableID = 86417
+	results := []VPPCTLCommandResult{{
+		Command: fmt.Sprintf("show ip fib table %d", tableID),
+		Stdout: fmt.Sprintf(`ipv4-VRF:%d, fib_index:10, flow hash:[src dst sport dport proto]
+0.0.0.0/0
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:63 buckets:1]
+    [0] [@0]: dpo-drop ip4
+0.0.0.0/1
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:70 buckets:2]
+    [0] [@6]: ipv4 via 0.0.0.0 pppoe_session_a: mtu:9000
+    [1] [@6]: ipv4 via 0.0.0.0 pppoe_session_b: mtu:9000
+128.0.0.0/1
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:71 buckets:2]
+    [0] [@6]: ipv4 via 0.0.0.0 pppoe_session_a: mtu:9000
+    [1] [@6]: ipv4 via 0.0.0.0 pppoe_session_b: mtu:9000
+224.0.0.0/4
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:72 buckets:1]
+    [0] [@0]: dpo-drop ip4
+`, tableID),
+	}}
+	paths, err := parseFIBResult(results, tableID)
+	if err != nil {
+		t.Fatalf("parseFIBResult() error = %v", err)
+	}
+	if len(paths) != 2 || paths[0].via != "0.0.0.0 pppoe_session_a: mtu:9000" || paths[1].via != "0.0.0.0 pppoe_session_b: mtu:9000" {
+		t.Fatalf("parseFIBResult() paths = %#v, want two unique covering paths", paths)
+	}
+}
+
+func TestSelectRoutePoliciesAllowsVerifiedMissingDrift(t *testing.T) {
+	policies, err := selectRoutePolicies(nil, SnapshotRequest{AllowMissing: true, RoutePolicies: []string{"route-100"}})
+	if err != nil || len(policies) != 0 {
+		t.Fatalf("selectRoutePolicies() policies = %#v, error = %v", policies, err)
+	}
+}
+
+func TestDecodeWANGroupsAllowsMissingTableAfterVPPRestart(t *testing.T) {
+	candidate := trafficpolicy.WANGroup{
+		ID:      "wan-primary",
+		Mode:    trafficpolicy.WANGroupWeighted,
+		Members: []string{"wan0", "wan1"},
+		Paths: map[string]trafficpolicy.WANPath{
+			"wan0": {VPPInterface: "pppoe_session0", NextHop: "10.67.0.1"},
+			"wan1": {VPPInterface: "pppoe_session1", NextHop: "10.68.0.1"},
+		},
+	}
+	request := SnapshotRequest{
+		AllowMissing: true,
+		WANGroups:    []string{candidate.ID},
+		Candidates:   SnapshotCandidates{WANGroups: []trafficpolicy.WANGroup{candidate}},
+	}
+	readback, err := decodeVPPCTLWANGroups(request, []VPPCTLCommandResult{{
+		Command: fmt.Sprintf("show ip fib table %d", wanGroupTableID(candidate.ID)),
+		Stdout: fmt.Sprintf("ipv4-VRF:%d, fib_index:5, flow hash:[src dst sport dport proto ]\n", wanGroupTableID(candidate.ID)) +
+			"0.0.0.0/0\n" +
+			"  unicast-ip4-chain\n" +
+			"  [@0]: dpo-load-balance: [proto:ip4 index:63 buckets:1]\n" +
+			"    [0] [@0]: dpo-drop ip4\n",
+	}})
+	if err != nil || len(readback.Groups) != 0 {
+		t.Fatalf("missing WAN-group FIB readback = %#v, %v; want repairable empty state", readback, err)
+	}
+	selected, err := selectWANGroups(readback.Groups, request)
+	if err != nil || len(selected) != 0 {
+		t.Fatalf("selected missing WAN group = %#v, %v; want repairable empty state", selected, err)
+	}
+}
+
+func TestDecodeQoSAllowsVerifiedMissingMatchedRateAfterVPPRestart(t *testing.T) {
+	candidate := flow.VPPObjectGroup{Kind: "vpp.behavior.rate", Objects: []flow.VPPObject{{
+		RuleID: "flow-30", Granularity: flow.RuleGranularity, Action: flow.ActionPolicer,
+		Policer: &flow.Policer{RateBPS: 1_000_000, BurstBPS: 100_000},
+		Match:   flow.Match{Sources: []string{"192.168.50.102/32"}},
+	}}}
+	request := SnapshotRequest{
+		AllowMissing: true,
+		QoS:          []string{candidate.Kind},
+		Candidates:   SnapshotCandidates{QoS: []flow.VPPObjectGroup{candidate}},
+	}
+	readback, err := decodeVPPCTLQoS(request, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: ""},
+		{Command: "show policer name ly_route_flow_30", Stdout: ""},
+		{Command: "show ly-route flow-rate", Stdout: ""},
+	})
+	if err != nil || len(readback.Groups) != 0 {
+		t.Fatalf("decode missing matched rate = %#v, %v; want repairable empty state", readback, err)
+	}
+	selected, err := selectQoS(readback.Groups, request)
+	if err != nil || len(selected) != 0 {
+		t.Fatalf("select missing matched rate = %#v, %v; want repairable empty state", selected, err)
+	}
+}
+
+func TestDecodeQoSRepairsPolicerCreatedByOlderUnitConversion(t *testing.T) {
+	candidate := flow.VPPObjectGroup{Kind: "vpp.behavior.rate", Objects: []flow.VPPObject{{
+		RuleID: "flow-30", Granularity: flow.RuleGranularity, Action: flow.ActionPolicer,
+		Policer: &flow.Policer{RateBPS: 20_000_000, BurstBPS: 2_000_000},
+		Match:   flow.Match{Sources: []string{"192.168.50.102/32"}},
+	}}}
+	results := []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: "acl-index 2 count 3 tag {ly-route-flow_30}\n  0: ipv4 permit src 192.168.50.102/32 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\n  1: ipv4 permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\n  2: ipv6 permit src ::/0 dst ::/0 proto 0 sport 0-65535 dport 0-65535\n"},
+		{Command: "show policer name ly_route_flow_30", Stdout: "Name \"ly_route_flow_30\" type 1r2c cir 20000 eir 0 cb 2000 eb 0\nrate type kbps, round type closest\nconform action transmit, exceed action drop, violate action drop\nPolicer at index 0: single rate, not color-aware\ncir 1 tok/period, pir 1 tok/period, scale 0\ncur lim 1, cur bkt 1, ext lim 0, ext bkt 0\nlast update 1\nconform 0 packets, 0 bytes\nexceed 0 packets, 0 bytes\nviolate 0 packets, 0 bytes\n-----------\n"},
+		{Command: "show ly-route flow-rate", Stdout: ""},
+	}
+	request := SnapshotRequest{QoS: []string{candidate.Kind}, Candidates: SnapshotCandidates{QoS: []flow.VPPObjectGroup{candidate}}}
+	if _, err := decodeVPPCTLQoS(request, results); err == nil {
+		t.Fatal("strict QoS readback accepted an old policer burst conversion")
+	}
+	request.AllowMissing = true
+	readback, err := decodeVPPCTLQoS(request, results)
+	if err != nil || len(readback.Groups) != 0 {
+		t.Fatalf("repair readback = %#v, %v; want old policer treated as repairable drift", readback, err)
+	}
+}
+
+func TestDecodeQoSRecognizesLegacyV4OnlyRateACLAsRepairableDrift(t *testing.T) {
+	candidate := flow.VPPObjectGroup{Kind: "vpp.behavior.rate", Objects: []flow.VPPObject{{
+		RuleID: "flow-30", Granularity: flow.RuleGranularity, Action: flow.ActionPolicer,
+		Policer: &flow.Policer{RateBPS: 1_000_000, BurstBPS: 100_000},
+		Match:   flow.Match{Sources: []string{"192.168.50.102/32"}, Protocols: []string{"tcp"}},
+	}}}
+	request := SnapshotRequest{
+		QoS:        []string{candidate.Kind},
+		Candidates: SnapshotCandidates{QoS: []flow.VPPObjectGroup{candidate}},
+	}
+	readback, err := decodeVPPCTLQoS(request, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: "acl-index 2 count 2 tag {ly-route-flow_30}\n  0: ipv4 permit src 192.168.50.102/32 dst 0.0.0.0/0 proto 6 sport 0-65535 dport 0-65535\n  1: ipv4 permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\n"},
+		{Command: "show policer name ly_route_flow_30", Stdout: "Name \"ly_route_flow_30\" type 1r2c cir 1000 eir 0 cb 100 eb 0\n"},
+		{Command: "show ly-route flow-rate", Stdout: ""},
+	})
+	if err != nil || len(readback.Groups) != 0 {
+		t.Fatalf("decode legacy matched rate = %#v, %v; want repairable empty state", readback, err)
+	}
+}
+
+func TestDecodeRoutesAllowsVerifiedMissingRouteAfterVPPRestart(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{ID: "route-100", Action: "route", Match: trafficpolicy.Match{Sources: []string{"192.0.2.10/32"}, Destinations: []string{"0.0.0.0/0"}, Protocols: []string{"any"}}}
+	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
+	readback, err := decodeVPPCTLRoutes(SnapshotRequest{
+		AllowMissing:  true,
+		RoutePolicies: []string{route.ID},
+		Candidates:    SnapshotCandidates{RoutePolicies: []trafficpolicy.RoutePolicy{route}},
+	}, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: ""},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: ""},
+	})
+	if err != nil || len(readback.Policies) != 0 {
+		t.Fatalf("decodeVPPCTLRoutes() = %#v, %v; want repairable missing route", readback, err)
+	}
+}
+
+func TestDecodeRoutesAllowsTaggedACLWithoutABFAsRepairableDrift(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{ID: "route-100", Action: "route", Match: trafficpolicy.Match{Sources: []string{"192.0.2.10/32"}, Destinations: []string{"0.0.0.0/0"}, Protocols: []string{"any"}}}
+	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
+	readback, err := decodeVPPCTLRoutes(SnapshotRequest{
+		AllowMissing:  true,
+		RoutePolicies: []string{route.ID},
+		Candidates:    SnapshotCandidates{RoutePolicies: []trafficpolicy.RoutePolicy{route}},
+	}, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: "acl-index 7 count 1 tag {ly-route-route_100}\n  0: ipv4 permit src 192.0.2.10/32 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\n"},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: fmt.Sprintf("Invalid policy ID:%d\n", policyID)},
+	})
+	if err != nil || len(readback.Policies) != 0 {
+		t.Fatalf("decodeVPPCTLRoutes() = %#v, %v; want repairable partial route drift", readback, err)
+	}
+}
+
+func TestDecodeRoutesAllowsOlderABFPathAsRepairableDrift(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{ID: "route-10", Priority: 10, Action: "route", Match: trafficpolicy.Match{Sources: []string{"0.0.0.0/0"}, Destinations: []string{"203.0.113.0/24"}, Protocols: []string{"any"}}, Path: &trafficpolicy.WANPath{VPPInterface: "pppoe_session1", NextHop: "10.67.0.1"}}
+	fallback := trafficpolicy.RoutePolicy{ID: "route-100", Priority: 100, Action: "route", Match: trafficpolicy.Match{Sources: []string{"0.0.0.0/0"}, Destinations: []string{"0.0.0.0/0"}, Protocols: []string{"any"}}, Path: &trafficpolicy.WANPath{VPPInterface: "lypxin100", NextHop: "198.18.0.1"}}
+	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
+	readback, err := decodeVPPCTLRoutes(SnapshotRequest{
+		AllowMissing:  true,
+		RoutePolicies: []string{route.ID},
+		Candidates:    SnapshotCandidates{RoutePolicies: []trafficpolicy.RoutePolicy{route, fallback}},
+	}, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: "acl-index 2 count 1 tag {ly-route-route_10}\n  0: ipv4 permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\n"},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: fmt.Sprintf("abf:[2]: policy:%d acl:2\n path-list:[1] locks:1 len:1\n  path:[1] pl-index:1 ip4 weight=1 pref=0\n    10.67.0.1 pppoe_session1 (p2p)\n", policyID)},
+	})
+	if err != nil || len(readback.Policies) != 0 {
+		t.Fatalf("decodeVPPCTLRoutes() = %#v, %v; want older path treated as repairable drift", readback, err)
+	}
+}
+
+func TestDecodeRoutesUsesABFReferencedACLWhenTaggedInventoryHasStaleDuplicate(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{
+		ID:     "route-duplicate",
+		Action: "route",
+		Match:  trafficpolicy.Match{Sources: []string{"192.0.2.10/32"}, Destinations: []string{"0.0.0.0/0"}, Protocols: []string{"any"}},
+		Path:   &trafficpolicy.WANPath{VPPInterface: "pppoe_session1", NextHop: "10.67.0.1"},
+	}
+	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
+	tableID := stableID("route-table:"+route.ID, 50000, 49999)
+	const activeACLID = 7
+	readback, err := decodeVPPCTLRoutes(SnapshotRequest{
+		RoutePolicies: []string{route.ID},
+		Candidates:    SnapshotCandidates{RoutePolicies: []trafficpolicy.RoutePolicy{route}},
+	}, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: "acl-index 7 count 1 tag {ly-route-route_duplicate}\n  0: ipv4 permit src 192.0.2.10/32 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\nacl-index 8 count 1 tag {ly-route-route_duplicate}\n  0: ipv4 permit src 192.0.2.10/32 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535\n"},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: fmt.Sprintf("abf:[0]: policy:%d acl:%d\n path-list:[17] locks:1 flags:shared len:1\n  path:[21] pl-index:17 ip4 weight=1 pref=0\n    10.67.0.1 pppoe_session1 (p2p)\n", policyID, activeACLID)},
+		{Command: fmt.Sprintf("show ip fib table %d", tableID), Stdout: fmt.Sprintf("ipv4-VRF:%d, fib_index:3, flow hash:[src dst sport dport proto]\n0.0.0.0/0\n  unicast-ip4-chain\n    [@0]: ipv4 via 0.0.0.0 pppoe_session1\n", tableID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(readback.Policies, []trafficpolicy.RoutePolicy{route}) {
+		t.Fatalf("routes = %#v, want active ABF route despite stale duplicate ACL", readback.Policies)
+	}
+}
+
+func TestDecodeRoutesReadsBackRadixPolicyWithoutACLOrABF(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{
+		ID:       "route-split-geoip-cn",
+		Priority: 10,
+		Action:   "route",
+		Match: trafficpolicy.Match{
+			Sources:      []string{"0.0.0.0/0"},
+			Destinations: []string{"1.0.1.0/24", "1.0.2.0/23"},
+			Protocols:    []string{"any"},
+		},
+		Path: &trafficpolicy.WANPath{VPPInterface: "pppoe_session1", NextHop: "10.67.0.1"},
+	}
+	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
+	tableID := stableID("route-table:"+route.ID, 50000, 49999)
+	request := SnapshotRequest{
+		LANVPPInterface:   "lyroute-ens34",
+		LocalDestinations: []string{"192.168.50.0/24"},
+		RoutePolicies:     []string{route.ID},
+		Candidates:        SnapshotCandidates{RoutePolicies: []trafficpolicy.RoutePolicy{route}},
+	}
+	commands := routeSnapshotCommands(request)
+	if !slices.Contains(commands, "show ly-route pre-nat-route") {
+		t.Fatalf("snapshot commands = %#v, want radix inventory", commands)
+	}
+	readback, err := decodeVPPCTLRoutes(request, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: ""},
+		{Command: "show ly-route pre-nat-route", Stdout: fmt.Sprintf("enabled 1 interface lyroute-ens34 lan-prefix 192.168.50.0/24 rules 2 radix-nodes 3\nrule id %d priority 10 prefixes 2 table %d fib-index 12 skip-nat 0 bypass 0\n", policyID, tableID)},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: fmt.Sprintf("Invalid policy ID:%d\n", policyID)},
+		{Command: fmt.Sprintf("show ip fib table %d", tableID), Stdout: fmt.Sprintf("ipv4-VRF:%d, fib_index:12, flow hash:[src dst sport dport proto]\n0.0.0.0/0\n  unicast-ip4-chain\n    [@0]: ipv4 via 0.0.0.0 pppoe_session1\n", tableID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(readback.Policies, []trafficpolicy.RoutePolicy{route}) {
+		t.Fatalf("routes = %#v, want radix route", readback.Policies)
+	}
+}
 
 type fakeVPPResponse struct {
 	stdout string

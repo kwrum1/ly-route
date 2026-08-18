@@ -268,16 +268,365 @@ VLIB_CLI_COMMAND (ly_sq_show_command, static) = {
   .function = ly_sq_show_command_fn,
 };
 
+int
+ly_sq_rate_feature_needed (u32 sw_if_index, u8 direction)
+{
+  for (u32 index = 0; index < ly_sq_main.rate_rule_count; index++)
+    if (ly_sq_main.rate_rules[index].enabled &&
+        ly_sq_main.rate_rules[index].sw_if_index == sw_if_index &&
+        ly_sq_main.rate_rules[index].direction == direction)
+      return 1;
+  return 0;
+}
+
+static u8
+ly_sq_rate_protocol (u8 *value)
+{
+  if (!value || !strcmp ((char *) value, "any"))
+    return 0;
+  if (!strcmp ((char *) value, "tcp"))
+    return IP_PROTOCOL_TCP;
+  if (!strcmp ((char *) value, "udp"))
+    return IP_PROTOCOL_UDP;
+  if (!strcmp ((char *) value, "icmp"))
+    return IP_PROTOCOL_ICMP;
+  return 255;
+}
+
+static void
+ly_sq_rate_bucket_id (char *destination, size_t destination_size,
+                       const char *rule_id)
+{
+  char *separator;
+  size_t length = strlen (rule_id);
+  if (length >= destination_size)
+    length = destination_size - 1;
+  memcpy (destination, rule_id, length);
+  destination[length] = 0;
+  separator = strrchr (destination, '_');
+  if (!separator || !separator[1])
+    return;
+  for (char *cursor = separator + 1; *cursor; cursor++)
+    if (*cursor < '0' || *cursor > '9')
+      return;
+  *separator = 0;
+}
+
+static u32
+ly_sq_rate_bucket_find (const char *id)
+{
+  for (u32 index = 0; index < LY_SQ_RATE_BUCKET_COUNT; index++)
+    if (ly_sq_main.rate_buckets[index].enabled &&
+        !strcmp (ly_sq_main.rate_buckets[index].id, id))
+      return index;
+  return LY_SQ_INVALID_INDEX;
+}
+
+static u32
+ly_sq_rate_bucket_allocate (const char *id, u64 rate_kbps, u64 burst_bytes)
+{
+  u32 index = ly_sq_rate_bucket_find (id);
+  if (index == LY_SQ_INVALID_INDEX)
+    for (index = 0; index < LY_SQ_RATE_BUCKET_COUNT; index++)
+      if (!ly_sq_main.rate_buckets[index].enabled)
+        {
+          ly_sq_rate_bucket_t *bucket = &ly_sq_main.rate_buckets[index];
+          clib_memset (bucket, 0, sizeof (*bucket));
+          clib_spinlock_init (&bucket->lock);
+          memcpy (bucket->id, id, strlen (id) + 1);
+          bucket->enabled = 1;
+          break;
+        }
+  if (index == LY_SQ_RATE_BUCKET_COUNT)
+    return LY_SQ_INVALID_INDEX;
+  ly_sq_rate_bucket_t *bucket = &ly_sq_main.rate_buckets[index];
+  bucket->rate_bytes_per_second = rate_kbps * 1000 / 8;
+  bucket->burst_bytes = burst_bytes;
+  bucket->tokens = burst_bytes;
+  bucket->last_refill = 0;
+  return index;
+}
+
+static void
+ly_sq_rate_bucket_release_unused (void)
+{
+  for (u32 bucket_index = 0; bucket_index < LY_SQ_RATE_BUCKET_COUNT;
+       bucket_index++)
+    {
+      ly_sq_rate_bucket_t *bucket = &ly_sq_main.rate_buckets[bucket_index];
+      if (!bucket->enabled)
+        continue;
+      int used = 0;
+      for (u32 rule_index = 0; rule_index < ly_sq_main.rate_rule_count;
+           rule_index++)
+        if (ly_sq_main.rate_rules[rule_index].enabled &&
+            ly_sq_main.rate_rules[rule_index].bucket_index == bucket_index)
+          {
+            used = 1;
+            break;
+          }
+      if (!used)
+        bucket->enabled = 0;
+    }
+}
+
+static clib_error_t *
+ly_sq_rate_delete_rules (vlib_main_t *vm, const u8 *id)
+{
+  u32 removed_sw_if_indices[LY_SQ_RATE_RULE_COUNT];
+  u8 removed_directions[LY_SQ_RATE_RULE_COUNT];
+  u32 removed_count = 0;
+  size_t id_length = strlen ((const char *) id);
+
+  vlib_worker_thread_barrier_sync (vm);
+  u32 write_index = 0;
+  for (u32 index = 0; index < ly_sq_main.rate_rule_count; index++)
+    {
+      ly_sq_rate_rule_t *rule = &ly_sq_main.rate_rules[index];
+      int matches = !strcmp (rule->id, (const char *) id) ||
+                    (!strncmp (rule->id, (const char *) id, id_length) &&
+                     rule->id[id_length] == '_');
+      if (!matches)
+        {
+          if (write_index != index)
+            ly_sq_main.rate_rules[write_index] = *rule;
+          write_index++;
+          continue;
+        }
+      removed_sw_if_indices[removed_count] = rule->sw_if_index;
+      removed_directions[removed_count++] = rule->direction;
+    }
+  ly_sq_main.rate_rule_count = write_index;
+  ly_sq_rate_bucket_release_unused ();
+  vlib_worker_thread_barrier_release (vm);
+
+  for (u32 index = 0; index < removed_count; index++)
+      if (!ly_sq_rate_feature_needed (removed_sw_if_indices[index],
+                                      removed_directions[index]))
+        vnet_feature_enable_disable (
+          removed_directions[index] == LY_SQ_RATE_DIRECTION_INPUT ?
+            "ip4-unicast" : "interface-output",
+        removed_directions[index] == LY_SQ_RATE_DIRECTION_INPUT ?
+          "ly-route-flow-rate-input" : "ly-route-flow-rate-output",
+        removed_sw_if_indices[index], 0, 0, 0);
+  return 0;
+}
+
+static clib_error_t *
+ly_sq_rate_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
+                           vlib_cli_command_t *cmd)
+{
+  u8 *id = 0, *protocol_name = 0;
+  u32 sw_if_index = LY_SQ_INVALID_INDEX, source_len = 0,
+      destination_len = 0;
+  u32 source_first = 0, source_last = 65535;
+  u32 destination_first = 0, destination_last = 65535;
+  u8 direction = 0, protocol;
+  u32 existing_index = LY_SQ_INVALID_INDEX;
+  u32 old_sw_if_index = LY_SQ_INVALID_INDEX;
+  u32 bucket_index = LY_SQ_INVALID_INDEX;
+  u8 old_direction = 0;
+  char bucket_id[LY_SQ_RATE_RULE_ID_SIZE];
+  ip4_address_t source = { 0 }, destination = { 0 };
+  u64 rate_kbps = 0, burst_bytes = 0;
+
+  if (unformat (input, "delete rule %s", &id))
+    {
+      clib_error_t *error;
+      if (!id || !id[0] ||
+          unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+        {
+          vec_free (id);
+          return clib_error_return (0, "flow-rate rule ID is required");
+        }
+      error = ly_sq_rate_delete_rules (vm, id);
+      vec_free (id);
+      return error;
+    }
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "rule %s", &id))
+        ;
+      else if (unformat (input, "interface %U", unformat_vnet_sw_interface,
+                         ly_sq_main.vnet_main, &sw_if_index))
+        ;
+      else if (unformat (input, "direction input"))
+        direction = LY_SQ_RATE_DIRECTION_INPUT;
+      else if (unformat (input, "direction output"))
+        direction = LY_SQ_RATE_DIRECTION_OUTPUT;
+      else if (unformat (input, "source %U/%u", unformat_ip4_address,
+                         &source, &source_len))
+        ;
+      else if (unformat (input, "destination %U/%u", unformat_ip4_address,
+                         &destination, &destination_len))
+        ;
+      else if (unformat (input, "protocol %s", &protocol_name))
+        ;
+      else if (unformat (input, "source-port %u-%u", &source_first,
+                         &source_last))
+        ;
+      else if (unformat (input, "destination-port %u-%u", &destination_first,
+                         &destination_last))
+        ;
+      else if (unformat (input, "rate-kbps %llu", &rate_kbps))
+        ;
+      else if (unformat (input, "burst-bytes %llu", &burst_bytes))
+        ;
+      else
+        return clib_error_return (0, "unknown input '%U'",
+                                  format_unformat_error, input);
+    }
+  protocol = ly_sq_rate_protocol (protocol_name);
+  if (!id || !id[0] || sw_if_index == LY_SQ_INVALID_INDEX || !direction ||
+      source_len > 32 || destination_len > 32 || protocol == 255 ||
+      source_first > source_last || source_last > 65535 ||
+      destination_first > destination_last || destination_last > 65535 ||
+      strlen ((char *) id) >= LY_SQ_RATE_RULE_ID_SIZE ||
+      rate_kbps == 0 || rate_kbps > 400000000 || burst_bytes == 0 ||
+      burst_bytes > (1ULL << 32))
+    {
+      vec_free (id);
+      vec_free (protocol_name);
+      return clib_error_return (0, "invalid flow-rate rule");
+    }
+  for (u32 index = 0; index < ly_sq_main.rate_rule_count; index++)
+    if (!strcmp (ly_sq_main.rate_rules[index].id, (char *) id))
+      {
+        existing_index = index;
+        old_sw_if_index = ly_sq_main.rate_rules[index].sw_if_index;
+        old_direction = ly_sq_main.rate_rules[index].direction;
+        break;
+      }
+  if (existing_index == LY_SQ_INVALID_INDEX &&
+      ly_sq_main.rate_rule_count == LY_SQ_RATE_RULE_COUNT)
+    {
+      vec_free (id);
+      vec_free (protocol_name);
+      return clib_error_return (0, "flow-rate rule capacity reached");
+    }
+  int feature_was_needed = ly_sq_rate_feature_needed (sw_if_index, direction);
+  int rv = 0;
+  if (!feature_was_needed)
+    rv = vnet_feature_enable_disable (
+      direction == LY_SQ_RATE_DIRECTION_INPUT ? "ip4-unicast" :
+                                                "interface-output",
+      direction == LY_SQ_RATE_DIRECTION_INPUT ? "ly-route-flow-rate-input" :
+                                                "ly-route-flow-rate-output",
+      sw_if_index, 1, 0, 0);
+  if (rv)
+    {
+      vec_free (id);
+      vec_free (protocol_name);
+      return clib_error_return (0, "flow-rate feature attachment failed: %d", rv);
+    }
+  vlib_worker_thread_barrier_sync (vm);
+  ly_sq_rate_bucket_id (bucket_id, sizeof (bucket_id), (char *) id);
+  bucket_index = ly_sq_rate_bucket_allocate (bucket_id, rate_kbps,
+                                              burst_bytes);
+  if (bucket_index == LY_SQ_INVALID_INDEX)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      vec_free (id);
+      vec_free (protocol_name);
+      return clib_error_return (0, "flow-rate bucket capacity reached");
+    }
+  if (existing_index == LY_SQ_INVALID_INDEX)
+    existing_index = ly_sq_main.rate_rule_count++;
+  ly_sq_rate_rule_t *rule = &ly_sq_main.rate_rules[existing_index];
+  clib_memset (rule, 0, sizeof (*rule));
+  memcpy (rule->id, id, strlen ((char *) id) + 1);
+  rule->sw_if_index = sw_if_index;
+  rule->bucket_index = bucket_index;
+  rule->source = source;
+  rule->destination = destination;
+  rule->source_prefix_len = source_len;
+  rule->destination_prefix_len = destination_len;
+  rule->protocol = protocol;
+  rule->direction = direction;
+  rule->source_port_first = source_first;
+  rule->source_port_last = source_last;
+  rule->destination_port_first = destination_first;
+  rule->destination_port_last = destination_last;
+  rule->enabled = 1;
+  vlib_worker_thread_barrier_release (vm);
+  if (old_sw_if_index != LY_SQ_INVALID_INDEX &&
+      (old_sw_if_index != sw_if_index || old_direction != direction) &&
+      !ly_sq_rate_feature_needed (old_sw_if_index, old_direction))
+    vnet_feature_enable_disable (
+      old_direction == LY_SQ_RATE_DIRECTION_INPUT ? "ip4-unicast" :
+                                                    "interface-output",
+      old_direction == LY_SQ_RATE_DIRECTION_INPUT ?
+        "ly-route-flow-rate-input" : "ly-route-flow-rate-output",
+      old_sw_if_index, 0, 0, 0);
+  vec_free (id);
+  vec_free (protocol_name);
+  (void) cmd;
+  return 0;
+}
+
+VLIB_CLI_COMMAND (ly_sq_rate_set_command, static) = {
+  .path = "set ly-route flow-rate",
+  .short_help = "set ly-route flow-rate delete rule <id> | rule <id> interface <interface> "
+                "direction input|output source A.B.C.D/N destination A.B.C.D/N "
+                "protocol any|tcp|udp|icmp source-port <first>-<last> "
+                "destination-port <first>-<last> rate-kbps <rate> burst-bytes <burst>",
+  .function = ly_sq_rate_set_command_fn,
+};
+
+static clib_error_t *
+ly_sq_rate_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
+                            vlib_cli_command_t *cmd)
+{
+  for (u32 index = 0; index < ly_sq_main.rate_rule_count; index++)
+    {
+      ly_sq_rate_rule_t *rule = &ly_sq_main.rate_rules[index];
+      if (rule->bucket_index >= LY_SQ_RATE_BUCKET_COUNT ||
+          !ly_sq_main.rate_buckets[rule->bucket_index].enabled)
+        continue;
+      ly_sq_rate_bucket_t *bucket =
+        &ly_sq_main.rate_buckets[rule->bucket_index];
+      clib_spinlock_lock (&bucket->lock);
+      vlib_cli_output (
+        vm, "rule %s interface %U direction %s source %U/%u destination %U/%u "
+            "protocol %u source-port %u-%u destination-port %u-%u rate-kbps %llu burst-bytes %llu "
+            "matched-packets %llu matched-bytes %llu conform-packets %llu "
+            "dropped-packets %llu",
+        rule->id, format_vnet_sw_if_index_name, ly_sq_main.vnet_main,
+        rule->sw_if_index,
+        rule->direction == LY_SQ_RATE_DIRECTION_INPUT ? "input" : "output",
+        format_ip4_address, &rule->source, rule->source_prefix_len,
+        format_ip4_address, &rule->destination, rule->destination_prefix_len,
+        rule->protocol, rule->source_port_first, rule->source_port_last,
+        rule->destination_port_first, rule->destination_port_last,
+        (bucket->rate_bytes_per_second * 8) / 1000, bucket->burst_bytes,
+        rule->matched_packets, rule->matched_bytes,
+        rule->conform_packets, rule->dropped_packets);
+      clib_spinlock_unlock (&bucket->lock);
+    }
+  (void) input;
+  (void) cmd;
+  return 0;
+}
+
+VLIB_CLI_COMMAND (ly_sq_rate_show_command, static) = {
+  .path = "show ly-route flow-rate",
+  .short_help = "show ly-route flow-rate",
+  .function = ly_sq_rate_show_command_fn,
+};
+
 static clib_error_t *
 ly_sq_init (vlib_main_t *vm)
 {
+  vlib_handoff_alloc_queues_args_t queue_args = {
+    .node_index = ly_sq_enqueue_node.index,
+  };
+
   ly_sq_main.vlib_main = vm;
   ly_sq_main.vnet_main = vnet_get_main ();
   ly_sq_main.arc_index =
     ly_sq_main.vnet_main->interface_main.output_feature_arc_index;
   ly_sq_main.scheduler_thread_index = 0;
-  ly_sq_main.frame_queue_index =
-    vlib_frame_queue_main_init (ly_sq_enqueue_node.index, 0);
+  ly_sq_main.frame_queue_index = vlib_handoff_alloc_queues (&queue_args);
   return 0;
 }
 

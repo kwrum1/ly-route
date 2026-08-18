@@ -9,7 +9,7 @@
   "preserve_management_port": true,
   "dhcp_client": false,
   "management_fallback": true,
-  "management_fallback_cidr": "192.168.88.1/24",
+  "management_fallback_cidr": "192.168.88.254/24",
   "dataplane": {
     "preferred_path": "vpp_native_proven",
     "active_path": "dataplane_locked",

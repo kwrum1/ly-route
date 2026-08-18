@@ -62,6 +62,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 geodata_dir=${LY_ROUTE_GEODATA_DIR:-$repo_root/packaging/geodata}
 . "$repo_root/scripts/lib/product-build-profile.sh"
 load_product_build_profile "$repo_root" "$product" "$manifest"
+export LY_ROUTE_SOURCE_FINGERPRINT=$(product_source_fingerprint "$repo_root")
 validate_prebuilt_control "$control_binary" "$product"
 validate_prebuilt_vpp_apply "$vpp_apply_binary"
 validate_upgrade_base_manifest "$base_manifest" "$product"

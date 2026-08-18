@@ -8,7 +8,7 @@
 - 禁止运行时产品互转和跨产品配置导入。
 - 可以共享基础代码，但产品能力测试必须证明产物中不存在越界服务、API、资源、页面或迁移。
 - 共享选择器自动探测已分配网卡，优先选择实测通过的最优 VPP 原生高性能候选；没有原生候选通过时才使用 VPP DPDK。每台设备的全部活动数据接口必须统一采用其最高共同合格等级，Gateway 和 Orchestrator 都不得按端口或编排组混用等级。两个等级都失败时数据面锁定，管理面保持可访问。
-- AF_XDP copy、Linux 通用 XDP 转发、AF_PACKET、内核转发及其他兼容性降级路径不在候选范围。
+- AF_XDP copy、Linux 通用 XDP 转发、内核转发及其他兼容性降级路径不在生产候选范围。AF_PACKET 仅允许在明确启用 `LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=true` 且网卡驱动为 `vmxnet3` 的 ESXi 功能验收环境中使用；它不是 PCI 独占或高性能生产路径。
 
 ## 出口网关 Gateway
 
@@ -47,6 +47,13 @@ Orchestrator 是透明双臂流量编排设备。它只负责决定流量是否�
 - Orchestrator 支持 IP 组，但不支持域名组。
 - WAN/LAN 接口地址是主机前缀，不是策略选择器；DHCP 池使用范围；NAT 转换端点遵守对应资源的单地址/接口约束。
 
+### NAT 行为边界
+
+- Gateway 默认使用 VPP NAT44-ED（端点相关）行为；未填写 NAT 行为时不得隐式切换模式。
+- 需要全锥 NAT 时，在 NAT 相关配置中显式选择 `full_cone`，运行时统一使用 VPP NAT44-EI（端点无关）插件。
+- NAT44-ED 与 NAT44-EI 是整台 Gateway 的互斥运行模式，静态映射、端口映射、动态 PPPoE 出口和回程保护必须使用同一模式；检测到混用配置时拒绝应用并保持上一份运行配置。
+- 全锥 NAT 的验收必须同时检查 VPP 的 EI 接口/地址/映射回读，并由独立 LAN 客户端发起真实 UDP 会话验证；只看到配置文件或 API 成功不算通过。
+
 Orchestrator 明确保留：流量概况（统计编排组流量）、系统概况、在线用户、Top 连接、网卡设置、编排设置、流量编排、流量控制、安全控制、IP 管理、系统用户管理和配置管理。
 
 Orchestrator 明确排除：WAN 群组、路由/NAT、端口映射、DNS 管控、DHCP 服务、域名管理、Top Domains、代理网关、OAF/DPI/应用识别/上网行为审计、Bridge 模式、云管理、HA 和 VRRP。
@@ -54,3 +61,10 @@ Orchestrator 明确排除：WAN 群组、路由/NAT、端口映射、DNS 管控�
 ## 发布边界
 
 两个产品必须分别提供 x86_64 与 ARM64 产物，并通过全新安装、升级、回滚、产品隔离、API 契约、浏览器、真实包流和故障注入门禁。功能验收按[双产品全功能验收设计](container-network-validation.md)执行；Gateway 必须覆盖 DNS/DHCP、路由/NAT、WAN、PPPoE、代理、QoS、安全、遥测和运维，Orchestrator 必须覆盖完整策略、逻辑端点、双向服务链及节点失效 bypass。只有 schema、路由、mock 或页面不等于功能已交付；软件全功能验收通过后仍需目标硬件性能与驱动门禁才能发布。
+# Xray 节点域名解析边界
+
+- Xray 节点地址填写域名时，控制面必须先解析为 IP，再生成 Xray 运行配置；TLS、Reality 的 SNI 保留原域名。
+- 节点域名只能使用系统内置 DoH 的固定 Bootstrap DNS：`1.1.1.1`、`1.0.0.1`、`8.8.8.8`、`8.8.4.4`、`9.9.9.9`。
+- 控制面按固定列表逐个尝试，首个服务器不可达时继续下一个；全部不可达则拒绝生成该 Xray 运行配置，禁止回落到系统 DNS。
+- 不读取 `/etc/resolv.conf`，不继承终端 DNS、DNS 策略或用户填写的普通 DNS，也不允许环境变量覆盖。
+- Bootstrap DNS 只负责节点域名的首次控制面解析；用户配置的 DoH 仍是业务 DNS 上游，两者不能混用。

@@ -239,8 +239,8 @@ func CompileIntent(intent Intent) (CompiledIntent, error) {
 					groupObjects["vpp.behavior.rate"] = append(groupObjects["vpp.behavior.rate"], vppObject(intent.ID, rule, action, "vpp.behavior.rate", "", nil, &policer, match, attachments))
 				} else {
 					target.Kind = "vpp.policer"
+					groupObjects["vpp.policer"] = append(groupObjects["vpp.policer"], vppObject(intent.ID, rule, action, "vpp.policer", "", nil, &policer, Match{}, nil))
 				}
-				groupObjects["vpp.policer"] = append(groupObjects["vpp.policer"], vppObject(intent.ID, rule, action, "vpp.policer", "", nil, &policer, Match{}, nil))
 			}
 			targets = append(targets, target)
 		}
@@ -263,7 +263,7 @@ func vppObjectGroups(groupObjects map[string][]VPPObject) []VPPObjectGroup {
 
 	groups := make([]VPPObjectGroup, 0, len(orderedKinds))
 	for _, kind := range orderedKinds {
-		if (kind == "vpp.acl.drop" || kind == "vpp.behavior.rate") && len(groupObjects[kind]) == 0 {
+		if len(groupObjects[kind]) == 0 {
 			continue
 		}
 		groups = append(groups, VPPObjectGroup{Kind: kind, Objects: groupObjects[kind]})

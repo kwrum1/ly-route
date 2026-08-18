@@ -173,7 +173,7 @@ func TestProductionGatewayHTTPFirstGenerationFailureCleansIntroducedState(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"set interface ip address lyroute-eth1 192.0.2.2/24 del", "delete acl-plugin acl index", "abf policy del", "delete interface af_xdp"} {
+	for _, command := range []string{"set interface ip address del lyroute-eth1 192.0.2.2/24", "delete acl-plugin acl index", "abf policy del", "delete interface af_xdp"} {
 		if !strings.Contains(string(trace), command) {
 			t.Fatalf("first-generation cleanup lacks %q:\n%s", command, trace)
 		}

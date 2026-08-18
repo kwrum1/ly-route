@@ -43,13 +43,18 @@ func TestCurrentDNSUpstreamsPinsSmartDNSToVPPServicePeer(t *testing.T) {
 		t.Fatalf("DNS VPP service network result = upstreams %#v networks %#v", upstreams, networks)
 	}
 	var pinnedInterface string
+	var socketMark uint32
 	for _, upstream := range upstreams {
 		if upstream.ID == "dns-primary" {
 			pinnedInterface = upstream.Interface
+			socketMark = upstream.SocketMark
 		}
 	}
 	if pinnedInterface != networks[0].HostInterface || pinnedInterface == "wan0" {
 		t.Fatalf("SmartDNS upstream still points to physical WAN: %#v", upstreams)
+	}
+	if socketMark != networks[0].SocketMark || socketMark == 0 {
+		t.Fatalf("SmartDNS upstream is missing its DNS service socket mark: %#v", upstreams)
 	}
 	if networks[0].UnderlayRoute != "192.0.2.1 lyroute-wan0" {
 		t.Fatalf("VPP DNS underlay route = %q", networks[0].UnderlayRoute)

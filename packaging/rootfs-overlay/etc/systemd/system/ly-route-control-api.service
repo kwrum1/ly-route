@@ -1,11 +1,12 @@
 [Unit]
 Description=Ly Route local control API
 After=network.target ly-route-firstboot.service ly-route-runtime-check.service
-Requires=ly-route-firstboot.service ly-route-runtime-check.service
+Requires=ly-route-firstboot.service
 Before=nginx.service
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/ly-route/runtime.env
 Environment=LY_ROUTE_API_HOST=127.0.0.1
 Environment=LY_ROUTE_API_PORT=8080
 Environment=LY_ROUTE_CONFIG_PATH=/var/lib/ly-route/config.json

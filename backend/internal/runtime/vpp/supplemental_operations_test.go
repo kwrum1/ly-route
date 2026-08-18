@@ -62,6 +62,37 @@ func TestSupplementalOperationsEqualIgnoresTransactionIdentityAndDetectsPayloadC
 	}
 }
 
+func TestSupplementalReconciliationCleanupDeletesRemovedDNSServiceNetwork(t *testing.T) {
+	now := time.Date(2026, 8, 15, 2, 0, 0, 0, time.UTC)
+	prior := nativeSupplementalPlan(now)
+	network, err := DNSServiceNetworkForUpstreamID("dns-removed", "wan-primary", []string{"1.1.1.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BindDNSServiceNetwork(&network, "192.0.2.1 lyroute-eth2"); err != nil {
+		t.Fatal(err)
+	}
+	prior.DNSServiceNetworks = []DNSServiceNetwork{network}
+	desired := prior
+	desired.RequestID = "txn-supplemental-cleanup"
+	desired.DNSServiceNetworks = nil
+
+	cleanup, err := SupplementalReconciliationCleanupOperations(prior, desired, SupplementalRoutes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleanup) != 1 {
+		t.Fatalf("cleanup operations = %#v, want one DNS removal", cleanup)
+	}
+	operation := cleanup[0]
+	if operation.Name != "vpp.dns-service.network.reconcile-delete" || operation.Resource != network.UpstreamID {
+		t.Fatalf("cleanup identity = %#v", operation)
+	}
+	if !operationHasCommand(operation, "?delete tap "+network.VPPInterface) || !operationHasCommand(operation, "?ip table del "+strconv.Itoa(network.TableID)) {
+		t.Fatalf("DNS cleanup commands = %#v", operation.VPPCtlCommands)
+	}
+}
+
 type supplementalReplyClient struct {
 	results []VPPCTLCommandResult
 }
@@ -238,6 +269,27 @@ func TestVerifySupplementalOperationRejectsWrongProxyAttachmentIdentity(t *testi
 	}
 }
 
+func TestVerifySupplementalOperationAcceptsFullConeProxyNATReadback(t *testing.T) {
+	network := proxy.ServiceNetworkForEgressID("proxy-home")
+	steering := proxy.VPPSteeringInstruction{
+		EgressID:       "proxy-home",
+		TargetKind:     "vpp.proxy-service.network",
+		ServiceNetwork: network,
+	}
+	operation := Operation{Name: steering.TargetKind, Resource: steering.EgressID, Payload: steering}
+	results := []VPPCTLCommandResult{
+		{Command: "show interface address " + network.IngressVPPInterface, Stdout: network.IngressVPPInterface + " " + network.IngressCIDR},
+		{Command: "show interface address " + network.EgressVPPInterface, Stdout: network.EgressVPPInterface + " " + network.EgressCIDR},
+		{Command: "show ip fib table " + strconv.Itoa(network.OutboundTableID), Stdout: "table " + strconv.Itoa(network.OutboundTableID)},
+		{Command: "show nat44 ei interfaces", Stdout: network.EgressVPPInterface + " in\npppoe_session1 out"},
+		{Command: "show tap", Stdout: network.IngressVPPInterface + " host-if-name " + network.IngressHostInterface},
+	}
+
+	if err := verifySupplementalOperation(operation, results); err != nil {
+		t.Fatalf("full-cone proxy readback rejected: %v", err)
+	}
+}
+
 func TestSupplementalOperationsIncludesOnlyUngroupedDirectFlowTargets(t *testing.T) {
 	// Given
 	observedAt := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
@@ -357,7 +409,7 @@ func TestVerifySupplementalOperationAcceptsExactDirectFlowTargetReadback(t *test
 	operation := Operation{Name: target.Kind, Resource: target.RuleID, Payload: target}
 	results := []VPPCTLCommandResult{{
 		Command: "show policer name ly_route_direct",
-		Stdout:  "Name \"ly_route_direct\" type 1r2c cir 1000 eir 0 cb 100 eb 0\n-----------\n",
+		Stdout:  "Name \"ly_route_direct\" type 1r2c cir 1000 eir 0 cb 12500 eb 0\n-----------\n",
 	}}
 
 	// When

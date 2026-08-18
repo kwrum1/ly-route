@@ -4,7 +4,7 @@ ARCH ?= amd64
 SUITE ?= bookworm
 OUT ?= dist/rootfs
 
-.PHONY: rootfs rootfs-amd64 rootfs-arm64 disk-image rockchip-armbian-image rockchip-boards runtime-debs validate-rootfs ci clean-rootfs
+.PHONY: rootfs rootfs-amd64 rootfs-arm64 disk-image rockchip-armbian-image rockchip-boards runtime-debs validate-rootfs ci hotfix-check hotfix-build clean-generated release-verify clean-rootfs
 
 rootfs:
 	./scripts/build-rootfs.sh --arch "$(ARCH)" --suite "$(SUITE)" --out "$(OUT)"
@@ -32,6 +32,18 @@ validate-rootfs:
 
 ci:
 	./scripts/ci-verify.sh
+
+hotfix-check:
+	bash ./scripts/dev-hotfix-check.sh $(GO_PACKAGES)
+
+hotfix-build:
+	bash ./scripts/build-hotfix-go.sh --package "$(GO_PACKAGE)" --name "$(NAME)"
+
+clean-generated:
+	bash ./scripts/clean-generated.sh --apply
+
+release-verify:
+	./scripts/ci-release-verify.sh
 
 clean-rootfs:
 	rm -rf "$(OUT)"

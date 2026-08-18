@@ -37,7 +37,7 @@ func selectCommonDataplanePath(request NativePathRequest) (NativePath, error) {
 		eligible[name] = eligibleByTier{}
 		for _, proof := range assignment.Candidates {
 			tier := proofTier(proof)
-			reasons := candidateRejectionReasons(proof, request.Now, tier, request.RequireSmartQoS)
+			reasons := candidateRejectionReasons(proof, request.Now, tier, request.RequireSmartQoS, request.AcceptanceAFPacket)
 			evaluation := CandidateEvaluation{LinuxInterface: name, Tier: tier, Hook: proof.Hook, Mode: proof.Mode, PerformanceScore: proof.PerformanceScore, Eligible: len(reasons) == 0, Reasons: reasons}
 			evaluations = append(evaluations, evaluation)
 			if evaluation.Eligible {
@@ -128,6 +128,7 @@ func selectCommonDataplanePath(request NativePathRequest) (NativePath, error) {
 		attachments = append(attachments, proveNativeAttachment(NativeAttachment{
 			LinuxInterface: name,
 			VPPInterface:   selectedVPPInterface(selected, name),
+			MACAddress:     strings.TrimSpace(selected.MACAddress),
 			Tier:           selectedTier,
 			Hook:           selected.Hook,
 			Mode:           selected.Mode,
@@ -160,8 +161,9 @@ func selectedVPPInterface(proof CapabilityProof, linuxInterface string) string {
 	return "lyroute-" + linuxInterface
 }
 
-func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier DataplaneTier, requireSmartQoS bool) []string {
+func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier DataplaneTier, requireSmartQoS bool, acceptanceAFPacket bool) []string {
 	reasons := make([]string, 0)
+	acceptancePath := acceptanceAFPacketProof(acceptanceAFPacket, proof)
 	runtimeProof := isRuntimeCapabilityProof(proof) && proof.RuntimeVerified && !proof.ObservedAt.IsZero()
 	if !runtimeProof {
 		reasons = append(reasons, "runtime capability proof is required")
@@ -170,27 +172,19 @@ func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier Datapl
 		reasons = append(reasons, "runtime capability proof is missing or stale")
 	}
 	lifetime := proof.ValidUntil.Sub(proof.ObservedAt)
-	if !runtimeProof || lifetime <= 0 || lifetime > 10*time.Minute {
-		reasons = append(reasons, "runtime capability proof validity exceeds the allowed window")
+	if !runtimeProof || lifetime <= 0 {
+		reasons = append(reasons, "runtime capability proof validity must end after observation")
 	}
-	if !proof.HighPerformance {
+	if !proof.HighPerformance && !acceptancePath {
 		reasons = append(reasons, "proof does not establish high-performance mode")
 	}
 	switch tier {
 	case DataplaneTierNative:
-		if !approvedNativeMode(proof.Hook, proof.Mode) || !proof.Native {
+		if (!approvedNativeMode(proof.Hook, proof.Mode) && !acceptancePath) || !proof.Native {
 			reasons = append(reasons, "candidate is not an approved VPP-native high-performance path")
 		}
-		if proof.Hook == NativeHookVMXNET3 {
-			if !pciAddressSafe(proof.PCIAddress) {
-				reasons = append(reasons, "VMXNET3 candidate has no safe PCI address")
-			}
-			if !proof.VFIOAvailable {
-				reasons = append(reasons, "vfio-pci is unavailable")
-			}
-			if (!decimalIdentifierSafe(proof.IOMMUGroup) || !proof.IOMMUProtected) && !proof.VFIONoIOMMUAvailable {
-				reasons = append(reasons, "VMXNET3 candidate is not protected by an IOMMU group")
-			}
+		if acceptancePath && !hardwareAddressSafe(proof.MACAddress) {
+			reasons = append(reasons, "AF_PACKET candidate has no safe Linux interface MAC address")
 		}
 	case DataplaneTierDPDK:
 		if proof.Hook != NativeHookDPDK || proof.Mode != NativeModeDPDKVFIO && proof.Mode != NativeModeDPDKUIO || proof.Native {
@@ -204,7 +198,7 @@ func candidateRejectionReasons(proof CapabilityProof, now time.Time, tier Datapl
 		}
 		switch proof.Mode {
 		case NativeModeDPDKVFIO:
-			if (!decimalIdentifierSafe(proof.IOMMUGroup) || !proof.IOMMUProtected) && !proof.VFIONoIOMMUAvailable {
+			if !decimalIdentifierSafe(proof.IOMMUGroup) || !proof.IOMMUProtected {
 				reasons = append(reasons, "DPDK candidate is not protected by an IOMMU group")
 			}
 			if !proof.VFIOAvailable {

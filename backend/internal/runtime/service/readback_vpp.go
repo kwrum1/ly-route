@@ -31,6 +31,13 @@ func validateVPPReadback(ctx context.Context, runner CommandRunner, artifacts []
 	if _, err := requiredOutput(ctx, runner, "vppctl", "show", "version"); err != nil {
 		return err
 	}
+	// The production gateway transaction has already applied and read back the
+	// typed VPP graph before this artifact is persisted for boot recovery. The
+	// legacy helper receipt only describes a later boot-time replay, so it must
+	// not be used to reject the committed runtime generation.
+	if artifactsArePersistOnly(artifacts) {
+		return nil
+	}
 	content, err := artifactContent(artifacts, "/var/lib/ly-route/vpp/operations.json")
 	if err != nil {
 		return err

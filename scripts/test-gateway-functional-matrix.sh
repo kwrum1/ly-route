@@ -22,21 +22,55 @@ tests=(
 failures=0
 summary="$evidence_dir/summary.tsv"
 printf 'test\tresult\n' >"$summary"
-for entry in "${tests[@]}"; do
+jobs=${LY_ROUTE_TEST_JOBS:-4}
+case "$jobs" in
+  ''|*[!0-9]*|0) echo "LY_ROUTE_TEST_JOBS must be a positive integer" >&2; exit 2 ;;
+esac
+
+run_one() {
+  entry=$1
   name=${entry%%|*}
   command=${entry#*|}
   log="$evidence_dir/$name.log"
-  printf '[RUN] %s\n' "$name"
   if (cd "$repo_root" && bash "$command") >"$log" 2>&1; then
-    printf '[PASS] %s\n' "$name"
-    printf '%s\tpassed\n' "$name" >>"$summary"
+    printf 'passed\n' >"$evidence_dir/$name.result"
   else
     status=$?
-    failures=$((failures + 1))
-    printf '[FAIL] %s (exit=%s)\n' "$name" "$status"
-    tail -n 30 "$log"
-    printf '%s\tfailed:%s\n' "$name" "$status" >>"$summary"
+    printf 'failed:%s\n' "$status" >"$evidence_dir/$name.result"
   fi
+}
+
+wait_batch() {
+  for pid in "$@"; do
+    wait "$pid" || true
+  done
+}
+
+pids=()
+for entry in "${tests[@]}"; do
+  name=${entry%%|*}
+  rm -f "$evidence_dir/$name.result"
+  printf '[RUN] %s\n' "$name"
+  run_one "$entry" &
+  pids+=("$!")
+  if [ "${#pids[@]}" -ge "$jobs" ]; then
+    wait_batch "${pids[@]}"
+    pids=()
+  fi
+done
+wait_batch "${pids[@]}"
+
+for entry in "${tests[@]}"; do
+  name=${entry%%|*}
+  result=$(cat "$evidence_dir/$name.result")
+  printf '%s\t%s\n' "$name" "$result" >>"$summary"
+  if [ "$result" = passed ]; then
+    printf '[PASS] %s\n' "$name"
+    continue
+  fi
+  failures=$((failures + 1))
+  printf '[FAIL] %s (%s)\n' "$name" "$result"
+  tail -n 30 "$evidence_dir/$name.log"
 done
 
 printf 'functional matrix complete: %s failures\n' "$failures"

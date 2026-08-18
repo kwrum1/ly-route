@@ -3,6 +3,8 @@ package vpp
 import (
 	"fmt"
 	"strings"
+
+	"ly-route/backend/internal/runtime/trafficpolicy"
 )
 
 func decodeVPPCTLReadback(operation Operation, results []VPPCTLCommandResult) (any, error) {
@@ -74,10 +76,44 @@ func commandOutputAllowEmpty(results []VPPCTLCommandResult, command string) (str
 	return output, nil
 }
 
+func commandOutputLastAllowEmpty(results []VPPCTLCommandResult, command string) (string, error) {
+	var output string
+	matches := 0
+	for _, result := range results {
+		if result.Command != command {
+			continue
+		}
+		matches++
+		output = result.Stdout
+		if result.Retval != 0 {
+			return "", snapshotDecodeError("command %q returned retval %d", command, result.Retval)
+		}
+	}
+	if matches == 0 {
+		return "", snapshotDecodeError("command %q returned no result rows", command)
+	}
+	return output, nil
+}
+
 func routeSnapshotCommands(request SnapshotRequest) []string {
 	ids := append(append([]string(nil), request.RoutePolicies...), request.AbsentRoutePolicies...)
 	commands := make([]string, 0, 1+len(ids)*2)
 	commands = append(commands, "show acl-plugin acl")
+	groups := make(map[string]trafficpolicy.WANGroup, len(request.Candidates.WANGroups))
+	for _, group := range request.Candidates.WANGroups {
+		groups[group.ID] = group
+	}
+	routeOptions := buildRoutePolicyCommandOptions(request.Candidates.RoutePolicies, groups)
+	addRoutePolicyLocalDestinationPrefixes(routeOptions, request.Candidates.RoutePolicies, request.LocalDestinations)
+	for _, candidate := range request.Candidates.RoutePolicies {
+		if _, ok := compileRoutePolicyRadixPlan(candidate, groups, routeOptions[candidate.ID]); ok {
+			commands = appendUnique(commands, "show ly-route pre-nat-route")
+			break
+		}
+	}
+	if len(request.AbsentRoutePolicies) > 0 {
+		commands = appendUnique(commands, "show ly-route pre-nat-route")
+	}
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		commands = appendUnique(commands,

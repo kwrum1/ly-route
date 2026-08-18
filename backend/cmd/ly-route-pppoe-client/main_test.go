@@ -1,63 +1,41 @@
 package main
 
 import (
-	"errors"
-	"reflect"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestNotifyDependentRuntimeQueuesPolicyReconciliation(t *testing.T) {
-	previous := runServiceCommand
-	t.Cleanup(func() { runServiceCommand = previous })
-	var commands [][]string
-	runServiceCommand = func(name string, args ...string) ([]byte, error) {
-		commands = append(commands, append([]string{name}, args...))
-		if len(commands) == 1 {
-			return []byte("active\n"), nil
-		}
-		return nil, nil
+func TestWriteStatusPreservesOtherPeerStatus(t *testing.T) {
+	directory := t.TempDir()
+	first := filepath.Join(directory, "wan-primary.json")
+	second := filepath.Join(directory, "wan-secondary.json")
+	if err := os.WriteFile(second, []byte(`{"state":"connected","interface":"pppoe-secondary"}`), 0600); err != nil {
+		t.Fatalf("write secondary status: %v", err)
 	}
-	if err := notifyDependentRuntime("ly-route-policy-routing.service"); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"systemctl", "--no-block", "try-restart", "ly-route-policy-routing.service"}
-	if len(commands) != 2 || !reflect.DeepEqual(commands[1], want) {
-		t.Fatalf("reconciliation commands = %#v, want state probe and %#v", commands, want)
-	}
-}
 
-func TestNotifyDependentRuntimeDoesNotRestartActivatingPolicy(t *testing.T) {
-	previous := runServiceCommand
-	t.Cleanup(func() { runServiceCommand = previous })
-	var commands [][]string
-	runServiceCommand = func(name string, args ...string) ([]byte, error) {
-		commands = append(commands, append([]string{name}, args...))
-		return []byte("activating\n"), nil
-	}
-	if err := notifyDependentRuntime("ly-route-policy-routing.service"); err != nil {
-		t.Fatal(err)
-	}
-	if len(commands) != 1 || !reflect.DeepEqual(commands[0], []string{"systemctl", "show", "--property=ActiveState", "--value", "ly-route-policy-routing.service"}) {
-		t.Fatalf("activating reconciliation commands = %#v", commands)
-	}
-}
+	writeStatus(first, map[string]any{"state": "connected", "interface": "pppoe-primary"})
 
-func TestNotifyDependentRuntimeRejectsUnsafeUnitAndReportsFailure(t *testing.T) {
-	if err := notifyDependentRuntime("../../unsafe.service"); err == nil {
-		t.Fatal("unsafe reconciliation unit was accepted")
+	primary, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read primary status: %v", err)
 	}
-	previous := runServiceCommand
-	t.Cleanup(func() { runServiceCommand = previous })
-	call := 0
-	runServiceCommand = func(name string, args ...string) ([]byte, error) {
-		call++
-		if call == 1 {
-			return []byte("active\n"), nil
-		}
-		return []byte("unit failed"), errors.New("exit status 1")
+	if !strings.Contains(string(primary), `"pppoe-primary"`) {
+		t.Fatalf("primary status = %q", primary)
 	}
-	if err := notifyDependentRuntime("ly-route-policy-routing.service"); err == nil || !strings.Contains(err.Error(), "unit failed") {
-		t.Fatalf("reconciliation failure = %v", err)
+	secondary, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatalf("read secondary status: %v", err)
+	}
+	if !strings.Contains(string(secondary), `"pppoe-secondary"`) {
+		t.Fatalf("secondary status was changed: %q", secondary)
+	}
+	matches, err := filepath.Glob(filepath.Join(directory, ".wan-primary.json.tmp-*"))
+	if err != nil {
+		t.Fatalf("find temporary status files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary status files remain: %v", matches)
 	}
 }

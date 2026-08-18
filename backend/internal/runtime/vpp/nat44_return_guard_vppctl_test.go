@@ -15,6 +15,9 @@ func TestNATReturnGuardUsesExternalAddressAndOriginalWANPath(t *testing.T) {
 		ExternalAddress: "10.67.0.11",
 		WANInterface:    "pppoe_session0",
 		WANNextHop:      "10.67.0.1",
+		InternalHost:    "192.168.88.20",
+		InternalPort:    443,
+		Protocol:        "tcp",
 	})
 	prefix, err := guard.sourcePrefix()
 	if err != nil {
@@ -25,6 +28,26 @@ func TestNATReturnGuardUsesExternalAddressAndOriginalWANPath(t *testing.T) {
 	}
 	if guard.via() != "10.67.0.1 pppoe_session0" {
 		t.Fatalf("return path = %q", guard.via())
+	}
+}
+
+func TestNATReturnGuardBypassesProxyPolicyBeforeNAT(t *testing.T) {
+	guard := natReturnGuardForPortMapping(nat.PortMapping{
+		ID:           "public-web",
+		InternalHost: "192.168.88.20",
+		InternalPort: 443,
+		Protocol:     "tcp",
+	})
+	command, err := guard.preNATBypassCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "source 192.168.88.20/32 destination 0.0.0.0/0 protocol tcp sport 443-443 dport 0-65535 bypass"
+	if !strings.Contains(command, want) {
+		t.Fatalf("pre-NAT bypass command = %q, want %q", command, want)
+	}
+	if err := verifyNATPreRouteBypass("rule id "+itoa(guard.policyID())+" priority 0 bypass 1", guard); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -160,5 +183,23 @@ func TestNATMappingApplyIsNotClassifiedAsDelete(t *testing.T) {
 	}
 	if !slices.Contains(operations[0].VPPCtlCommands, "?nat44 add static mapping tcp local 192.168.88.20 443 external 203.0.113.10 8443") {
 		t.Fatalf("mapping commands = %#v", operations[0].VPPCtlCommands)
+	}
+}
+
+func TestNATFullConeMappingApplyIsNotClassifiedAsDelete(t *testing.T) {
+	mapping := nat.PortMapping{ID: "full-cone-web", Protocol: "udp", ExternalAddress: "203.0.113.11", ExternalPort: 5353, InternalHost: "192.168.88.21", InternalPort: 5353}
+	operations, err := BuildNAT44Operations(NAT44Plan{
+		TransactionID: "txn-full-cone-apply",
+		Behavior:      nat.BehaviorFullCone,
+		PortMappings:  []nat.PortMapping{mapping},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 1 || nat44MappingOperationDeletes(operations[0]) {
+		t.Fatalf("full-cone apply classification = %#v", operations)
+	}
+	if !slices.Contains(operations[0].VPPCtlCommands, "?nat44 ei add static mapping udp local 192.168.88.21 5353 external 203.0.113.11 5353") {
+		t.Fatalf("full-cone mapping commands = %#v", operations[0].VPPCtlCommands)
 	}
 }

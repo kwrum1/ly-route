@@ -43,7 +43,9 @@ func proxySteeringDeleteCommands(steering proxy.VPPSteeringInstruction) []string
 }
 
 func dnsServiceNetworkDeleteCommands(network DNSServiceNetwork) []string {
+	underlayInterface := dnsServiceNetworkUnderlayInterface(network)
 	return []string{
+		fmt.Sprintf("?set interface nat44 in %s out %s output-feature del", network.VPPInterface, underlayInterface),
 		fmt.Sprintf("?set interface nat44 in %s del", network.VPPInterface),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", network.TableID),
 		fmt.Sprintf("?ip table del %d", network.TableID),
@@ -93,10 +95,7 @@ func managementLCPCleanupCommands() []string {
 
 func dnsTransparentCleanupCommands(interception DNSTransparentInterception) []string {
 	return []string{
-		"show abf attach",
-		fmt.Sprintf("show abf attach %s", interception.LANInterface),
-		fmt.Sprintf("show abf policy %d", stableID("dns-transparent-v4", 9000, 999)),
-		fmt.Sprintf("show abf policy %d", stableID("dns-transparent-v6", 9000, 999)),
-		"show acl-plugin acl",
+		"show ly-route dns-intercept",
+		fmt.Sprintf("show ip fib table %d", dnsIPv4TableID),
 	}
 }

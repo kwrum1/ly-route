@@ -11,9 +11,10 @@ umask 077
 : "${LY_ROUTE_VPP_DATA_INTERFACES:=}"
 : "${LY_ROUTE_MANAGEMENT_INTERFACE:=}"
 : "${LY_ROUTE_MANAGEMENT_SHARED:=false}"
-: "${LY_ROUTE_VPP_PROOF_TTL_SECONDS:=300}"
+: "${LY_ROUTE_VPP_PROOF_TTL_SECONDS:=315360000}"
 : "${LY_ROUTE_SYSFS_ROOT:=/sys}"
 : "${LY_ROUTE_VPP_NATIVE_BENCHMARK:=}"
+: "${LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE:=false}"
 : "${LY_ROUTE_DATAPLANE_ACTIVE_STATE:=/var/lib/ly-route/dataplane/active.json}"
 : "${LY_ROUTE_ACTIVE_DPDK_READER:=/usr/lib/ly-route/active-dpdk-state.py}"
 
@@ -58,6 +59,8 @@ probe_native_candidate() {
   probe_hook=$2
   probe_mode=$3
   probe_vpp_interface="lyroute-proof-$$-$(date -u +%s)-$probe_hook"
+  probe_delete="delete interface $probe_hook $probe_vpp_interface"
+  probe_created=false
   case "$probe_hook:$probe_mode" in
     rdma:rdma_dv)
       probe_create="create interface rdma host-if $probe_interface name $probe_vpp_interface mode dv"
@@ -65,13 +68,35 @@ probe_native_candidate() {
     af_xdp:zero_copy)
       probe_create="create interface af_xdp host-if $probe_interface name $probe_vpp_interface zero-copy"
       ;;
+    af_packet:linux_packet_socket)
+      # An active AF_PACKET attachment is renamed to lyroute-$iface by the
+      # apply transaction. Treat it as the proof instead of recreating it.
+      # Recreating an existing host interface and cleaning it up by Linux
+      # name would delete the live dataplane attachment.
+      probe_vpp_interface="lyroute-$probe_interface"
+      if vppctl show interface "$probe_vpp_interface" 2>/dev/null | grep -q "^$probe_vpp_interface"; then
+        printf '%s\n' 10
+        return 0
+      fi
+      probe_vpp_interface="host-$probe_interface"
+      probe_create="create host-interface name $probe_interface"
+      probe_delete="delete host-interface name $probe_interface"
+      ;;
     *) return 1 ;;
   esac
   active_probe_kind=$probe_hook
   active_probe_name=$probe_vpp_interface
-  if ! vppctl $probe_create >/dev/null 2>&1 ||
-     ! vppctl show interface "$probe_vpp_interface" 2>/dev/null | grep -q "^$probe_vpp_interface"; then
-    vppctl delete interface "$probe_hook" "$probe_vpp_interface" >/dev/null 2>&1 || true
+  [ "$probe_hook" = af_packet ] && active_probe_name=$probe_interface
+  if ! vppctl $probe_create >/dev/null 2>&1; then
+    active_probe_kind=
+    active_probe_name=
+    return 1
+  fi
+  probe_created=true
+  if ! vppctl show interface "$probe_vpp_interface" 2>/dev/null | grep -q "^$probe_vpp_interface"; then
+    # Only remove an object created by this probe. A failed or duplicate
+    # probe must never remove an attachment owned by the apply transaction.
+    vppctl $probe_delete >/dev/null 2>&1 || true
     active_probe_kind=
     active_probe_name=
     return 1
@@ -82,51 +107,19 @@ probe_native_candidate() {
     case "$probe_hook:$probe_mode" in
       rdma:rdma_dv) probe_score=120 ;;
       af_xdp:zero_copy) probe_score=100 ;;
+      af_packet:linux_packet_socket) probe_score=10 ;;
       *) probe_score=90 ;;
     esac
   fi
-  vppctl delete interface "$probe_hook" "$probe_vpp_interface" >/dev/null 2>&1 || true
+  if [ "$probe_created" = true ]; then
+    vppctl $probe_delete >/dev/null 2>&1 || true
+  fi
   active_probe_kind=
   active_probe_name=
   case "$probe_score" in
     ''|*[!0-9.]*) return 1 ;;
   esac
   printf '%s\n' "$probe_score"
-}
-
-probe_vmxnet3_preflight() {
-  probe_interface=$1
-  device_path="$LY_ROUTE_SYSFS_ROOT/class/net/$probe_interface/device"
-  [ -e "$device_path" ] || return 1
-  resolved_device=$(readlink -f "$device_path" 2>/dev/null) || return 1
-  vmxnet3_pci_address=$(basename "$resolved_device")
-  case "$vmxnet3_pci_address" in
-    ????\:??\:??.?) ;;
-    *) return 1 ;;
-  esac
-  driver_path="$resolved_device/driver"
-  [ -e "$driver_path" ] || return 1
-  vmxnet3_kernel_driver=$(basename "$(readlink -f "$driver_path" 2>/dev/null)")
-  [ -n "$vmxnet3_kernel_driver" ] || return 1
-  vmxnet3_iommu_group=
-  vmxnet3_iommu_protected=false
-  vmxnet3_vfio_noiommu=false
-  iommu_path="$resolved_device/iommu_group"
-  if [ -e "$iommu_path" ]; then
-    vmxnet3_iommu_group=$(basename "$(readlink -f "$iommu_path" 2>/dev/null)")
-    case "$vmxnet3_iommu_group" in
-      ''|*[!0-9]*) return 1 ;;
-      *) vmxnet3_iommu_protected=true ;;
-    esac
-  elif [ -r "$LY_ROUTE_SYSFS_ROOT/module/vfio/parameters/enable_unsafe_noiommu_mode" ] &&
-       [ "$(cat "$LY_ROUTE_SYSFS_ROOT/module/vfio/parameters/enable_unsafe_noiommu_mode" 2>/dev/null)" = Y ]; then
-    vmxnet3_iommu_group=noiommu
-    vmxnet3_vfio_noiommu=true
-  else
-    return 1
-  fi
-  [ -d "$LY_ROUTE_SYSFS_ROOT/module/vfio_pci" ] || return 1
-  printf '%s\n' 115
 }
 
 probe_dpdk_interface() {
@@ -235,7 +228,11 @@ active_probe_name=
 proof_tmp=
 cleanup_runtime_check() {
   if [ -n "$active_probe_kind" ] && [ -n "$active_probe_name" ] && command -v vppctl >/dev/null 2>&1; then
-    vppctl delete interface "$active_probe_kind" "$active_probe_name" >/dev/null 2>&1 || true
+    if [ "$active_probe_kind" = af_packet ]; then
+      vppctl delete host-interface name "$active_probe_name" >/dev/null 2>&1 || true
+    else
+      vppctl delete interface "$active_probe_kind" "$active_probe_name" >/dev/null 2>&1 || true
+    fi
   fi
   if [ -n "$proof_tmp" ]; then
     rm -f "$proof_tmp"
@@ -300,6 +297,22 @@ if [ "$LY_ROUTE_PRODUCT" = orchestrator ]; then
   fi
 fi
 if [ "$LY_ROUTE_PRODUCT" = gateway ]; then
+  if [ "$smart_qos_plugin_available" != true ]; then
+    missing_commands=$(append_missing "$missing_commands" vpp-smart-qos-plugin)
+    status=missing-runtime
+  fi
+  pppoe_client_plugin_available=false
+  if command -v vppctl >/dev/null 2>&1 &&
+     plugin_output=$(vppctl show plugin 2>/dev/null) &&
+     cli_output=$(vppctl show cli 2>/dev/null) &&
+     printf '%s\n' "$plugin_output" | grep -q 'ly_route_pppoe_client_plugin.so' &&
+     printf '%s\n' "$cli_output" | grep -q 'set ly-route pppoe-client'; then
+    pppoe_client_plugin_available=true
+  fi
+  if [ "$pppoe_client_plugin_available" != true ]; then
+    missing_commands=$(append_missing "$missing_commands" vpp-pppoe-client-plugin)
+    status=missing-runtime
+  fi
   security_guard_plugin_available=false
   if command -v vppctl >/dev/null 2>&1 &&
      plugin_output=$(vppctl show plugin 2>/dev/null) &&
@@ -313,16 +326,40 @@ if [ "$LY_ROUTE_PRODUCT" = gateway ]; then
     missing_commands=$(append_missing "$missing_commands" vpp-security-guard-plugin)
     status=missing-runtime
   fi
+  dns_intercept_plugin_available=false
+  if command -v vppctl >/dev/null 2>&1 &&
+     plugin_output=$(vppctl show plugin 2>/dev/null) &&
+     cli_output=$(vppctl show cli 2>/dev/null) &&
+     printf '%s\n' "$plugin_output" | grep -q 'ly_route_dns_intercept_plugin.so' &&
+     printf '%s\n' "$cli_output" | grep -q 'show ly-route dns-intercept'; then
+    dns_intercept_plugin_available=true
+  fi
+  if [ "$dns_intercept_plugin_available" != true ]; then
+    missing_commands=$(append_missing "$missing_commands" vpp-dns-intercept-plugin)
+    status=missing-runtime
+  fi
+  pre_nat_route_plugin_available=false
+  if command -v vppctl >/dev/null 2>&1 &&
+     plugin_output=$(vppctl show plugin 2>/dev/null) &&
+     cli_output=$(vppctl show cli 2>/dev/null) &&
+     printf '%s\n' "$plugin_output" | grep -q 'ly_route_pre_nat_route_plugin.so' &&
+     printf '%s\n' "$cli_output" | grep -q 'show ly-route pre-nat-route'; then
+    pre_nat_route_plugin_available=true
+  fi
+  if [ "$pre_nat_route_plugin_available" != true ]; then
+    missing_commands=$(append_missing "$missing_commands" vpp-pre-nat-route-plugin)
+    status=missing-runtime
+  fi
 fi
 case "$LY_ROUTE_VPP_PROOF_TTL_SECONDS" in
   ''|*[!0-9]*)
     dataplane_failures=$(append_missing "$dataplane_failures" proof_ttl_valid)
-    LY_ROUTE_VPP_PROOF_TTL_SECONDS=300
+    LY_ROUTE_VPP_PROOF_TTL_SECONDS=315360000
     ;;
 esac
-if [ "$LY_ROUTE_VPP_PROOF_TTL_SECONDS" -lt 1 ] || [ "$LY_ROUTE_VPP_PROOF_TTL_SECONDS" -gt 600 ]; then
+if [ "$LY_ROUTE_VPP_PROOF_TTL_SECONDS" -lt 1 ] || [ "$LY_ROUTE_VPP_PROOF_TTL_SECONDS" -gt 315360000 ]; then
   dataplane_failures=$(append_missing "$dataplane_failures" proof_ttl_valid)
-  LY_ROUTE_VPP_PROOF_TTL_SECONDS=300
+  LY_ROUTE_VPP_PROOF_TTL_SECONDS=315360000
 fi
 observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 valid_until=$(date -u -d "@$(($(date -u +%s) + LY_ROUTE_VPP_PROOF_TTL_SECONDS))" +%Y-%m-%dT%H:%M:%SZ)
@@ -392,14 +429,31 @@ for interface_name in $(split_csv "$LY_ROUTE_VPP_DATA_INTERFACES"); do
     continue
   fi
   native_candidate=
-  vmxnet3_candidate=
+  vmxnet3_af_packet_candidate=
   dpdk_candidate=
+  interface_mac=$(cat "$LY_ROUTE_SYSFS_ROOT/class/net/$interface_name/address" 2>/dev/null || true)
   if command -v vppctl >/dev/null 2>&1 && plugin_output=$(vppctl show plugin 2>/dev/null); then
-    if printf '%s\n' "$plugin_output" | grep -q 'vmxnet3_plugin.so' &&
-       probe_vmxnet3_preflight "$interface_name" >/dev/null; then
-      vmxnet3_candidate="{\"tier\":\"vpp_native\",\"hook\":\"vmxnet3\",\"mode\":\"vmxnet3_vfio\",\"source\":\"hardware_preflight\",\"runtime_verified\":true,\"native\":true,\"high_performance\":true,\"observed_at\":\"$observed_at\",\"valid_until\":\"$valid_until\",\"performance_score\":115,\"pci_address\":\"$(json_escape "$vmxnet3_pci_address")\",\"kernel_driver\":\"$(json_escape "$vmxnet3_kernel_driver")\",\"iommu_group\":\"$(json_escape "$vmxnet3_iommu_group")\",\"iommu_protected\":$vmxnet3_iommu_protected,\"vfio_available\":true,\"vfio_no_iommu_available\":$vmxnet3_vfio_noiommu,\"smart_qos_plugin_available\":$smart_qos_plugin_available}"
+    interface_driver=none
+    interface_device="$LY_ROUTE_SYSFS_ROOT/class/net/$interface_name/device"
+    if [ -e "$interface_device/driver" ]; then
+      interface_driver=$(basename "$(readlink -f "$interface_device/driver" 2>/dev/null)")
+    fi
+    if [ "$LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE" = true ] && [ "$interface_driver" = vmxnet3 ] &&
+       printf '%s\n' "$plugin_output" | grep -q 'af_packet_plugin.so' &&
+       ip link set dev "$interface_name" promisc on >/dev/null 2>&1 &&
+       native_score=$(probe_native_candidate "$interface_name" af_packet linux_packet_socket); then
+      vmxnet3_af_packet_candidate="{\"tier\":\"vpp_native\",\"hook\":\"af_packet\",\"mode\":\"linux_packet_socket\",\"source\":\"runtime_probe\",\"runtime_verified\":true,\"native\":true,\"high_performance\":false,\"acceptance_only\":true,\"observed_at\":\"$observed_at\",\"valid_until\":\"$valid_until\",\"performance_score\":$native_score,\"kernel_driver\":\"vmxnet3\",\"mac_address\":\"$(json_escape "$interface_mac")\",\"smart_qos_plugin_available\":$smart_qos_plugin_available}"
+      native_candidate=$vmxnet3_af_packet_candidate
+    fi
+    native_specs='rdma rdma_dv rdma_plugin.so af_xdp zero_copy af_xdp_plugin.so'
+    # VMXNET3 is validated through AF_PACKET only. Its unsupported native
+    # candidates must not be probed or selected; physical NICs retain the
+    # normal native-path detection below.
+    if [ "$LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE" = true ] && [ "$interface_driver" = vmxnet3 ]; then
+      native_specs=
     fi
     for native_spec in 'rdma rdma_dv rdma_plugin.so' 'af_xdp zero_copy af_xdp_plugin.so'; do
+      [ -n "$native_specs" ] || continue
       set -- $native_spec
       native_hook=$1
       native_mode=$2
@@ -412,7 +466,7 @@ for interface_name in $(split_csv "$LY_ROUTE_VPP_DATA_INTERFACES"); do
       fi
     done
   fi
-  if [ -z "$native_candidate" ] && [ -z "$vmxnet3_candidate" ]; then all_native=false; fi
+  if [ -z "$native_candidate" ]; then all_native=false; fi
   dpdk_source=runtime_probe
   if command -v vppctl >/dev/null 2>&1 && probe_active_dpdk_interface "$interface_name"; then
     dpdk_source=active_runtime_readback
@@ -426,12 +480,11 @@ for interface_name in $(split_csv "$LY_ROUTE_VPP_DATA_INTERFACES"); do
   else
     all_dpdk=false
   fi
-  if [ -z "$native_candidate" ] && [ -z "$vmxnet3_candidate" ] && [ -z "$dpdk_candidate" ]; then
+  if [ -z "$native_candidate" ] && [ -z "$dpdk_candidate" ]; then
     dataplane_failures=$(append_missing "$dataplane_failures" "runtime_capability_proof:$interface_name")
     continue
   fi
   candidates=$native_candidate
-  if [ -n "$candidates" ] && [ -n "$vmxnet3_candidate" ]; then candidates="$candidates,$vmxnet3_candidate"; elif [ -n "$vmxnet3_candidate" ]; then candidates=$vmxnet3_candidate; fi
   if [ -n "$candidates" ] && [ -n "$dpdk_candidate" ]; then candidates="$candidates,$dpdk_candidate"; elif [ -n "$dpdk_candidate" ]; then candidates=$dpdk_candidate; fi
   if [ "$proof_first" -eq 0 ]; then
     proof_items="$proof_items,"

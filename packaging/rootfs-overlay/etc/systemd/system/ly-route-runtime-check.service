@@ -1,8 +1,9 @@
 [Unit]
 Description=Ly Route commercial runtime readiness check
-After=network.target ly-route-firstboot.service vpp.service
-Wants=ly-route-firstboot.service vpp.service
-Before=ly-route-control-api.service
+After=network.target ly-route-firstboot.service vpp.service ly-route-vpp-session-enable.service
+Wants=ly-route-firstboot.service vpp.service ly-route-vpp-session-enable.service
+Requires=ly-route-vpp-session-enable.service
+Before=ly-route-control-api.service ly-route-vpp-apply.service
 
 [Service]
 Type=oneshot

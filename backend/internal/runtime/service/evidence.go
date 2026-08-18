@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,10 +28,11 @@ type RuntimeEvidenceProvider interface {
 }
 
 type serviceApplyRecord struct {
-	Service       ServiceName       `json:"service"`
-	TransactionID string            `json:"transaction_id,omitempty"`
-	AppliedAt     time.Time         `json:"applied_at"`
-	Artifacts     map[string]string `json:"artifacts"`
+	Service         ServiceName       `json:"service"`
+	TransactionID   string            `json:"transaction_id,omitempty"`
+	AppliedAt       time.Time         `json:"applied_at"`
+	Artifacts       map[string]string `json:"artifacts"`
+	RuntimeIdentity string            `json:"runtime_identity,omitempty"`
 }
 
 func (controller FilesystemController) Receipt(_ context.Context, request EvidenceRequest) (apply.ApplyReceipt, error) {
@@ -113,15 +116,65 @@ func (controller FilesystemController) saveApplyRecord(service ServiceName, arti
 		hashes[artifact.Path] = artifact.ContentHash
 	}
 	payload, err := json.Marshal(serviceApplyRecord{
-		Service:       service,
-		TransactionID: strings.TrimSpace(transactionID),
-		AppliedAt:     controller.now(),
-		Artifacts:     hashes,
+		Service:         service,
+		TransactionID:   strings.TrimSpace(transactionID),
+		AppliedAt:       controller.now(),
+		Artifacts:       hashes,
+		RuntimeIdentity: controller.serviceRuntimeIdentity(service, artifacts),
 	})
 	if err != nil {
 		return err
 	}
 	return writeFileAtomically(controller.applyRecordPath(service), payload, 0o600)
+}
+
+func (controller FilesystemController) serviceRuntimeIdentityMatches(service ServiceName, artifacts []RenderedArtifact) bool {
+	record, err := controller.loadApplyRecord(service)
+	if err != nil || strings.TrimSpace(record.RuntimeIdentity) == "" {
+		return false
+	}
+	return record.RuntimeIdentity == controller.serviceRuntimeIdentity(service, artifacts)
+}
+
+func (controller FilesystemController) serviceRuntimeIdentity(service ServiceName, artifacts []RenderedArtifact) string {
+	if service != Kea {
+		return ""
+	}
+	var interfaces []string
+	for _, artifact := range artifacts {
+		if artifact.Service != Kea || !strings.HasSuffix(artifact.Path, "kea-dhcp4.conf") {
+			continue
+		}
+		var config struct {
+			DHCP4 struct {
+				Interfaces struct {
+					Names []string `json:"interfaces"`
+				} `json:"interfaces-config"`
+			} `json:"Dhcp4"`
+		}
+		if json.Unmarshal([]byte(artifact.Content), &config) == nil {
+			interfaces = append(interfaces, config.DHCP4.Interfaces.Names...)
+		}
+	}
+	sort.Strings(interfaces)
+	identities := make([]string, 0, len(interfaces))
+	for _, interfaceName := range interfaces {
+		interfaceName = strings.TrimSpace(interfaceName)
+		if interfaceName == "" || filepath.Base(interfaceName) != interfaceName {
+			continue
+		}
+		path, err := controller.resolvePath("/sys/class/net/" + interfaceName + "/ifindex")
+		if err != nil {
+			continue
+		}
+		ifIndex, err := os.ReadFile(path)
+		if err != nil {
+			identities = append(identities, interfaceName+":missing")
+			continue
+		}
+		identities = append(identities, interfaceName+":"+strings.TrimSpace(string(ifIndex)))
+	}
+	return strings.Join(identities, ",")
 }
 
 func (controller FilesystemController) bindTransaction(transactionID string, artifacts []RenderedArtifact) error {

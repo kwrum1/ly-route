@@ -35,7 +35,10 @@ func parseObservedServiceChainACL(output string) (observedServiceChainACL, error
 		return observedServiceChainACL{}, serviceChainDecodeError("ACL output contains %d lines, want at least 2", len(lines))
 	}
 	for _, line := range lines[2:] {
-		if !strings.HasPrefix(strings.TrimSpace(line), "used in lookup context index:") {
+		state := strings.TrimSpace(line)
+		if !strings.HasPrefix(state, "applied inbound on sw_if_index:") &&
+			!strings.HasPrefix(state, "applied outbound on sw_if_index:") &&
+			!strings.HasPrefix(state, "used in lookup context index:") {
 			return observedServiceChainACL{}, serviceChainDecodeError("ACL output contains unknown trailing state %q", line)
 		}
 	}

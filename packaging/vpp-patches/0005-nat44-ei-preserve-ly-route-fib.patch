@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ly Route <ly-route@example.invalid>
+Date: Tue, 18 Aug 2026 21:00:00 +0800
+Subject: [PATCH] nat44-ei: preserve Ly Route pre-NAT selected FIB
+
+The Ly Route pre-NAT classifier selects a policy FIB before NAT.  NAT44-EI's
+input path normally overwrites the transmit FIB with its global outside FIB,
+which loses the selected multi-WAN path.  Consume the classifier's private
+buffer marker after translation and retain that FIB for the following lookup.
+
+The marker is intentionally private to the Ly Route pre-NAT plugin and is
+ignored for packets that do not carry it, preserving upstream behavior.
+
+---
+ src/plugins/nat/nat44-ei/nat44_ei_in2out.c | 28 ++++++++++++++++++++++++----
+ 1 file changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/src/plugins/nat/nat44-ei/nat44_ei_in2out.c b/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
+--- a/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
++++ b/src/plugins/nat/nat44-ei/nat44_ei_in2out.c
+@@ -38,6 +38,26 @@
+
+ extern vnet_feature_arc_registration_t vnet_feat_arc_ip4_local;
+
++/*
++ * Ly Route's pre-NAT classifier stores the selected private FIB in the
++ * otherwise unused VPP buffer metadata.  NAT44-EI normally replaces TX with
++ * its global outside FIB after translation; consume this marker at that
++ * boundary so policy-selected WAN paths survive NAT worker processing.
++ */
++#define LY_ROUTE_PRE_NAT_ROUTE_TAG 0x4c595250u
++
++static_always_inline u32
++nat44_ei_ly_route_selected_fib (vlib_buffer_t *b, u32 fallback)
++{
++  if (vnet_buffer2 (b)->unused[0] != LY_ROUTE_PRE_NAT_ROUTE_TAG)
++    return fallback;
++
++  u32 fib_index = vnet_buffer2 (b)->unused[1];
++  vnet_buffer2 (b)->unused[0] = 0;
++  vnet_buffer2 (b)->unused[1] = 0;
++  return fib_index;
++}
++
+ #define foreach_nat44_ei_in2out_error                                         \
+   _ (UNSUPPORTED_PROTOCOL, "unsupported protocol")                            \
+   _ (OUT_OF_PORTS, "out of ports")                                            \
+@@ -1465,8 +1485,9 @@ nat44_ei_in2out_node_fn_inline (vlib_main_t *vm,
+       old_addr0 = ip0->src_address.as_u32;
+       ip0->src_address = s0->out2in.addr;
+       new_addr0 = ip0->src_address.as_u32;
+       if (!is_output_feature)
+-	vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->out2in.fib_index;
++	vnet_buffer (b0)->sw_if_index[VLIB_TX] =
++	  nat44_ei_ly_route_selected_fib (b0, s0->out2in.fib_index);
+
+       sum0 = ip0->checksum;
+       sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
+@@ -1685,8 +1706,9 @@ nat44_ei_in2out_node_fn_inline (vlib_main_t *vm,
+       old_addr1 = ip1->src_address.as_u32;
+       ip1->src_address = s1->out2in.addr;
+       new_addr1 = ip1->src_address.as_u32;
+       if (!is_output_feature)
+-	vnet_buffer (b1)->sw_if_index[VLIB_TX] = s1->out2in.fib_index;
++	vnet_buffer (b1)->sw_if_index[VLIB_TX] =
++	  nat44_ei_ly_route_selected_fib (b1, s1->out2in.fib_index);
+
+       sum1 = ip1->checksum;
+       sum1 = ip_csum_update (sum1, old_addr1, new_addr1,
+@@ -1933,8 +1955,9 @@ nat44_ei_in2out_node_fn_inline (vlib_main_t *vm,
+       old_addr0 = ip0->src_address.as_u32;
+       ip0->src_address = s0->out2in.addr;
+       new_addr0 = ip0->src_address.as_u32;
+       if (!is_output_feature)
+-	vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->out2in.fib_index;
++	vnet_buffer (b0)->sw_if_index[VLIB_TX] =
++	  nat44_ei_ly_route_selected_fib (b0, s0->out2in.fib_index);
+
+       sum0 = ip0->checksum;
+       sum0 = ip_csum_update (sum0, old_addr0, new_addr0,
+--
+2.45.2

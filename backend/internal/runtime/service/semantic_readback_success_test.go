@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"ly-route/backend/internal/runtime/nat"
 	"ly-route/backend/internal/runtime/proxy"
 	"ly-route/backend/internal/runtime/vpp"
 )
@@ -21,7 +22,7 @@ func TestFilesystemController_semantic_readback_accepts_plan_derived_live_state(
 		EgressID: "edge-blue", Mark: "0x7", MarkMask: "0xffffffff", TableID: 1701, RulePriority: 1702,
 		RuleSelector: proxy.LinuxRuleSelector{Family: "inet", Mark: "0x7", Mask: "0xffffffff", Table: 1701},
 		DefaultRoute: proxy.LinuxDefaultRoute{Destination: "default", Table: 1701, Device: "lo", Scope: "link"},
-	})
+	}, nat.BehaviorEndpointDependent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,8 +32,8 @@ func TestFilesystemController_semantic_readback_accepts_plan_derived_live_state(
 		Rules: []proxy.NftablesRule{
 			{Order: 1, EgressID: "edge-blue", Chain: "capture_pre", Expression: "tcp dport 53", Action: "return"},
 			{Order: 2, EgressID: "edge-blue", Chain: "capture_pre", Expression: "udp dport 53", Action: "return"},
-			{Order: 3, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto tcp", Action: "tproxy to :15432 mark set 0x7 accept"},
-			{Order: 4, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto udp", Action: "tproxy to :15432 mark set 0x7 accept"},
+			{Order: 3, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto tcp", Action: "meta mark set 0x7 tproxy to :15432 accept"},
+			{Order: 4, EgressID: "edge-blue", Chain: "capture_pre", Expression: "meta l4proto udp", Action: "meta mark set 0x7 tproxy to :15432 accept"},
 		},
 	})
 	if err != nil {
@@ -88,5 +89,33 @@ func TestFilesystemController_semantic_readback_accepts_plan_derived_live_state(
 				t.Fatalf("semantic apply failed: %v", err)
 			}
 		})
+	}
+}
+
+func TestFilesystemController_VPPPersistOnlyReadbackUsesTypedTransactionEvidence(t *testing.T) {
+	artifacts, err := RenderVPPOperations([]vpp.Operation{{
+		Name:           "vpp.interface.address",
+		RequestID:      "txn-vpp-persist",
+		Resource:       "wan-blue",
+		VPPCtlCommands: []string{"set interface state wan-blue up"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts = PersistOnlyForServices(artifacts, VPP)
+	controller := FilesystemController{
+		RootDir: t.TempDir(),
+		Runner:  availableRunner(VPP, map[string]string{"vppctl show version": "vpp v24.10"}),
+	}
+	ctx := withTransactionID(context.Background(), "txn-vpp-persist")
+	if err := controller.ReloadOrRestart(ctx, VPP, artifacts); err != nil {
+		t.Fatalf("persist typed VPP plan: %v", err)
+	}
+	request := EvidenceRequest{TransactionID: "txn-vpp-persist", Capability: "vpp", Artifacts: artifacts}
+	if _, err := controller.Receipt(ctx, request); err != nil {
+		t.Fatalf("persisted VPP receipt: %v", err)
+	}
+	if _, err := controller.Readback(ctx, request); err != nil {
+		t.Fatalf("persisted VPP readback: %v", err)
 	}
 }

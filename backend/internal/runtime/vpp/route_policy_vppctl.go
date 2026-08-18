@@ -22,6 +22,7 @@ type routePolicyVPPCTLSpec struct {
 	via      string
 	acl      string
 	apply    bool
+	policy   trafficpolicy.RoutePolicy
 }
 
 func (channel vppctlChannel) doRoutePolicyLifecycle(ctx context.Context, operation Operation) (Reply, error) {
@@ -54,11 +55,22 @@ func (channel vppctlChannel) doRoutePolicyLifecycle(ctx context.Context, operati
 		case strings.HasPrefix(command, "set acl-plugin acl "):
 			continue
 		case strings.HasPrefix(command, "abf policy add "):
-			command = strings.Replace(command, fmt.Sprintf(" acl %d ", spec.aclID), fmt.Sprintf(" acl %d ", actualACLID), 1)
-		case command == fmt.Sprintf("show acl-plugin acl index %d", spec.aclID):
+			// The ACL plugin allocates a runtime index even when the declarative
+			// command carries a stable identity. Replace the numeric token after
+			// the `acl` keyword, rather than relying on the locally recomputed
+			// stable ID matching the serialized command byte-for-byte.
+			command = replaceRoutePolicyACLReference(command, actualACLID)
+		case strings.HasPrefix(command, "show acl-plugin acl index "):
 			command = fmt.Sprintf("show acl-plugin acl index %d", actualACLID)
 		}
 		commands = append(commands, command)
+	}
+	preNATCommands, preNATApplied, err := channel.preNATRoutePolicyCommands(ctx, operation, spec)
+	if err != nil {
+		return Reply{}, err
+	}
+	if preNATApplied {
+		commands = append(commands, preNATCommands...)
 	}
 	applied, err := channel.runServiceChainCommands(ctx, operation, commands...)
 	if err != nil {
@@ -69,7 +81,7 @@ func (channel vppctlChannel) doRoutePolicyLifecycle(ctx context.Context, operati
 	policyOutput := resultStdoutLast(results, fmt.Sprintf("show abf policy %d", spec.policyID))
 	actualObservedACL, present := observedABFACLID(policyOutput)
 	if !present || actualObservedACL != actualACLID {
-		return Reply{}, snapshotDecodeError("route policy %q ABF readback does not reference allocated ACL %d", operation.Resource, actualACLID)
+		return Reply{}, snapshotDecodeError("route policy %q ABF readback does not reference allocated ACL %d: observed=%d present=%t policy=%q commands=%q", operation.Resource, actualACLID, actualObservedACL, present, strings.TrimSpace(policyOutput), strings.Join(commands, " | "))
 	}
 	aclOutput := resultStdoutLast(results, fmt.Sprintf("show acl-plugin acl index %d", actualACLID))
 	if !strings.Contains(aclOutput, "tag {"+spec.tag+"}") {
@@ -82,18 +94,175 @@ func (channel vppctlChannel) doRoutePolicyLifecycle(ctx context.Context, operati
 	if strings.TrimSpace(resultStdoutLast(results, fmt.Sprintf("show ip fib table %d", spec.tableID))) == "" {
 		return Reply{}, snapshotDecodeError("route policy %q private FIB readback is empty", operation.Resource)
 	}
+	if preNATApplied && !strings.Contains(resultStdoutLast(results, "show ly-route pre-nat-route"), fmt.Sprintf("rule id %d", spec.policyID)) {
+		return Reply{}, snapshotDecodeError("route policy %q pre-NAT route readback is missing", operation.Resource)
+	}
 	return routePolicyLifecycleReply(operation, results), nil
 }
 
+// doPreNATRoutePolicyLifecycle is the production lifecycle for ordinary IPv4
+// route policies. It deliberately does not create, attach, or delete ABF/ACL
+// objects. Older persisted operations may still contain those commands, but
+// the pre-NAT plugin is sufficient for the same policy semantics and avoids a
+// VPP 25.x ABF/FIB teardown crash during a full policy rebuild.
+func (channel vppctlChannel) doPreNATRoutePolicyLifecycle(ctx context.Context, operation Operation) (Reply, error) {
+	spec, err := parseRoutePolicyVPPCTLSpec(operation)
+	if err != nil {
+		return Reply{}, err
+	}
+	if routePolicyNativeDeleteOperation(operation) {
+		return channel.doPreNATRoutePolicyDelete(ctx, operation, spec)
+	}
+	if !spec.apply {
+		return routePolicyLifecycleReply(operation, nil), nil
+	}
+
+	addressCommand := "show interface address " + spec.ingress
+	addressResults, err := channel.runServiceChainCommands(ctx, operation, addressCommand)
+	if err != nil {
+		return Reply{}, err
+	}
+	lanPrefix, err := preNATLANPrefix(resultStdoutLast(addressResults, addressCommand))
+	if err != nil {
+		return Reply{}, snapshotDecodeError("route policy %q cannot install pre-NAT classifier: %v", spec.policy.ID, err)
+	}
+
+	classifier, applied, err := buildPreNATRoutePolicyCommands(spec, lanPrefix)
+	if err != nil {
+		return Reply{}, err
+	}
+	if !applied {
+		return routePolicyLifecycleReply(operation, addressResults), nil
+	}
+
+	commands := preNATRoutePolicyRefreshCommands(operation, spec, classifier)
+	fibCommand := fmt.Sprintf("show ip fib table %d", spec.tableID)
+	commands = append(commands, fibCommand)
+	results, err := channel.runServiceChainCommands(ctx, operation, commands...)
+	if err != nil {
+		return Reply{}, err
+	}
+	results = append(addressResults, results...)
+	if strings.TrimSpace(resultStdoutLast(results, fibCommand)) == "" {
+		return Reply{}, snapshotDecodeError("route policy %q native private FIB readback is empty", operation.Resource)
+	}
+	preNATOutput := resultStdoutLast(results, "show ly-route pre-nat-route")
+	if _, found, readbackErr := preNATRoutePolicySummaryForID(preNATOutput, spec.policyID); readbackErr != nil || !found {
+		if readbackErr != nil {
+			return Reply{}, readbackErr
+		}
+		return Reply{}, snapshotDecodeError("route policy %q native pre-NAT readback is missing", operation.Resource)
+	}
+	return routePolicyLifecycleReply(operation, results), nil
+}
+
+func preNATRoutePolicyRefreshCommands(operation Operation, spec routePolicyVPPCTLSpec, classifier []string) []string {
+	commands := []string{
+		fmt.Sprintf("?set ly-route pre-nat-route del id %d", spec.policyID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", spec.tableID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/32", spec.tableID),
+		// PPPoE reconnects and WAN-group changes replace interface DPOs. Merely
+		// replacing the default route can leave the private FIB stacked on an old
+		// DPO, so destroy and recreate the now-unreferenced table before replay.
+		fmt.Sprintf("?ip table del %d", spec.tableID),
+	}
+	commands = append(commands, routePolicyNativeTableCommands(operation)...)
+	return append(commands, classifier...)
+}
+
+func (channel vppctlChannel) doPreNATRoutePolicyDelete(ctx context.Context, operation Operation, spec routePolicyVPPCTLSpec) (Reply, error) {
+	preNATCommand := fmt.Sprintf("?set ly-route pre-nat-route del id %d", spec.policyID)
+	fibCommand := fmt.Sprintf("show ip fib table %d", spec.tableID)
+	results, err := channel.runServiceChainCommands(ctx, operation,
+		preNATCommand,
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", spec.tableID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/32", spec.tableID),
+		fmt.Sprintf("?ip table del %d", spec.tableID),
+		"show ly-route pre-nat-route",
+		fibCommand,
+	)
+	if err != nil {
+		return Reply{}, err
+	}
+	if _, found, readbackErr := preNATRoutePolicySummaryForID(resultStdoutLast(results, "show ly-route pre-nat-route"), spec.policyID); readbackErr != nil {
+		return Reply{}, readbackErr
+	} else if found {
+		return Reply{}, snapshotDecodeError("route policy %q native pre-NAT rule remains after deletion", operation.Resource)
+	}
+	return routePolicyLifecycleReply(operation, results), nil
+}
+
+func routePolicySupportsNativePreNAT(policy trafficpolicy.RoutePolicy) bool {
+	action := strings.ToLower(strings.TrimSpace(policy.Action))
+	if action == "" {
+		action = "route"
+	}
+	if action == "deny" || policy.Path == nil {
+		return false
+	}
+	sources, sourceErr := preNATIPv4Selectors(policy.Match.Sources)
+	destinations, destinationErr := preNATIPv4Selectors(policy.Match.Destinations)
+	_, sourcePortErr := preNATPortRanges(policy.Match.SourcePorts)
+	_, destinationPortErr := preNATPortRanges(policy.Match.DestPorts)
+	return sourceErr == nil && destinationErr == nil && sourcePortErr == nil && destinationPortErr == nil && len(sources) > 0 && len(destinations) > 0
+}
+
+func routePolicyNativeDeleteOperation(operation Operation) bool {
+	if strings.Contains(operation.Name, ".pre-delete") || strings.HasSuffix(operation.Name, ".rollback-delete") {
+		return true
+	}
+	return operationHasCommand(operation, "abf policy del") || operationHasCommand(operation, "ip table del")
+}
+
+func routePolicyNativeTableCommands(operation Operation) []string {
+	commands := make([]string, 0, len(operation.VPPCtlCommands))
+	for _, raw := range operation.VPPCtlCommands {
+		trimmed := strings.TrimSpace(raw)
+		command := strings.TrimSpace(strings.TrimPrefix(trimmed, "?"))
+		switch {
+		case strings.HasPrefix(command, "ip table add "),
+			strings.HasPrefix(command, "set ip flow-hash table "),
+			strings.HasPrefix(command, "ip route add "):
+			commands = append(commands, trimmed)
+		}
+	}
+	return commands
+}
+
+func replaceRoutePolicyACLReference(command string, aclID int) string {
+	fields := strings.Fields(command)
+	for index := 0; index+1 < len(fields); index++ {
+		if fields[index] != "acl" {
+			continue
+		}
+		if _, err := strconv.Atoi(fields[index+1]); err != nil {
+			continue
+		}
+		fields[index+1] = strconv.Itoa(aclID)
+		return strings.Join(fields, " ")
+	}
+	return command
+}
+
 func (channel vppctlChannel) removeRoutePolicyState(ctx context.Context, operation Operation, spec routePolicyVPPCTLSpec) ([]VPPCTLCommandResult, error) {
+	preNATRemoved, preNATErr := channel.runServiceChainCommands(ctx, operation,
+		fmt.Sprintf("?set ly-route pre-nat-route del id %d", spec.policyID),
+	)
+	if preNATErr != nil {
+		return nil, preNATErr
+	}
 	results, err := channel.runServiceChainCommands(ctx, operation,
 		fmt.Sprintf("show abf policy %d", spec.policyID),
 		"show ip fib summary")
 	if err != nil {
 		return nil, err
 	}
+	results = append(preNATRemoved, results...)
 	policyOutput := resultStdout(results, fmt.Sprintf("show abf policy %d", spec.policyID))
 	if actualACLID, present := observedABFACLID(policyOutput); present {
+		if paths := observedABFPathCount(policyOutput); paths != 1 {
+			return nil, snapshotDecodeError("route policy %q has %d live ABF paths; refusing unsafe in-place deletion", operation.Resource, paths)
+		}
 		via := routePolicyABFDeleteVia(spec, policyOutput, resultStdout(results, "show ip fib summary"))
 		if via == "" {
 			return nil, snapshotDecodeError("route policy %q live ABF path cannot be removed safely", operation.Resource)
@@ -195,6 +364,11 @@ func routePolicyABFDeleteVia(spec routePolicyVPPCTLSpec, policyOutput, fibSummar
 
 var routePolicyFibIndexPattern = regexp.MustCompile("\\bfib-index:\\s*([0-9]+)\\b")
 var ipv4FibSummaryPattern = regexp.MustCompile("(?m)^ipv4-VRF:([0-9]+),\\s*fib_index:([0-9]+),")
+var routePolicyPathPattern = regexp.MustCompile(`(?m)^\s*path:\[[0-9]+\]`)
+
+func observedABFPathCount(output string) int {
+	return len(routePolicyPathPattern.FindAllString(output, -1))
+}
 
 func observedABFFibIndex(output string) (int, bool) {
 	match := routePolicyFibIndexPattern.FindStringSubmatch(output)
@@ -248,11 +422,19 @@ func parseRoutePolicyVPPCTLSpec(operation Operation) (routePolicyVPPCTLSpec, err
 		ingress:  "lyroute-$LY_ROUTE_LAN_INTERFACE",
 	}
 	if policy, ok := operation.Payload.(trafficpolicy.RoutePolicy); ok {
+		spec.policy = policy
 		spec.via = routeNextHop(policy)
 	}
 	for _, raw := range operation.VPPCtlCommands {
 		command := strings.TrimSpace(strings.TrimPrefix(raw, "?"))
 		switch {
+		case strings.HasPrefix(command, "set ly-route pre-nat-route interface "):
+			fields := strings.Fields(command)
+			if len(fields) >= 5 {
+				spec.ingress = fields[4]
+			}
+		case strings.HasPrefix(command, "set ly-route pre-nat-route add "):
+			spec.apply = true
 		case strings.HasPrefix(command, "set acl-plugin acl index "):
 			spec.acl = command
 		case strings.HasPrefix(command, "abf policy add "):
@@ -266,9 +448,20 @@ func parseRoutePolicyVPPCTLSpec(operation Operation) (routePolicyVPPCTLSpec, err
 				spec.priority, _ = strconv.Atoi(fields[6])
 				spec.ingress = fields[7]
 			}
+		case strings.HasPrefix(command, "abf attach ip4 del policy "):
+			// The rollback/delete grammar also carries the concrete LAN VPP
+			// interface as its final token. Without reading it, rollback falls
+			// back to an unresolved environment placeholder.
+			fields := strings.Fields(command)
+			if len(fields) >= 7 {
+				spec.ingress = fields[len(fields)-1]
+			}
 		}
 	}
-	if spec.apply && spec.acl == "" {
+	// Native pre-NAT plans have no ACL or ABF object by design. Older route
+	// plans may contain both representations while an appliance is upgraded,
+	// so only require an ACL when the operation has no native classifier.
+	if spec.apply && spec.acl == "" && !operationHasCommand(operation, "set ly-route pre-nat-route add") {
 		return routePolicyVPPCTLSpec{}, snapshotDecodeError("route policy %q has no ACL command", id)
 	}
 	// New production plans rewrite the placeholder before execution.  Older

@@ -4,11 +4,35 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 image=${LY_ROUTE_VPP_TEST_IMAGE:-ly-route/vpp-test:25.10}
 smartdns_deb=${LY_ROUTE_SMARTDNS_DEB:-/root/ly-route/runtime-debs/smartdns_0~48.1_amd64.deb}
+dns_intercept_plugin=${LY_ROUTE_VPP_DNS_INTERCEPT_PLUGIN:-}
 name="lyroute-smartdns-packet-$$"
 tmpdir=$(mktemp -d)
+keep_container=${LY_ROUTE_KEEP_TEST_CONTAINER:-0}
 
 [ -r "$smartdns_deb" ] || { echo "SmartDNS package is missing: $smartdns_deb" >&2; exit 1; }
-cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$tmpdir"; }
+if [ -z "$dns_intercept_plugin" ]; then
+  dns_intercept_plugin=$(find "$repo_root/build" -type f -name 'ly_route_dns_intercept_plugin.so' -print -quit 2>/dev/null || true)
+fi
+if [ -z "$dns_intercept_plugin" ] || [ ! -r "$dns_intercept_plugin" ]; then
+  echo "DNS intercept VPP plugin is required; set LY_ROUTE_VPP_DNS_INTERCEPT_PLUGIN or build it first" >&2
+  exit 1
+fi
+cleanup() {
+  status=$?
+  if [ "$status" -ne 0 ] && docker inspect "$name" >/dev/null 2>&1; then
+    echo "DNS transparent test failed; preserving container diagnostics:" >&2
+    docker exec "$name" sh -c 'for f in /tmp/dns-vpp-proxy.log /tmp/dns-vpp-proxy-v6.log /tmp/smartdns.log /tmp/vpp.log; do if [ -f "$f" ]; then echo "--- $f"; tail -80 "$f"; fi; done' >&2 || true
+    docker logs "$name" 2>&1 | tail -80 >&2 || true
+  fi
+  if [ "$keep_container" -ne 1 ]; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  else
+    echo "preserved DNS test container: $name" >&2
+  fi
+  rm -rf "$tmpdir"
+  trap - EXIT INT TERM
+  exit "$status"
+}
 trap cleanup EXIT INT TERM
 
 cat >"$tmpdir/client.go" <<'EOF'
@@ -197,12 +221,14 @@ func htons(v uint16) uint16 { return v<<8 | v>>8 }
 EOF
 go build -trimpath -o "$tmpdir/dns-v6-tcp-packet-client" "$tmpdir/dns-v6-tcp-packet-client.go"
 (cd "$repo_root/backend" && go test -c -o "$tmpdir/vpp-runtime.test" ./internal/runtime/vpp)
-docker run -d --rm --name "$name" --network none --device /dev/net/tun --device /dev/vhost-net \
+container_id=$(docker create --name "$name" --network none --device /dev/net/tun --device /dev/vhost-net \
   --cap-add NET_ADMIN --cap-add NET_RAW \
   -v "$smartdns_deb:/tmp/smartdns.deb:ro" \
+  -v "$dns_intercept_plugin:/usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_dns_intercept_plugin.so:ro" \
   -v "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/dns-vpp-v6-namespace-apply:/tmp/dns-vpp-namespace-apply:ro" \
   -v "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/dns-vpp-session-apply:/tmp/dns-vpp-session-apply:ro" \
-  --entrypoint sh "$image" -c 'printf "unix {\n  nodaemon\n  cli-listen /run/vpp/cli.sock\n  runtime-dir /run/vpp\n}\nsession {\n  enable rt-backend rule-table\n  use-app-socket-api\n}\n" >/tmp/vpp.conf; vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1' >/dev/null
+  --entrypoint sh "$image" -c 'printf "unix {\n  nodaemon\n  cli-listen /run/vpp/cli.sock\n  runtime-dir /run/vpp\n}\nsession {\n  enable rt-backend rule-table\n  use-app-socket-api\n}\n" >/tmp/vpp.conf; vpp -c /tmp/vpp.conf >/tmp/vpp.log 2>&1')
+docker start "$name" >/dev/null
 docker cp "$tmpdir/dns-packet-client" "$name:/tmp/dns-packet-client"
 docker cp "$tmpdir/dns-tcp-client" "$name:/tmp/dns-tcp-client"
 docker cp "$tmpdir/dns-tcp-packet-client" "$name:/tmp/dns-tcp-packet-client"
@@ -225,7 +251,7 @@ docker exec "$name" sh -c '
   vppctl "set interface nat44 out tap1 output-feature"
   vppctl "nat44 add address 203.0.113.2"
   LY_ROUTE_VPPCTL_INTEGRATION_BINARY=vppctl /tmp/vpp-runtime.test -test.run '^TestDNSTransparentVPPCTLIntegration$' -test.v
-  LY_ROUTE_VPPCTL=vppctl /tmp/dns-vpp-namespace-apply
+  LY_ROUTE_VPPCTL=vppctl sh /tmp/dns-vpp-namespace-apply
   vppctl "show acl-plugin acl"
   vppctl "show abf policy"
   vppctl "show abf attach tap0"
@@ -265,7 +291,7 @@ docker exec "$name" sh -c '
     vppctl show app ns >&2 || true
     exit 1
   fi
-  if ! LY_ROUTE_SMARTDNS_V4_APP_PATTERN="^dns-vpp-proxy-ldp" LY_ROUTE_SMARTDNS_V6_APP_PATTERN="^dns-vpp-proxy-v6-ldp" /tmp/dns-vpp-session-apply; then
+  if ! LY_ROUTE_SMARTDNS_V4_APP_PATTERN="^dns-vpp-proxy-ldp" LY_ROUTE_SMARTDNS_V6_APP_PATTERN="^dns-vpp-proxy-v6-ldp" sh /tmp/dns-vpp-session-apply; then
     cat /tmp/dns-vpp-proxy.log /tmp/smartdns.log /tmp/vpp.log >&2 || true
     vppctl show app >&2 || true
     exit 1

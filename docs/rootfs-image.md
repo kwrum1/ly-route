@@ -1,12 +1,17 @@
 # LY-Route Dual-Product Image Builds
 
+> This is an artifact reference, not a daily development gate. The active CI is
+> `.github/workflows/gateway-release.yml`; daily repairs use
+> `scripts/ci-verify.sh` and hot deployment. Old Gitea workflows and old
+> firmware names are retired.
+
 This repository builds separate Gateway and Orchestrator Debian-based rootfs artifacts for `amd64` and `arm64`. Product profile selection is mandatory: an image must contain only that profile's services, API/resources, UI, database, and migrations. Runtime conversion between products is unsupported.
 
 The first-boot LAN/DHCP behavior below applies to Gateway images. Orchestrator images use a dedicated Linux management interface and must not acquire Gateway NAT, DNS/DHCP, proxy, or PPPoE services.
-The image boots with the first Ethernet interface as LAN management
-`192.168.88.1/24`, enables Kea DHCP for clients, serves the Ly Route admin UI on
-HTTPS port `443` with a generated self-signed certificate, and gates the control API behind a commercial runtime readiness
-check.
+The installer selects and records a management interface by MAC/PCI identity.
+The factory management default is `192.168.88.254/24` with gateway
+`192.168.88.1`; LAN/DHCP addresses are product configuration, not a substitute
+for the management address.
 
 ## Local Build
 
@@ -39,10 +44,14 @@ make runtime-debs
 LY_ROUTE_EXTRA_DEBS_DIR=/root/ly-route/runtime-debs make rootfs ARCH=amd64
 ```
 
-The source builder writes packages to `/root/ly-route/runtime-debs` by default,
-reuses `/root/ly-route/vpp-master` for VPP, and can be pointed at existing
-SmartDNS or Xray source trees with `LY_ROUTE_SMARTDNS_SRC` and
-`LY_ROUTE_XRAY_SRC` when the builder has no outbound GitHub access.
+The source builder writes packages to `/root/ly-route/runtime-debs` by default.
+VPP source is never inferred from a repository-local directory: every VPP build
+must receive an explicitly pinned `LY_ROUTE_VPP_SRC` path. Temporary upstream
+trees and plugin build caches are removed after the package build, so a stale
+`vpp-master` or `govpp-master` directory cannot be reused as Ly Route source.
+SmartDNS or Xray source trees may be supplied explicitly with
+`LY_ROUTE_SMARTDNS_SRC` and `LY_ROUTE_XRAY_SRC` when the builder has no outbound
+GitHub access.
 Package architecture defaults to the build host and can be overridden with
 `LY_ROUTE_RUNTIME_DEB_ARCH` when building native packages on a dedicated worker.
 Run individual targets such as `./scripts/build-runtime-debs.sh smartdns`,
@@ -55,10 +64,8 @@ plugin used by the controlled fallback. Source builds are an alternative
 package source, not a forwarding fallback.
 
 The target artifact validator must require the automatic selector and permit
-DPDK only through that selector. It must continue to reject AF_XDP copy,
-generic Linux XDP forwarding, AF_PACKET, and Linux forwarding fallback. The
-current validator still rejects DPDK and must be updated under work package D1
-before a DPDK-capable artifact can be claimed.
+DPDK only through that selector. AF_PACKET is a functional lab path only and
+does not qualify as a production dataplane result.
 
 Rootfs artifacts are written to `dist/rootfs/` as:
 
@@ -91,9 +98,10 @@ sudo ./scripts/build-ophub-armbian-images.sh \
 `LY_ROUTE_OPHUB_BASE_IMAGE_URL` can pin the base Armbian image; otherwise the
 latest ophub trunk arm64 image is downloaded from GitHub releases.
 
-The GitHub firmware workflow runs every Monday at 04:00 Asia/Shanghai time and uses
-network downloads from ophub/GitHub for Armbian base images, kernels, firmware,
-and bootloader assets.
+The GitHub workflow builds the current Gateway x86 and ARM artifacts on main,
+tags, or an explicit release dispatch. Pull Requests run only the fast source
+gate. Network downloads are pinned in the workflow and are not part of the
+hotfix loop.
 ```
 
 The x86 physical-machine disk image artifacts are written as:
@@ -124,7 +132,8 @@ the `LY_ROUTE_ENABLE_SERVICE_RUNTIME=true` runtime environment, the native VPP
 configuration, and the Gateway `192.168.88.1/24` first-boot LAN fallback.
 The same physical `amd64` disk image was also boot-tested under ESXi as a validation environment. That validation confirmed the firstboot/networkd fix that writes a runtime LAN `.network` file for the selected interface before reconfiguring it, plus the runtime-plan fix that avoids generating proxy/QoS VPP operations when no explicit proxy or traffic-control configuration exists.
 
-Gitea `ci.yml` verifies the repository on push, pull request, manual dispatch, and the weekly Monday 04:00 Asia/Shanghai schedule. It checks that a smoke rootfs can be built, but it does not publish firmware artifacts. GitHub `.github/workflows/firmware.yml` publishes `ly-route-x86-physical-*` and `ly-route-armbian-*` releases. Rootfs tarballs are intermediate build inputs only.
+Rootfs tarballs are intermediate build inputs only. Current release names and
+upload rules are defined in `.github/workflows/gateway-release.yml`.
 
 ## Legacy Rockchip Armbian Helper
 
@@ -173,13 +182,13 @@ runner to make missing live-boot tooling fail the smoke gate.
 
 ## Runtime Defaults
 
-- Factory default treats the first non-loopback Ethernet interface as LAN, assigns `192.168.88.1/24`, and does not preconfigure a WAN.
+- Factory default management is the installer-selected interface at `192.168.88.254/24`; the LAN address and WAN are configured by the administrator.
 - Factory default enables Kea DHCP on that LAN with pool `192.168.88.100-192.168.88.199`; router and DNS options point to `192.168.88.1`.
 - The admin UI is served by nginx from `/opt/ly-route/admin` on HTTPS port `443`; HTTP port `80` redirects to HTTPS.
 - On first boot, `/usr/lib/ly-route/firstboot.sh` generates `/etc/ly-route/tls/admin.crt` and `/etc/ly-route/tls/admin.key` when they are absent. The self-signed certificate includes `192.168.88.1`, `127.0.0.1`, and `ly-route.local` subject alternative names.
 - `/api/v1/*` is reverse-proxied to the local Go control-plane service at `127.0.0.1:8080`.
-- The admin UI is reachable at `https://192.168.88.1/` after connecting a client to the first Ethernet interface and receiving a LAN DHCP lease.
-- Factory admin login is `admin` / `admin12345`; `LY_ROUTE_FORCE_PASSWORD_CHANGE=true` blocks write operations until the password is changed.
+- The admin UI is reachable at the saved management address after installation.
+- Factory admin login is `admin` / `password`; the first login requires a password change.
 - Admin credentials are not hardcoded. Set `LY_ROUTE_ADMIN_USERNAME` and `LY_ROUTE_ADMIN_PASSWORD` in `/etc/ly-route/control-api.env` before enabling authenticated writes. Optional readonly login uses `LY_ROUTE_READONLY_USERNAME` and `LY_ROUTE_READONLY_PASSWORD`.
 - `LY_ROUTE_ENABLE_SERVICE_RUNTIME=true` is set through `/etc/ly-route/runtime.env`, so runtime apply/status uses systemd-backed service orchestration.
 - `ly-route-runtime-check.service` runs before the control API. The test image keeps `LY_ROUTE_COMMERCIAL_RUNTIME_REQUIRED=false` so the management plane boots and reports explicit degraded runtime components when VPP, SmartDNS, Kea, xray, or the native PPPoE client are incomplete. Set it to `true` only for production images where all required runtime daemons are present.

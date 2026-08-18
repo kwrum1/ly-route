@@ -632,8 +632,8 @@ func compileNftablesCaptureForNetwork(egress Egress, network ProxyServiceNetwork
 		},
 		Rules: []NftablesRule{
 			{Order: 1, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta mark %s", network.IngressHostInterface, fmt.Sprintf("0x%x", network.IngressMark)), Action: "return"},
-			{Order: 2, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta l4proto tcp", network.IngressHostInterface), Action: fmt.Sprintf("tproxy to :%d meta mark set %s accept", network.ListenerPort, mark)},
-			{Order: 3, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta l4proto udp", network.IngressHostInterface), Action: fmt.Sprintf("tproxy to :%d meta mark set %s accept", network.ListenerPort, mark)},
+			{Order: 2, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta l4proto tcp", network.IngressHostInterface), Action: fmt.Sprintf("meta mark set %s tproxy to :%d accept", mark, network.ListenerPort)},
+			{Order: 3, EgressID: egress.ID, Chain: chain, Expression: fmt.Sprintf("iifname %q meta l4proto udp", network.IngressHostInterface), Action: fmt.Sprintf("meta mark set %s tproxy to :%d accept", mark, network.ListenerPort)},
 		},
 	}
 }

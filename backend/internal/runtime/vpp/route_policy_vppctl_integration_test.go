@@ -8,6 +8,14 @@ import (
 	"ly-route/backend/internal/runtime/trafficpolicy"
 )
 
+func TestReplaceRoutePolicyACLReferenceUsesRuntimeIndex(t *testing.T) {
+	command := "abf policy add id 11198 acl 48810 via 198.18.34.90 lypxinffdc88"
+	want := "abf policy add id 11198 acl 7 via 198.18.34.90 lypxinffdc88"
+	if got := replaceRoutePolicyACLReference(command, 7); got != want {
+		t.Fatalf("rewritten ABF ACL reference = %q, want %q", got, want)
+	}
+}
+
 func TestVPPCTLRoutePolicyLifecycleIntegration(t *testing.T) {
 	binary := os.Getenv("LY_ROUTE_VPPCTL_INTEGRATION_BINARY")
 	if binary == "" {

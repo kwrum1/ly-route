@@ -1,8 +1,9 @@
 [Unit]
 Description=Ly Route proxy service handoff and policy routing
-After=network-online.target vpp.service ly-route-vpp-apply.service
+StartLimitIntervalSec=0
+After=network-online.target vpp.service
 Wants=network-online.target
-Requires=vpp.service ly-route-vpp-apply.service
+Requires=vpp.service
 PartOf=vpp.service
 Before=smartdns.service ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service
 

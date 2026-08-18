@@ -40,12 +40,23 @@ func TestConsumeMultipartStopsAtControlPing(t *testing.T) {
 	}
 }
 
-func TestBuildOperationsUsesCompiledProxyAndFlowTargets(t *testing.T) {
+func TestBuildOperationsUsesCompiledProxyAndFlowGroups(t *testing.T) {
 	plan := validPlan(t, "req-plan")
 	operations := mustBuildOperations(t, plan)
 	for _, required := range []string{"vpp.dataplane.attach", "vpp.interface.address", "vpp.proxy-service.network", "vpp.acl.drop", "vpp.behavior.rate", "vpp.qos.classify", "vpp.qos.record", "vpp.qos.store", "vpp.qos.egress-map", "vpp.qos.mark", "vpp.policer"} {
 		if !hasOperation(operations, required) {
 			t.Fatalf("operations missing %q: %#v", required, operations)
+		}
+	}
+	for _, executable := range []string{"vpp.acl.drop", "vpp.behavior.rate", "vpp.qos.classify", "vpp.qos.mark"} {
+		count := 0
+		for _, operation := range operations {
+			if operation.Name == executable {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("operation %q count = %d, want one executable group", executable, count)
 		}
 	}
 	if operations[0].Name != "vpp.dataplane.attach" || len(operations[0].VPPCtlCommands) == 0 {
@@ -72,8 +83,8 @@ func TestBuildOperationsUsesCompiledProxyAndFlowTargets(t *testing.T) {
 	}
 	assertOperationCommand(t, operations, "vpp.acl.drop", "deny src 192.168.20.0/24 dst 10.0.0.0/8 proto 6 sport 0-65535 dport 443-443")
 	assertOperationCommand(t, operations, "vpp.acl.drop", "set acl-plugin interface lyroute-enp2s0 input acl")
-	assertOperationCommand(t, operations, "vpp.behavior.rate", "permit src any dst 203.0.113.10 proto 17 sport 0-65535 dport 0-65535")
-	assertOperationCommand(t, operations, "vpp.behavior.rate", "policer output name ly_route_limit_video lyroute-enp2s0")
+	assertOperationCommand(t, operations, "vpp.behavior.rate", "direction output source 203.0.113.10 destination 0.0.0.0/0 protocol udp")
+	assertOperationCommand(t, operations, "vpp.behavior.rate", "rate-kbps 20000 burst-bytes 250000")
 	assertOperationCommand(t, operations, "vpp.qos.record", "qos record ip")
 	assertOperationCommand(t, operations, "vpp.qos.store", "qos store ip lyroute-enp2s0 value")
 	assertOperationCommand(t, operations, "vpp.qos.egress-map", "qos egress map")
@@ -102,9 +113,32 @@ func TestProxyServiceNetworkReadbackRejectsDuplicateInputNAT(t *testing.T) {
 	}
 }
 
+func TestFullConeProxyServiceNetworkPreservesNAT44EI(t *testing.T) {
+	network := proxy.ServiceNetworkForEgressID("proxy-full-cone")
+	steering := proxy.VPPSteeringInstruction{
+		EgressID:       network.EgressID,
+		TargetKind:     "vpp.proxy-service.network",
+		ServiceNetwork: network,
+		UnderlayRoute:  "10.67.0.1 pppoe_session1",
+	}
+	commands := strings.Join(proxySteeringCommands(steering, nat.BehaviorFullCone), "\n")
+	for _, required := range []string{
+		"nat44 ei plugin enable",
+		"set interface nat44 ei in " + network.EgressVPPInterface + " out pppoe_session1",
+		"nat44 ei add interface address pppoe_session1",
+	} {
+		if !strings.Contains(commands, required) {
+			t.Fatalf("full-cone proxy commands missing %q:\n%s", required, commands)
+		}
+	}
+	if strings.Contains(commands, "?nat44 plugin enable") {
+		t.Fatalf("full-cone proxy must not switch back to endpoint-dependent NAT:\n%s", commands)
+	}
+}
+
 func TestBuildOperationsIncludesDHCPInterfaceAssignment(t *testing.T) {
 	operations := mustBuildOperations(t, provenPlan(Plan{RequestID: "req", AddressAssignments: []AddressAssignment{{ID: "wan", LinuxInterface: "enp4s0", VPPInterface: "lyroute-enp4s0", Mode: "dhcp4", RemoveCIDRs: []string{"10.10.10.6/24"}}}}, "enp4s0"))
-	assertOperationCommand(t, operations, "vpp.interface.address", "set interface ip address lyroute-enp4s0 10.10.10.6/24 del")
+	assertOperationCommand(t, operations, "vpp.interface.address", "set interface ip address del lyroute-enp4s0 10.10.10.6/24")
 	assertOperationCommand(t, operations, "vpp.interface.address", "set dhcp client intfc lyroute-enp4s0")
 }
 
@@ -130,6 +164,20 @@ func TestBuildOperationsCreatesLANLinuxControlPlaneBeforeAddressAssignment(t *te
 		return
 	}
 	t.Fatal("LAN control-plane payload is missing")
+}
+
+func TestAFPacketAttachmentRestoresProbedMACAddress(t *testing.T) {
+	operation := DataplaneAttachOperation("req-afpacket", NativeAttachment{
+		LinuxInterface: "ens34",
+		VPPInterface:   "lyroute-ens34",
+		MACAddress:     "00:0c:29:16:5b:28",
+		Hook:           NativeHookAFPacket,
+		Mode:           NativeModeAFPacket,
+	})
+	commands := strings.Join(operation.VPPCtlCommands, "\n")
+	if !strings.Contains(commands, "set interface mac address lyroute-ens34 00:0c:29:16:5b:28") {
+		t.Fatalf("AF_PACKET attachment does not restore the probed MAC: %s", commands)
+	}
 }
 
 func TestLANControlPlaneHostInterfaceIsStableAndLinuxSafe(t *testing.T) {
@@ -158,9 +206,18 @@ func TestBuildOperationsIncludesNAT44Mappings(t *testing.T) {
 	if !hasOperation(operations, "vpp.nat44-ed.static-mapping") {
 		t.Fatalf("operations missing nat44 mapping: %#v", operations)
 	}
-	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 out wan0 del")
-	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 out wan0 output-feature")
-	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 plugin enable")
+	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 in wan0 output-feature del")
+	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "set interface nat44 in wan0 output-feature")
+	var mappingCommands []string
+	for _, operation := range operations {
+		if operation.Name == "vpp.nat44-ed.static-mapping" {
+			mappingCommands = append(mappingCommands, operation.VPPCtlCommands...)
+		}
+	}
+	if strings.Contains(strings.Join(mappingCommands, "\n"), "lyroute-eth1 out wan0") {
+		t.Fatal("multi-WAN NAT mapping must not re-enable LAN input NAT")
+	}
+	assertOperationCommand(t, operations, "vpp.nat44.initialize", "nat44 plugin enable")
 	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 add address 203.0.113.10")
 	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 add static mapping local 192.168.88.10 external 203.0.113.10")
 	assertOperationCommand(t, operations, "vpp.nat44-ed.static-mapping", "nat44 add static mapping tcp local 192.168.88.20 8443 external 203.0.113.10 8443 del")
@@ -213,19 +270,19 @@ func TestRoutePolicyCommandsUseResolvedDirectWANPath(t *testing.T) {
 	}
 }
 
-func TestRoutePolicyCommandsUseInterfaceOnlyNextHopForPPPoESession(t *testing.T) {
+func TestRoutePolicyCommandsUseMainTableUntilPPPoEPeerIsKnown(t *testing.T) {
 	path := trafficpolicy.WANPath{VPPInterface: "pppoe_session0"}
 	commands := strings.Join(routePolicyCommands(trafficpolicy.RoutePolicy{
 		ID: "pppoe-wan", Priority: 10, Action: "route", Egress: "wan-pppoe", Path: &path,
 	}, nil), "\n")
-	if !strings.Contains(commands, "via pppoe_session0") || strings.Contains(commands, "via 0.0.0.0 pppoe_session0") {
+	if !strings.Contains(commands, "via ip4-lookup-in-table 0") || strings.Contains(commands, "via pppoe_session0") {
 		t.Fatalf("PPPoE route commands = %s", commands)
 	}
 	groupCommands := strings.Join(wanGroupCommands(trafficpolicy.WANGroup{
 		ID: "pppoe-group", Mode: trafficpolicy.WANGroupPrimaryBackup, Members: []string{"wan-pppoe"},
 		Paths: map[string]trafficpolicy.WANPath{"wan-pppoe": path},
 	}), "\n")
-	if !strings.Contains(groupCommands, "via pppoe_session0") || strings.Contains(groupCommands, "via 0.0.0.0 pppoe_session0") {
+	if !strings.Contains(groupCommands, "via ip4-lookup-in-table 0") || strings.Contains(groupCommands, "via pppoe_session0") {
 		t.Fatalf("PPPoE WAN-group commands = %s", groupCommands)
 	}
 }
@@ -244,6 +301,29 @@ func TestWANGroupCommandsImplementAllProductModes(t *testing.T) {
 	fiveTuple := strings.Join(wanGroupCommands(trafficpolicy.WANGroup{ID: "five-tuple", Mode: trafficpolicy.WANGroupFiveTuple, Members: []string{"wan0", "wan1"}, Weights: map[string]int{"wan0": 1, "wan1": 1}}), "\n")
 	if !strings.Contains(fiveTuple, "flow-hash table") || !strings.Contains(fiveTuple, "via wan1 weight 1 preference 0") {
 		t.Fatalf("five-tuple commands = %s", fiveTuple)
+	}
+}
+
+func TestWANGroupCommandsReplaceStaleDefaultRouteBeforeAddingMembers(t *testing.T) {
+	commands := wanGroupCommands(trafficpolicy.WANGroup{
+		ID:      "reconnect",
+		Mode:    trafficpolicy.WANGroupFiveTuple,
+		Members: []string{"wan0", "wan1"},
+	})
+	joined := strings.Join(commands, "\n")
+	addIndex := strings.Index(joined, "ip table add")
+	deleteIndex := strings.Index(joined, "ip route del table")
+	memberIndex := strings.Index(joined, "ip route add table")
+	if addIndex < 0 || deleteIndex < 0 || memberIndex < 0 || !(addIndex < deleteIndex && deleteIndex < memberIndex) {
+		t.Fatalf("WAN-group commands do not replace the old default route first: %s", joined)
+	}
+	for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		if !strings.Contains(joined, "ip route del table "+fmt.Sprint(wanGroupTableID("reconnect"))+" "+prefix) {
+			t.Fatalf("WAN-group commands do not clear stale %s: %s", prefix, joined)
+		}
+		if strings.Count(joined, "ip route add table "+fmt.Sprint(wanGroupTableID("reconnect"))+" "+prefix) != 2 {
+			t.Fatalf("WAN-group commands should install two %s paths: %s", prefix, joined)
+		}
 	}
 }
 

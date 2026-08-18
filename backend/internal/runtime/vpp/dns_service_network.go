@@ -10,8 +10,9 @@ import (
 )
 
 // DNSServiceNetwork is a VPP-owned L3 handoff for a DNS upstream pinned to a
-// WAN or WAN group. SmartDNS binds only to HostInterface; VPP performs the
-// actual WAN lookup and NAT after receiving the resolver packet on VPPInterface.
+// WAN or WAN group. SmartDNS selects the handoff with SocketMark; VPP performs
+// the actual WAN lookup and NAT after receiving the resolver packet on
+// VPPInterface.
 type DNSServiceNetwork struct {
 	UpstreamID      string   `json:"upstream_id"`
 	WANEgressID     string   `json:"wan_egress_id"`
@@ -23,6 +24,7 @@ type DNSServiceNetwork struct {
 	CIDR            string   `json:"cidr"`
 	TableID         int      `json:"table_id"`
 	TapID           int      `json:"tap_id"`
+	SocketMark      uint32   `json:"socket_mark"`
 	UnderlayRoute   string   `json:"underlay_route"`
 	ResolverServers []string `json:"resolver_servers"`
 }
@@ -37,6 +39,11 @@ const (
 	// networks use the remaining high, non-overlapping range.
 	dnsServiceTapIDBase = 8000
 	dnsServiceTapIDSpan = 193
+
+	// Keep DNS marks in a dedicated range. They are applied by SmartDNS and
+	// select the per-upstream Linux route table without relying on a bound
+	// interface source address.
+	dnsServiceSocketMarkBase uint32 = 0x04000000
 )
 
 // DNSServiceNetworkForUpstreamID creates a stable service handoff outside the
@@ -77,6 +84,7 @@ func DNSServiceNetworkForUpstreamID(upstreamID, wanEgressID string, servers []st
 	vppAddress := baseAddress.Next()
 	hostAddress := vppAddress.Next()
 
+	tableID := 50000 + int((value>>8)%10000)
 	return DNSServiceNetwork{
 		UpstreamID:      upstreamID,
 		WANEgressID:     wanEgressID,
@@ -86,8 +94,9 @@ func DNSServiceNetworkForUpstreamID(upstreamID, wanEgressID string, servers []st
 		VPPAddress:      vppAddress.String(),
 		HostAddress:     hostAddress.String(),
 		CIDR:            netip.PrefixFrom(vppAddress, 30).String(),
-		TableID:         50000 + int((value>>8)%10000),
+		TableID:         tableID,
 		TapID:           dnsServiceTapIDBase + int(value%dnsServiceTapIDSpan),
+		SocketMark:      dnsServiceSocketMarkBase | uint32(tableID),
 		ResolverServers: cleanServers,
 	}, nil
 }
@@ -139,7 +148,7 @@ func validateDNSServiceNetwork(network DNSServiceNetwork) error {
 	if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 30 {
 		return fmt.Errorf("DNS service network CIDR %q is invalid", network.CIDR)
 	}
-	if network.TableID <= 0 || network.TapID <= 0 {
+	if network.TableID <= 0 || network.TapID <= 0 || network.SocketMark == 0 {
 		return fmt.Errorf("DNS service network %q has incomplete numeric identities", network.UpstreamID)
 	}
 	if network.MTU < minDNSServiceMTU || network.MTU > maxDNSServiceMTU {

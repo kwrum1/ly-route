@@ -1,6 +1,7 @@
 package vpp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -47,7 +48,7 @@ func TestCompileSecurityGenerationExpandsBidirectionalACL(t *testing.T) {
 	seen := map[string]bool{}
 	for _, group := range generation.ACLs {
 		seen[group.Direction] = true
-		if len(group.Rules) != 1 || group.Rules[0].Match.Direction != group.Direction {
+		if len(group.Rules) != 3 || group.Rules[0].Match.Direction != group.Direction || group.Rules[1].Action != "permit" || group.Rules[2].Action != "permit" {
 			t.Fatalf("group = %#v", group)
 		}
 	}
@@ -187,6 +188,40 @@ func TestSecurityGenerationInterfaceInventoryIsStrictAndDeterministic(t *testing
 	interfaces := securityGenerationInterfaceNames(output)
 	if strings.Join(interfaces, ",") != "local0,lyroute-lan0,lyroute-wan0" {
 		t.Fatalf("interfaces = %#v", interfaces)
+	}
+}
+
+func TestSecurityACLReadbackNormalizesSingletonPortRanges(t *testing.T) {
+	expected := []string{"deny src 192.0.2.1/32 dst 198.51.100.1/32 proto 6 sport 0-65535 dport 18001-18001"}
+	actual := []string{"deny src 192.0.2.1/32 dst 198.51.100.1/32 proto 6 sport 0-65535 dport 18001"}
+	if strings.Join(normalizeSecurityACLRules(expected), "\n") != strings.Join(normalizeSecurityACLRules(actual), "\n") {
+		t.Fatalf("normalized rules differ: expected=%#v actual=%#v", normalizeSecurityACLRules(expected), normalizeSecurityACLRules(actual))
+	}
+}
+
+func TestSecurityACLInterfaceIDsPreserveAttachmentOrder(t *testing.T) {
+	interfaces := "Name Idx State MTU (L3/IP4/IP6/MPLS) Counter Count\nlan0 2 up 9000/0/0/0\n"
+	attachments := "sw_if_index 2:\n  input acl(s): 7, 4, 9\n  output acl(s): 3\n"
+	got := securityACLInterfaceIDs(attachments, interfaces, "lan0", "input")
+	if fmt.Sprint(got) != "[7 4 9]" {
+		t.Fatalf("input ACL IDs = %v", got)
+	}
+}
+
+func TestGatewayDiffSnapshotMigratesLegacyACLToSecurityGeneration(t *testing.T) {
+	legacy := trafficpolicy.SecurityACL{ID: "legacy-block", Action: "deny"}
+	prior := Plan{Policy: trafficpolicy.Config{SecurityACLs: []trafficpolicy.SecurityACL{legacy}}}
+	desired := Plan{Security: SecurityGeneration{ACLs: []SecurityInterfaceACL{{Interface: "lan0", Direction: "input", Rules: []trafficpolicy.SecurityACL{legacy}}}}}
+	request := GatewayDiffSnapshotRequest("txn-migrate", prior, desired)
+	if len(request.ACLs) != 0 || len(request.Candidates.ACLs) != 0 {
+		t.Fatalf("migration snapshot still requires legacy ACL: %#v", request)
+	}
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{TransactionID: "txn-migrate", Prior: prior, Desired: desired, Live: Snapshot{TransactionID: "txn-migrate"}, RepairVerifiedDrift: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.ACLs.DeleteACLs) != 0 || len(diff.ACLs.ACLs) != 0 {
+		t.Fatalf("absent legacy ACL produced a false mutation: %#v", diff.ACLs)
 	}
 }
 

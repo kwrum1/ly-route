@@ -51,7 +51,7 @@ func TestGatewayDeleteCommandsUseExactPriorCIDRAndNATTuples(t *testing.T) {
 	}
 	interfaceTrace := operationCommands(interfaceOperations, interfaceState.Name)
 	for _, cidr := range interfaceState.Addresses {
-		if !strings.Contains(interfaceTrace, "set interface ip address "+interfaceState.Name+" "+cidr+" del") {
+		if !strings.Contains(interfaceTrace, "set interface ip address del "+interfaceState.Name+" "+cidr) {
 			t.Fatalf("interface delete trace lacks prior CIDR %q: %s", cidr, interfaceTrace)
 		}
 	}

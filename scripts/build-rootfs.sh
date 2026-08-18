@@ -66,8 +66,10 @@ esac
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 geodata_dir=${LY_ROUTE_GEODATA_DIR:-$repo_root/packaging/geodata}
+. "$repo_root/packaging/runtime-boundaries/gateway.sh"
 . "$repo_root/scripts/lib/product-build-profile.sh"
 load_product_build_profile "$repo_root" "$product" "$manifest"
+export LY_ROUTE_SOURCE_FINGERPRINT=$(product_source_fingerprint "$repo_root")
 validate_prebuilt_control "$control_binary" "$product"
 if [ -n "$pppoe_client_binary" ]; then
   [ "$product" = gateway ] || product_build_fail "LY_ROUTE_PPPOE_CLIENT_BINARY is only valid for gateway builds"
@@ -98,6 +100,14 @@ validate_extra_debs() {
     return 0
   fi
   [ -d "$extra_debs_dir" ] || product_build_fail "LY_ROUTE_EXTRA_DEBS_DIR does not exist: $extra_debs_dir"
+  runtime_stamp="$extra_debs_dir/.ly-route-source-fingerprint"
+  [ -f "$runtime_stamp" ] || product_build_fail "Runtime package directory has no source fingerprint: $extra_debs_dir"
+  expected_runtime_fingerprint=$(product_source_fingerprint "$repo_root")
+  actual_runtime_fingerprint=$(cat "$runtime_stamp")
+  [ "$actual_runtime_fingerprint" = "$expected_runtime_fingerprint" ] ||
+    product_build_fail "Runtime package directory is stale: expected $expected_runtime_fingerprint, got $actual_runtime_fingerprint"
+  [ ! -e "$extra_debs_dir/.ly-route-build-in-progress" ] ||
+    product_build_fail "Runtime package directory contains an incomplete build marker: $extra_debs_dir"
   set -- "$extra_debs_dir"/*.deb
   [ -f "$1" ] || product_build_fail "LY_ROUTE_EXTRA_DEBS_DIR contains no .deb packages: $extra_debs_dir"
   command -v dpkg-deb >/dev/null 2>&1 || product_build_fail "dpkg-deb is required to inspect LY_ROUTE_EXTRA_DEBS_DIR"
@@ -117,8 +127,8 @@ validate_extra_debs() {
     fi
   done
   if [ "${LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY:-0}" != 1 ]; then
-	  required_runtime_packages='libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply'
-	  [ "$product" != gateway ] || required_runtime_packages="$required_runtime_packages ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns xray"
+  required_runtime_packages='libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply'
+  [ "$product" != gateway ] || required_runtime_packages="$LY_ROUTE_GATEWAY_CUSTOM_RUNTIME_PACKAGES"
 	  [ "$product" != orchestrator ] || required_runtime_packages="$required_runtime_packages ly-route-vpp-orchestrator"
     for required in $required_runtime_packages; do
       found=false
@@ -195,7 +205,7 @@ install_extra_debs() {
       dpkg-deb -x "$package_path" "$target"
     done
     if [ -f "$target/etc/smartdns/smartdns.conf" ]; then
-      sed -i 's/^bind .*/bind 127.0.0.1:1053/' "$target/etc/smartdns/smartdns.conf"
+      sed -i 's/^bind .*/bind 127.0.0.1:1053 -no-speed-check/; s/^bind-tcp .*/bind-tcp 127.0.0.1:1053 -no-speed-check/; /^server /d' "$target/etc/smartdns/smartdns.conf"
       sed -i 's#^conf-file .*#conf-file /etc/smartdns/conf.d/ly-route-active.conf#' "$target/etc/smartdns/smartdns.conf"
     fi
     vcl_library=$(find "$target/usr/lib" -type f -name 'libvcl_ldpreload.so.*' -print -quit)
@@ -216,7 +226,7 @@ install_extra_debs() {
     ln -sf "${vcl_library#"$target"}" "$target/usr/lib/ly-route/libvcl_ldpreload.so"
   fi
   if [ -f "$target/etc/smartdns/smartdns.conf" ]; then
-    sed -i 's/^bind .*/bind 127.0.0.1:1053/' "$target/etc/smartdns/smartdns.conf"
+    sed -i 's/^bind .*/bind 127.0.0.1:1053 -no-speed-check/; s/^bind-tcp .*/bind-tcp 127.0.0.1:1053 -no-speed-check/; /^server /d' "$target/etc/smartdns/smartdns.conf"
     sed -i 's#^conf-file .*#conf-file /etc/smartdns/conf.d/ly-route-active.conf#' "$target/etc/smartdns/smartdns.conf"
   fi
 }
@@ -272,6 +282,7 @@ LY_ROUTE_VPP_CAPABILITY_PROOF=/var/lib/ly-route/vpp-native-capabilities.json
 LY_ROUTE_VPP_PROBE_COMMAND=/usr/lib/ly-route/runtime-check.sh
 LY_ROUTE_VPP_DATA_INTERFACES=
 LY_ROUTE_VPP_PROOF_TTL_SECONDS=300
+LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=false
 EOF
   service="$target/etc/systemd/system/ly-route-control-api.service"
   awk -v profile='Environment=LY_ROUTE_PRODUCT_PROFILE=/etc/ly-route/product-manifest.json' \
@@ -305,9 +316,11 @@ enable_units() {
   ln -sf /lib/systemd/system/systemd-resolved.service "$wants/systemd-resolved.service"
   ln -sf /etc/systemd/system/ly-route-runtime-check.service "$wants/ly-route-runtime-check.service"
   ln -sf /etc/systemd/system/ly-route-vpp-apply.service "$wants/ly-route-vpp-apply.service"
+  ln -sf /etc/systemd/system/ly-route-vpp-session-enable.service "$wants/ly-route-vpp-session-enable.service"
   ln -sf /etc/systemd/system/ly-route-control-api.service "$wants/ly-route-control-api.service"
   ln -sf /etc/systemd/system/ly-route-recovery.service "$wants/ly-route-recovery.service"
   ln -sf /etc/systemd/system/ly-route-vpp-tune.service "$wants/ly-route-vpp-tune.service"
+  ln -sf /etc/systemd/system/ly-route-vfio-preflight.service "$wants/ly-route-vfio-preflight.service"
   if [ -f "$target/usr/lib/systemd/system/vpp.service" ]; then
     ln -sf /usr/lib/systemd/system/vpp.service "$wants/vpp.service"
   elif [ -f "$target/lib/systemd/system/vpp.service" ]; then
@@ -330,6 +343,33 @@ enable_units() {
   fi
 }
 
+verify_gateway_vpp_plugins() {
+  target=$1
+  [ "$product" = gateway ] || return 0
+  [ "${LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY:-0}" != 1 ] || return 0
+  case "$arch" in
+    amd64) multiarch=x86_64-linux-gnu ;;
+    arm64) multiarch=aarch64-linux-gnu ;;
+    *) product_build_fail "unsupported gateway VPP plugin architecture: $arch" ;;
+  esac
+  for package in $LY_ROUTE_GATEWAY_CUSTOM_RUNTIME_PACKAGES; do
+    grep -Eq "^Package: $package$" "$target/var/lib/dpkg/status" ||
+      product_build_fail "gateway rootfs is missing installed VPP plugin package: $package"
+  done
+  for plugin in $LY_ROUTE_GATEWAY_VPP_PLUGINS; do
+    [ -s "$target/usr/lib/$multiarch/vpp_plugins/$plugin" ] ||
+      product_build_fail "gateway rootfs is missing VPP plugin: $plugin"
+  done
+  for runtime_file in $LY_ROUTE_GATEWAY_RUNTIME_FILES_COMMON; do
+    [ -e "$target$runtime_file" ] ||
+      product_build_fail "gateway rootfs is missing required runtime file: $runtime_file"
+  done
+  for unit in $LY_ROUTE_GATEWAY_RUNTIME_UNITS; do
+    [ -e "$target/lib/systemd/system/$unit" ] || [ -e "$target/usr/lib/systemd/system/$unit" ] ||
+      product_build_fail "gateway rootfs is missing required runtime unit: $unit"
+  done
+}
+
 mkdir -p "$artifact_dir" "$work_parent"
 cleanup_rootfs "$rootfs"
 if [ "${LY_ROUTE_ROOTFS_ALLOW_TAR_ONLY:-0}" = 1 ]; then
@@ -346,6 +386,9 @@ else
 fi
 
 cp -a "$overlay/." "$rootfs/"
+find "$rootfs/etc/systemd/system" -type f \
+  \( -name '*.service' -o -name '*.socket' -o -name '*.timer' -o -name '*.target' -o -name '*.conf' \) \
+  -exec chmod 0644 {} +
 copy_payload "$rootfs"
 build_control_binary "$rootfs"
 build_pppoe_client_binary "$rootfs"
@@ -361,12 +404,9 @@ if [ -n "$vpp_apply_binary" ]; then
   cp "$vpp_apply_binary" "$rootfs/usr/lib/ly-route/vpp-apply"
   chmod 0755 "$rootfs/usr/lib/ly-route/vpp-apply"
 fi
-for forbidden_path in "$rootfs"/usr/lib/*-linux-gnu/vpp_plugins/af_packet* \
-  "$rootfs"/usr/lib/*-linux-gnu/vat2_plugins/af_packet* "$rootfs"/usr/share/vpp/api/plugins/af_packet*; do
-  rm -f "$forbidden_path"
-done
 configure_product "$rootfs"
 enable_units "$rootfs"
+verify_gateway_vpp_plugins "$rootfs"
 
 mkdir -p "$rootfs/usr/lib/ly-route" "$rootfs/var/lib/ly-route/vpp"
 if [ "$product" = gateway ]; then
@@ -376,24 +416,11 @@ if [ "$product" = gateway ]; then
 set -eu
 : "${LY_ROUTE_POLICY_ROUTING_SCRIPT:=/var/lib/ly-route/policy-routing/apply.sh}"
 if [ -x "$LY_ROUTE_POLICY_ROUTING_SCRIPT" ]; then
-  : "${LY_ROUTE_POLICY_ROUTING_READY_ATTEMPTS:=60}"
-  : "${LY_ROUTE_POLICY_ROUTING_READY_INTERVAL:=1}"
-  case "$LY_ROUTE_POLICY_ROUTING_READY_ATTEMPTS:$LY_ROUTE_POLICY_ROUTING_READY_INTERVAL" in
-    *[!0-9:]*|0:*|*:0)
-      echo "policy-routing readiness retry settings must be positive integers" >&2
-      exit 1
-      ;;
-  esac
-  attempt=1
-  while ! "$LY_ROUTE_POLICY_ROUTING_SCRIPT"; do
-    if [ "$attempt" -ge "$LY_ROUTE_POLICY_ROUTING_READY_ATTEMPTS" ]; then
-      echo "policy-routing runtime did not become ready" >&2
-      exit 1
-    fi
-    sleep "$LY_ROUTE_POLICY_ROUTING_READY_INTERVAL"
-    attempt=$((attempt + 1))
-  done
-  exit 0
+  # The rendered script owns its bounded VPP readiness check. Retrying it here
+  # duplicated every TAP/route operation and could leave a canceled HTTP apply
+  # holding a stale generation for several minutes. systemd retries this unit
+  # after a failed boot-time handoff.
+  exec "$LY_ROUTE_POLICY_ROUTING_SCRIPT"
 fi
 : "${LY_ROUTE_POLICY_ROUTING_RECEIPT:=/var/lib/ly-route/policy-routing-receipt.json}"
 mkdir -p "$(dirname "$LY_ROUTE_POLICY_ROUTING_RECEIPT")"
@@ -416,7 +443,8 @@ printf '{"operations":[]}\n' >"$rootfs/var/lib/ly-route/vpp/operations.json"
 chmod 0755 "$rootfs/usr/lib/ly-route/firstboot.sh" "$rootfs/usr/lib/ly-route/tune-vpp.sh" \
   "$rootfs/usr/lib/ly-route/runtime-check.sh" "$rootfs/usr/lib/ly-route/recover-runtime.sh" \
   "$rootfs/usr/lib/ly-route/ly-route-control" "$rootfs/usr/lib/ly-route/vpp-apply-default" \
-  "$rootfs/usr/lib/ly-route/dns-ipset-sync.py" "$rootfs/usr/lib/ly-route/active-dpdk-state.py"
+  "$rootfs/usr/lib/ly-route/dns-ipset-sync.py" "$rootfs/usr/lib/ly-route/active-dpdk-state.py" \
+  "$rootfs/usr/lib/ly-route/prepare-vfio.sh"
 if [ "$product" = gateway ]; then
   chmod 0755 "$rootfs/usr/lib/ly-route/ly-route-pppoe-client"
 fi
@@ -427,6 +455,16 @@ cat >"$rootfs/etc/systemd/resolved.conf.d/ly-route.conf" <<'EOF'
 [Resolve]
 DNSStubListener=yes
 EOF
+
+for text_root in "$rootfs/etc" "$rootfs/usr/lib/systemd" "$rootfs/usr/lib/ly-route"; do
+  [ ! -d "$text_root" ] || find "$text_root" -type f -exec sh -c '
+    for file do
+      if LC_ALL=C grep -Iq . "$file"; then
+        sed -i "s/\r$//" "$file"
+      fi
+    done
+  ' sh {} +
+done
 
 write_product_artifact_manifest "$rootfs/usr/share/ly-route/artifact-manifest.json" rootfs \
   "$artifact_name" "$product" "$suite" "$arch" "$source_commit"

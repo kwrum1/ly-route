@@ -112,6 +112,7 @@ func CompileSecurityGeneration(id, defaultInterface string, acls []trafficpolicy
 		parts := strings.SplitN(key, "\x00", 2)
 		rules := groups[key]
 		sort.SliceStable(rules, func(left, right int) bool { return rules[left].Priority < rules[right].Priority })
+		rules = appendSecurityDefaultPermit(rules, parts[1])
 		generation.ACLs = append(generation.ACLs, SecurityInterfaceACL{Interface: parts[0], Direction: parts[1], Rules: rules})
 	}
 	for _, macip := range bindings {
@@ -130,6 +131,22 @@ func CompileSecurityGeneration(id, defaultInterface string, acls []trafficpolicy
 		generation.AttackRules = append(generation.AttackRules, attack)
 	}
 	return generation, nil
+}
+
+// VPP ACLs implicitly deny anything that does not match.  Router security
+// rules are additive by default, so make the default permit explicit unless a
+// threat list already supplied its deliberate terminal action.
+func appendSecurityDefaultPermit(rules []trafficpolicy.SecurityACL, direction string) []trafficpolicy.SecurityACL {
+	priority := 0
+	for _, rule := range rules {
+		if rule.Priority > priority {
+			priority = rule.Priority
+		}
+		if strings.Contains(rule.ID, "-terminal-") {
+			return rules
+		}
+	}
+	return append(rules, terminalSecurityRules("default", direction, priority+1, "permit")...)
 }
 
 // securityDirections expands the user-facing bidirectional ACL choice into

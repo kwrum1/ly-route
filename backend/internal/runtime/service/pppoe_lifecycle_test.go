@@ -24,8 +24,8 @@ func TestFilesystemControllerStopPPPoEStopsEveryInstanceAndVerifiesInterfacesGon
 	}
 	commands := strings.Join(runner.commands, "\n")
 	for _, required := range []string{
-		"systemctl stop ly-route-pppoe@ly-route-wan-blue.service",
-		"systemctl stop ly-route-pppoe@ly-route-wan-green.service",
+		"systemctl disable --now ly-route-pppoe@ly-route-wan-blue.service",
+		"systemctl disable --now ly-route-pppoe@ly-route-wan-green.service",
 		"systemctl stop ly-route-pppoe.target",
 		"vppctl show pppoe session",
 	} {
@@ -47,7 +47,8 @@ func TestFilesystemControllerApplyPPPoEActivatesTargetBeforeInstances(t *testing
 	}
 	want := []string{
 		"systemctl start ly-route-pppoe.target",
-		"systemctl reload-or-restart ly-route-pppoe@ly-route-wan-blue.service",
+		"systemctl enable ly-route-pppoe@ly-route-wan-blue.service",
+		"systemctl restart ly-route-pppoe@ly-route-wan-blue.service",
 	}
 	if len(runner.commands) != len(want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
@@ -68,13 +69,13 @@ func TestFilesystemControllerStopPPPoEContinuesAcrossInstanceFailures(t *testing
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{runErrs: map[string]error{
-		"systemctl stop ly-route-pppoe@ly-route-wan-blue.service": errors.New("unit refused stop"),
+		"systemctl disable --now ly-route-pppoe@ly-route-wan-blue.service": errors.New("unit refused disable"),
 	}}
 	err = (FilesystemController{Runner: runner}).Stop(context.Background(), PPPd, artifacts)
 	if err == nil || !strings.Contains(err.Error(), "wan-blue") {
 		t.Fatalf("expected explicit instance stop failure, got %v", err)
 	}
-	if !strings.Contains(strings.Join(runner.commands, "\n"), "systemctl stop ly-route-pppoe@ly-route-wan-green.service") {
+	if !strings.Contains(strings.Join(runner.commands, "\n"), "systemctl disable --now ly-route-pppoe@ly-route-wan-green.service") {
 		t.Fatalf("second PPPoE instance was not stopped after first failure: %#v", runner.commands)
 	}
 }

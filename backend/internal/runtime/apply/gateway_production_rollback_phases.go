@@ -81,13 +81,13 @@ func (adapter *productionGatewayAdapter) cleanupOperations(diff vpp.GatewayDiff)
 			DeleteRouteState:    diff.Routes.Routes,
 		})
 	case "acls":
-		return vpp.BuildACLQoSOperations(vpp.ACLQoSPlan{TransactionID: diff.ACLs.TransactionID, DeleteACLs: aclNames(diff.ACLs.ACLs), DeleteACLState: diff.ACLs.ACLs})
+		return vpp.BuildACLQoSOperations(vpp.ACLQoSPlan{TransactionID: diff.ACLs.TransactionID, IngressVPPInterface: diff.ACLs.IngressVPPInterface, DeleteACLs: aclNames(diff.ACLs.ACLs), DeleteACLState: diff.ACLs.ACLs})
 	case "qos":
-		return vpp.BuildACLQoSOperations(vpp.ACLQoSPlan{TransactionID: diff.QoS.TransactionID, DeleteQoS: qosNames(diff.QoS.QoS), DeleteQoSState: diff.QoS.QoS})
+		return vpp.BuildACLQoSOperations(vpp.ACLQoSPlan{TransactionID: diff.QoS.TransactionID, IngressVPPInterface: diff.QoS.IngressVPPInterface, DeleteQoS: qosNames(diff.QoS.QoS), DeleteQoSState: diff.QoS.QoS})
 	case "nat44":
-		return vpp.BuildNAT44Operations(vpp.NAT44Plan{TransactionID: diff.NAT44.TransactionID, DeleteStaticMappings: staticMappingNames(diff.NAT44.StaticMappings), ReadbackStaticMappings: diff.NAT44.StaticMappings})
+		return vpp.BuildNAT44Operations(vpp.NAT44Plan{TransactionID: diff.NAT44.TransactionID, IngressVPPInterface: diff.NAT44.IngressVPPInterface, DeleteStaticMappings: staticMappingNames(diff.NAT44.StaticMappings), ReadbackStaticMappings: diff.NAT44.StaticMappings})
 	case "port-maps":
-		return vpp.BuildNAT44Operations(vpp.NAT44Plan{TransactionID: diff.PortMaps.TransactionID, DeletePortMappings: portMappingNames(diff.PortMaps.PortMappings), ReadbackPortMappings: diff.PortMaps.PortMappings})
+		return vpp.BuildNAT44Operations(vpp.NAT44Plan{TransactionID: diff.PortMaps.TransactionID, IngressVPPInterface: diff.PortMaps.IngressVPPInterface, DeletePortMappings: portMappingNames(diff.PortMaps.PortMappings), ReadbackPortMappings: diff.PortMaps.PortMappings})
 	default:
 		return nil, fmt.Errorf("unsupported production gateway resource %q", adapter.name)
 	}

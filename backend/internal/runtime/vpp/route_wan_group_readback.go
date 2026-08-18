@@ -46,8 +46,10 @@ func selectRoutePolicies(states []trafficpolicy.RoutePolicy, request SnapshotReq
 		}
 		available[states[index].ID] = struct{}{}
 	}
-	if err := requireNames(request.RoutePolicies, available, "route policy"); err != nil {
-		return nil, err
+	if !request.AllowMissing {
+		if err := requireNames(request.RoutePolicies, available, "route policy"); err != nil {
+			return nil, err
+		}
 	}
 	sort.Slice(states, func(left, right int) bool { return states[left].ID < states[right].ID })
 	return states, nil
@@ -62,8 +64,10 @@ func selectWANGroups(states []trafficpolicy.WANGroup, request SnapshotRequest) (
 		}
 		available[states[index].ID] = struct{}{}
 	}
-	if err := requireNames(request.WANGroups, available, "WAN group"); err != nil {
-		return nil, err
+	if !request.AllowMissing {
+		if err := requireNames(request.WANGroups, available, "WAN group"); err != nil {
+			return nil, err
+		}
 	}
 	sort.Slice(states, func(left, right int) bool { return states[left].ID < states[right].ID })
 	return states, nil

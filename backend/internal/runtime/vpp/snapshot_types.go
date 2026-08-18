@@ -29,6 +29,14 @@ const (
 type SnapshotRequest struct {
 	TransactionID       string
 	ManagementInterface string
+	// LANVPPInterface is the resolved logical LAN interface used by dynamic
+	// ACL/QoS readback. It is request-scoped because the LAN role can change
+	// without restarting the control service.
+	LANVPPInterface string
+	// LocalDestinations are LAN prefixes that catch-all route policies preserve
+	// during readback. They make synthetic local-bypass ACL rules part of the
+	// snapshot proof instead of treating them as drift.
+	LocalDestinations []string
 	// AllowMissing is used only for a verified production drift readback. A
 	// successful inventory with no requested product object means that the
 	// object was removed while VPP was restarted; an unreadable inventory must
@@ -45,6 +53,11 @@ type SnapshotRequest struct {
 	QoS                   []string
 	NATStaticMappings     []string
 	NATPortMappings       []string
+	NATBehavior            nat.Behavior
+	// NATIngressVPPInterface is the resolved LAN ingress used by NAT return
+	// guards. It is carried in the snapshot request so port mappings do not
+	// depend on a process-wide environment variable.
+	NATIngressVPPInterface string
 	AbsentRoutePolicies   []string
 	AbsentWANGroups       []string
 	AbsentACLs            []string

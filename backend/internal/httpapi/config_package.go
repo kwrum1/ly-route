@@ -93,12 +93,36 @@ func resourceAllowed(profile product.Profile, resourceType string) bool {
 }
 
 func hashConfigPayload(payload ConfigPackagePayload) string {
-	raw, err := json.Marshal(payload)
+	raw, err := canonicalConfigPayloadJSON(payload)
 	if err != nil {
 		return ""
 	}
 	digest := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+// canonicalConfigPayloadJSON makes the package checksum independent of JSON
+// whitespace and object-member ordering introduced by a browser during export
+// and import. Resource payloads are JSON documents, not opaque byte strings.
+func canonicalConfigPayloadJSON(payload ConfigPackagePayload) ([]byte, error) {
+	resources := make(map[string][]json.RawMessage, len(payload.Resources))
+	for resourceType, items := range payload.Resources {
+		canonicalItems := make([]json.RawMessage, 0, len(items))
+		for _, item := range items {
+			var value any
+			if err := json.Unmarshal(item, &value); err != nil {
+				return nil, fmt.Errorf("canonicalize %s resource: %w", resourceType, err)
+			}
+			canonical, err := json.Marshal(value)
+			if err != nil {
+				return nil, fmt.Errorf("marshal canonical %s resource: %w", resourceType, err)
+			}
+			canonicalItems = append(canonicalItems, canonical)
+		}
+		resources[resourceType] = canonicalItems
+	}
+	payload.Resources = resources
+	return json.Marshal(payload)
 }
 
 func manifestForPayload(payload ConfigPackagePayload) ConfigPackageManifest {

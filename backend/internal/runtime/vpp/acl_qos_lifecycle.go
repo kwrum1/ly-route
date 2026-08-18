@@ -12,13 +12,14 @@ import (
 )
 
 type ACLQoSPlan struct {
-	TransactionID  string
-	ACLs           []trafficpolicy.SecurityACL
-	QoS            []flow.VPPObjectGroup
-	DeleteACLs     []string
-	DeleteQoS      []string
-	DeleteACLState []trafficpolicy.SecurityACL
-	DeleteQoSState []flow.VPPObjectGroup
+	TransactionID          string
+	IngressVPPInterface    string
+	ACLs                   []trafficpolicy.SecurityACL
+	QoS                    []flow.VPPObjectGroup
+	DeleteACLs             []string
+	DeleteQoS              []string
+	DeleteACLState         []trafficpolicy.SecurityACL
+	DeleteQoSState         []flow.VPPObjectGroup
 }
 
 type ACLQoSLifecycleError struct {
@@ -48,6 +49,9 @@ func (a Adapter) ApplyACLQoS(ctx context.Context, plan ACLQoSPlan, prior Snapsho
 	rollbackPlan := plan
 	if len(attempted) > 0 {
 		rollbackPlan = attempted[0]
+		if rollbackPlan.IngressVPPInterface == "" {
+			rollbackPlan.IngressVPPInterface = plan.IngressVPPInterface
+		}
 	}
 	operations, err := BuildACLQoSOperations(plan)
 	if err != nil {
@@ -61,6 +65,9 @@ func (a Adapter) ApplyACLQoS(ctx context.Context, plan ACLQoSPlan, prior Snapsho
 		return ACLQoSApplyResult{}, fmt.Errorf("%w: open ACL/QoS channel: %v", ErrVPPUnavailable, err)
 	}
 	defer channel.Close()
+	if ingress, ok := channel.(interface{ setLANVPPInterface(string) }); ok {
+		ingress.setLANVPPInterface(plan.IngressVPPInterface)
+	}
 	for _, operation := range operations {
 		if _, err := doOperation(ctx, channel, operation); err != nil {
 			return ACLQoSApplyResult{}, a.aclQoSFailure(ctx, channel, plan.TransactionID, operation.Name, err, prior, rollbackPlan)
@@ -82,12 +89,8 @@ func BuildACLQoSOperations(plan ACLQoSPlan) ([]Operation, error) {
 		return nil, fmt.Errorf("%w: transaction ID is required", ErrSnapshotIncomplete)
 	}
 	operations := make([]Operation, 0, len(plan.ACLs)+len(plan.QoS)+len(plan.DeleteACLs)+len(plan.DeleteQoS))
-	for _, acl := range plan.ACLs {
-		operations = append(operations, Operation{Name: "vpp.security-acl", RequestID: transactionID, Resource: acl.ID, Payload: acl, VPPCtlCommands: securityACLCommands(acl)})
-	}
-	for _, group := range plan.QoS {
-		operations = append(operations, Operation{Name: "vpp.qos", RequestID: transactionID, Resource: group.Kind, Payload: group, VPPCtlCommands: flowGroupCommands(group)})
-	}
+	// Delete before create/update. A replacement keeps the same ACL/policer
+	// identity; creating first would let the old delete remove the new object.
 	for _, id := range plan.DeleteACLs {
 		acl, found := aclByID(plan.DeleteACLState, id)
 		if !found {
@@ -109,12 +112,20 @@ func BuildACLQoSOperations(plan ACLQoSPlan) ([]Operation, error) {
 		}
 		operations = append(operations, Operation{Name: "vpp.qos", RequestID: transactionID, Resource: id, Payload: group, VPPCtlCommands: flowGroupDeleteCommands(group)})
 	}
+	for _, acl := range plan.ACLs {
+		operations = append(operations, Operation{Name: "vpp.security-acl", RequestID: transactionID, Resource: acl.ID, Payload: acl, VPPCtlCommands: securityACLCommands(acl)})
+	}
+	for _, group := range plan.QoS {
+		operations = append(operations, Operation{Name: "vpp.qos", RequestID: transactionID, Resource: group.Kind, Payload: group, VPPCtlCommands: flowGroupCommands(group)})
+	}
 	return operations, nil
 }
 
 func (a Adapter) aclQoSFailure(ctx context.Context, channel Channel, transactionID, operation string, cause error, prior Snapshot, current ACLQoSPlan) error {
 	rollbackErr := errors.Join(cleanupACLQoS(ctx, channel, transactionID, current), applyACLQoSSnapshot(ctx, channel, transactionID, prior))
-	readback, err := a.Snapshot(ctx, aclQoSSnapshotRequest(transactionID, prior))
+	request := aclQoSSnapshotRequest(transactionID, prior)
+	request.LANVPPInterface = current.IngressVPPInterface
+	readback, err := a.Snapshot(ctx, request)
 	if err != nil {
 		rollbackErr = errors.Join(rollbackErr, err)
 	} else if !reflect.DeepEqual(readback.ACLs, prior.ACLs) || !reflect.DeepEqual(readback.QoS, prior.QoS) {
@@ -151,7 +162,9 @@ func applyACLQoSSnapshot(ctx context.Context, channel Channel, transactionID str
 		}
 	}
 	for _, group := range snapshot.QoS {
-		operation := Operation{Name: "vpp.qos.rollback", RequestID: transactionID, Resource: group.Kind, VPPCtlCommands: flowGroupCommands(group)}
+		// Keep the typed object on rollback so dynamic ACL/QoS groups use the
+		// lifecycle adapter instead of replaying an unindexed create command.
+		operation := Operation{Name: "vpp.qos.rollback", RequestID: transactionID, Resource: group.Kind, Payload: group, VPPCtlCommands: flowGroupCommands(group)}
 		if _, err := doOperation(ctx, channel, operation); err != nil {
 			replay = append(replay, err)
 		}
@@ -173,7 +186,7 @@ func aclQoSSnapshotRequest(transactionID string, snapshot Snapshot) SnapshotRequ
 }
 
 func aclQoSSnapshotRequestForPlan(plan ACLQoSPlan) SnapshotRequest {
-	request := SnapshotRequest{TransactionID: plan.TransactionID, Capabilities: []SnapshotCapability{SnapshotCapabilityACLs, SnapshotCapabilityQoS}}
+	request := SnapshotRequest{TransactionID: plan.TransactionID, LANVPPInterface: plan.IngressVPPInterface, Capabilities: []SnapshotCapability{SnapshotCapabilityACLs, SnapshotCapabilityQoS}}
 	for _, acl := range plan.ACLs {
 		request.ACLs = append(request.ACLs, acl.ID)
 	}

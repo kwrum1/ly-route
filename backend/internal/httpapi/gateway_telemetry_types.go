@@ -43,6 +43,7 @@ type GatewayConnection struct {
 	Protocol        string    `json:"protocol"`
 	SourcePort      int       `json:"src_port"`
 	DestinationPort int       `json:"dst_port"`
+	ConnectionCount int       `json:"connection_count,omitempty"`
 	Bytes           int64     `json:"bytes"`
 	ObservedAt      time.Time `json:"observed_at"`
 }

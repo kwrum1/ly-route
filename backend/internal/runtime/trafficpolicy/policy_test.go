@@ -263,7 +263,7 @@ func TestCompileConfigRejectsUnsupportedObjectGroupKind(t *testing.T) {
 	}
 }
 
-func TestCompileConfigSupportsSchemaObjectGroupsAndOutputDirection(t *testing.T) {
+func TestCompileConfigSupportsSchemaObjectGroupsAndLANIngressDirection(t *testing.T) {
 	compiled, err := CompileConfig(
 		nil,
 		[]map[string]any{{"id": "office-web", "action": "permit", "match": map[string]any{"src_ip": "grp-office-all", "dst_port": "svc-web", "direction": "lan_to_wan"}}},
@@ -277,7 +277,7 @@ func TestCompileConfigSupportsSchemaObjectGroupsAndOutputDirection(t *testing.T)
 		t.Fatal(err)
 	}
 	acl := compiled.SecurityACLs[0]
-	if acl.Match.Direction != "output" || len(acl.Match.Sources) != 2 || len(acl.Match.DestPorts) != 2 || acl.Match.DestPorts[1] != "8443" {
+	if acl.Match.Direction != "input" || len(acl.Match.Sources) != 2 || len(acl.Match.DestPorts) != 2 || acl.Match.DestPorts[1] != "8443" {
 		t.Fatalf("security acl = %#v", acl)
 	}
 }
@@ -312,7 +312,7 @@ func TestCompileConfigSupportsSchemaObjectGroupsReferencesAndDirection(t *testin
 		t.Fatal(err)
 	}
 	acl := compiled.SecurityACLs[0]
-	if acl.Match.Direction != "output" || len(acl.Match.Sources) != 2 || acl.Match.Protocols[0] != "tcp" || acl.Match.DestPorts[0] != "443" {
+	if acl.Match.Direction != "input" || len(acl.Match.Sources) != 2 || acl.Match.Protocols[0] != "tcp" || acl.Match.DestPorts[0] != "443" {
 		t.Fatalf("compiled acl = %#v", acl)
 	}
 }
@@ -329,7 +329,12 @@ func TestCompileWANGroupsBuildsMembers(t *testing.T) {
 
 func TestCompileWANGroupsSupportsPrimaryBackupAndFiveTuple(t *testing.T) {
 	groups, err := CompileWANGroups([]map[string]any{
-		{"id": "failover", "members": []any{"wan0", "wan1"}, "load_balance": map[string]any{"mode": "primary_backup"}},
+		{
+			"id": "failover", "name": "家庭宽带主备",
+			"members":        []any{"wan0", "wan1", "wan2"},
+			"primary_member": "wan2", "backup_member": "wan0",
+			"load_balance": map[string]any{"mode": "primary_backup"},
+		},
 		{"id": "ecmp", "members": []any{"wan0", "wan1"}, "load_balance": map[string]any{"mode": "five_tuple"}},
 	})
 	if err != nil {
@@ -337,6 +342,49 @@ func TestCompileWANGroupsSupportsPrimaryBackupAndFiveTuple(t *testing.T) {
 	}
 	if groups[0].Mode != WANGroupPrimaryBackup || groups[1].Mode != WANGroupFiveTuple {
 		t.Fatalf("WAN group modes = %#v", groups)
+	}
+	if groups[0].ID != "failover" || groups[0].PrimaryMember != "wan2" || groups[0].BackupMember != "wan0" {
+		t.Fatalf("primary/backup fields = %#v", groups[0])
+	}
+	if got := strings.Join(groups[0].Members, ","); got != "wan2,wan0,wan1" {
+		t.Fatalf("primary/backup member order = %q", got)
+	}
+}
+
+func TestCompileWANGroupsPrimaryBackupFallsBackToLegacyMemberOrder(t *testing.T) {
+	groups, err := CompileWANGroups([]map[string]any{{
+		"id": "legacy-failover", "members": []any{"wan1", "wan0"}, "mode": "primary_backup",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := groups[0]
+	if group.PrimaryMember != "wan1" || group.BackupMember != "wan0" || strings.Join(group.Members, ",") != "wan1,wan0" {
+		t.Fatalf("legacy primary/backup group = %#v", group)
+	}
+}
+
+func TestCompileWANGroupsRejectsDuplicateMembers(t *testing.T) {
+	for _, item := range []map[string]any{
+		{"id": "duplicate-members", "members": []any{"wan0", "wan0", "wan1"}},
+		{"id": "duplicate-wan-members", "wan_members": []any{map[string]any{"id": "wan0"}, map[string]any{"id": "wan0"}, map[string]any{"id": "wan1"}}},
+	} {
+		_, err := CompileWANGroups([]map[string]any{item})
+		if err == nil || !strings.Contains(err.Error(), "duplicate member") {
+			t.Fatalf("error = %v, want duplicate member for %#v", err, item)
+		}
+	}
+}
+
+func TestCompileWANGroupsAcceptsMirroredMemberCompatibilityFields(t *testing.T) {
+	groups, err := CompileWANGroups([]map[string]any{{
+		"id": "mirrored", "wan_members": []any{"wan0", "wan1"}, "members": []any{"wan0", "wan1"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(groups[0].Members, ","); got != "wan0,wan1" {
+		t.Fatalf("members = %q", got)
 	}
 }
 
@@ -347,6 +395,18 @@ func TestCompileWANGroupsRejectsFiveTupleWeightsAndUnknownMembers(t *testing.T) 
 	} {
 		if _, err := CompileWANGroups([]map[string]any{item}); err == nil {
 			t.Fatalf("invalid WAN group accepted: %#v", item)
+		}
+	}
+}
+
+func TestCompileWANGroupsRejectsInvalidPrimaryBackupMembers(t *testing.T) {
+	for _, item := range []map[string]any{
+		{"id": "unknown-primary", "members": []any{"wan0", "wan1"}, "mode": "primary_backup", "primary_member": "wan2", "backup_member": "wan1"},
+		{"id": "unknown-backup", "members": []any{"wan0", "wan1"}, "mode": "primary_backup", "primary_member": "wan0", "backup_member": "wan2"},
+		{"id": "same-primary-backup", "members": []any{"wan0", "wan1"}, "mode": "primary_backup", "primary_member": "wan0", "backup_member": "wan0"},
+	} {
+		if _, err := CompileWANGroups([]map[string]any{item}); err == nil {
+			t.Fatalf("invalid primary/backup WAN group accepted: %#v", item)
 		}
 	}
 }
@@ -378,13 +438,16 @@ func TestBindRoutePolicyPathsResolvesDirectWANAndPreservesGroups(t *testing.T) {
 		{ID: "grouped", Action: "route", Egress: "wan-primary"},
 	}
 	err := BindRoutePolicyPaths(policies, map[string]WANPath{
-		"wan0": {VPPInterface: "lyroute-eth1", NextHop: "198.51.100.1"},
+		"wan0": {VPPInterface: "lyroute-eth1", NextHop: "198.51.100.1", RuntimeToken: "pppoe:1:10.67.0.10:10.67.0.1"},
 	}, []WANGroup{{ID: "wan-primary"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if policies[0].Path == nil || policies[0].Path.VPPInterface != "lyroute-eth1" || policies[0].Path.NextHop != "198.51.100.9" {
 		t.Fatalf("direct route path = %#v", policies[0].Path)
+	}
+	if policies[0].Path.RuntimeToken != "pppoe:1:10.67.0.10:10.67.0.1" {
+		t.Fatalf("direct route runtime token = %q", policies[0].Path.RuntimeToken)
 	}
 	if policies[1].Path != nil {
 		t.Fatalf("group route unexpectedly has direct path %#v", policies[1].Path)

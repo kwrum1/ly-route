@@ -12,18 +12,19 @@ if [ ! -f "$artifact" ]; then
 fi
 
 if [ "${LY_ROUTE_ROOTFS_REQUIRED_PACKAGES+x}" != x ]; then
-  LY_ROUTE_ROOTFS_REQUIRED_PACKAGES="libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply ly-route-vpp-smart-qos ly-route-vpp-security-guard smartdns ly-route-dns-vpp-proxy xray openssh-server sudo"
+  LY_ROUTE_ROOTFS_REQUIRED_PACKAGES="libvppinfra vpp vpp-plugin-core vpp-plugin-dpdk ly-route-vpp-apply ly-route-vpp-pppoe-client ly-route-vpp-smart-qos ly-route-vpp-security-guard ly-route-vpp-dns-intercept ly-route-vpp-pre-nat-route smartdns ly-route-dns-vpp-proxy xray openssh-server sudo"
 fi
 required_files_defaulted=false
 if [ "${LY_ROUTE_ROOTFS_REQUIRED_FILES+x}" != x ]; then
   required_files_defaulted=true
-  LY_ROUTE_ROOTFS_REQUIRED_FILES="/usr/bin/vpp /usr/bin/vppctl /usr/bin/sudo /usr/sbin/ipset /usr/lib/systemd/system/vpp.service /usr/lib/x86_64-linux-gnu/vpp_plugins/abf_plugin.so /usr/lib/ly-route/ly-route-control /usr/lib/ly-route/vpp-apply /usr/lib/ly-route/vpp-apply-default /usr/lib/ly-route/policy-routing-apply-default /usr/lib/ly-route/tune-vpp.sh /usr/lib/ly-route/dns-ipset-sync.py /usr/lib/ly-route/active-dpdk-state.py /usr/sbin/smartdns /usr/bin/xray /usr/sbin/sshd /etc/ssh/sshd_config /etc/vpp/startup.conf /etc/smartdns/smartdns.conf /etc/xray/config.json /etc/ly-route/default-config.json /etc/ly-route/runtime.env /etc/ly-route/vpp-command-map.json /var/lib/ly-route/vpp/operations.json /etc/kea/kea-dhcp4.conf /etc/nginx/conf.d/ly-route-admin.conf /opt/ly-route/admin/index.html /opt/ly-route/admin/app.js /opt/ly-route/admin/shell.js /opt/ly-route/admin/styles.css /opt/ly-route/admin/capabilities.json /etc/systemd/network/10-ethernet-dhcp.network /etc/systemd/system/multi-user.target.wants/vpp.service /etc/systemd/system/multi-user.target.wants/ssh.service /etc/systemd/system/multi-user.target.wants/nginx.service /etc/systemd/system/multi-user.target.wants/ly-route-control-api.service /etc/systemd/system/multi-user.target.wants/kea-dhcp4-server.service /etc/systemd/system/multi-user.target.wants/ly-route-vpp-tune.service /etc/systemd/system/timers.target.wants/ly-route-dns-ipset-sync.timer /etc/systemd/system/kea-dhcp4-server.service.d/ly-route-firstboot.conf /etc/systemd/system/ly-route-control-api.service /etc/systemd/system/ly-route-runtime-check.service /etc/systemd/system/ly-route-vpp-apply.service /etc/systemd/system/ly-route-vpp-tune.service /etc/systemd/system/ly-route-dns-ipset-sync.service /etc/systemd/system/ly-route-dns-ipset-sync.timer /etc/systemd/system/vpp.service.d/10-ly-route-tuning.conf /etc/systemd/system/ly-route-policy-routing.service /etc/systemd/system/ly-route-recovery.service"
+  LY_ROUTE_ROOTFS_REQUIRED_FILES="/usr/bin/vpp /usr/bin/vppctl /usr/bin/sudo /usr/sbin/ipset /usr/lib/systemd/system/vpp.service /usr/lib/ly-route/ly-route-control /usr/lib/ly-route/ly-route-pppoe-client /usr/lib/ly-route/vpp-apply /usr/lib/ly-route/vpp-apply-default /usr/lib/ly-route/policy-routing-apply-default /usr/lib/ly-route/tune-vpp.sh /usr/lib/ly-route/dns-ipset-sync.py /usr/lib/ly-route/active-dpdk-state.py /usr/sbin/smartdns /usr/bin/xray /usr/sbin/sshd /etc/ssh/sshd_config /etc/vpp/startup.conf /etc/smartdns/smartdns.conf /etc/xray/config.json /etc/ly-route/default-config.json /etc/ly-route/runtime.env /etc/ly-route/vpp-command-map.json /var/lib/ly-route/vpp/operations.json /etc/kea/kea-dhcp4.conf /etc/nginx/conf.d/ly-route-admin.conf /opt/ly-route/admin/index.html /opt/ly-route/admin/app.js /opt/ly-route/admin/shell.js /opt/ly-route/admin/styles.css /opt/ly-route/admin/capabilities.json /etc/systemd/network/10-ethernet-dhcp.network /etc/systemd/system/multi-user.target.wants/vpp.service /etc/systemd/system/multi-user.target.wants/ssh.service /etc/systemd/system/multi-user.target.wants/nginx.service /etc/systemd/system/multi-user.target.wants/ly-route-control-api.service /etc/systemd/system/kea-dhcp4-server.service /etc/systemd/system/ly-route-vpp-tune.service /etc/systemd/system/ly-route-policy-routing.service /etc/systemd/system/timers.target.wants/ly-route-dns-ipset-sync.timer /etc/systemd/system/kea-dhcp4-server.service.d/ly-route-firstboot.conf /etc/systemd/system/ly-route-control-api.service /etc/systemd/system/ly-route-runtime-check.service /etc/systemd/system/ly-route-vpp-apply.service /etc/systemd/system/ly-route-vpp-tune.service /etc/systemd/system/ly-route-dns-ipset-sync.service /etc/systemd/system/ly-route-dns-ipset-sync.timer /etc/systemd/system/vpp.service.d/10-ly-route-tuning.conf /etc/systemd/system/ly-route-policy-routing.service /etc/systemd/system/ly-route-recovery.service"
 fi
 : "${LY_ROUTE_ROOTFS_LIVE_REQUIRED:=false}"
 
 if [ "$required_files_defaulted" = true ]; then
-  LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/x86_64-linux-gnu/vpp_plugins/dpdk_plugin.so /usr/lib/x86_64-linux-gnu/vpp_plugins/ly_route_security_guard_plugin.so"
-  LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/x86_64-linux-gnu/vpp_plugins/linux_cp_plugin.so /usr/lib/x86_64-linux-gnu/vpp_plugins/linux_nl_plugin.so"
+  multiarch=${LY_ROUTE_ROOTFS_MULTIARCH:-x86_64-linux-gnu}
+  LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/$multiarch/vpp_plugins/abf_plugin.so /usr/lib/$multiarch/vpp_plugins/dpdk_plugin.so /usr/lib/$multiarch/vpp_plugins/af_packet_plugin.so /usr/lib/$multiarch/vpp_plugins/ly_route_pppoe_client_plugin.so /usr/lib/$multiarch/vpp_plugins/ly_route_smart_qos_plugin.so /usr/lib/$multiarch/vpp_plugins/ly_route_security_guard_plugin.so /usr/lib/$multiarch/vpp_plugins/ly_route_dns_intercept_plugin.so /usr/lib/$multiarch/vpp_plugins/ly_route_pre_nat_route_plugin.so"
+  LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/$multiarch/vpp_plugins/linux_cp_plugin.so /usr/lib/$multiarch/vpp_plugins/linux_nl_plugin.so"
   LY_ROUTE_ROOTFS_REQUIRED_FILES="$LY_ROUTE_ROOTFS_REQUIRED_FILES /usr/lib/ly-route/ly-route-dns-vpp-proxy /usr/lib/ly-route/ly-route-dns-vpp-proxy-v6 /usr/lib/ly-route/dns-vpp-v6-namespace-apply /usr/lib/ly-route/dns-vpp-session-apply /etc/ly-route/vcl.conf /etc/ly-route/vcl-v6.conf /etc/systemd/system/ly-route-dns-vpp-v6-namespace.service /etc/systemd/system/ly-route-dns-vpp-session.service /etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf /etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf /usr/lib/systemd/system/ly-route-dns-vpp-proxy.service /usr/lib/systemd/system/ly-route-dns-vpp-proxy-v6.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-v6-namespace.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-session.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-proxy.service /etc/systemd/system/multi-user.target.wants/ly-route-dns-vpp-proxy-v6.service"
 fi
 
@@ -39,7 +40,7 @@ if [ -f "$artifact.sha256" ]; then
   (cd "$artifact_dir" && sha256sum -c "$artifact_name.sha256")
 fi
 
-if tar --use-compress-program="$compressor" -tf "$artifact" | grep -Eiq 'af_packet|no-zero-copy|native-driver-auto|generic[-_]?xdp|generic[-_]?skb'; then
+if tar --use-compress-program="$compressor" -tf "$artifact" | grep -Eiq 'no-zero-copy|native-driver-auto|generic[-_]?xdp|generic[-_]?skb'; then
   echo "rootfs artifact contains a forbidden dataplane path" >&2
   exit 1
 fi
@@ -48,11 +49,9 @@ tmp=$(mktemp -d)
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
 
-if [ -n "$LY_ROUTE_ROOTFS_REQUIRED_PACKAGES" ]; then
-  tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" ./var/lib/dpkg/status
-fi
+tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp"
+
 for file in $LY_ROUTE_ROOTFS_REQUIRED_FILES; do
-  tar --use-compress-program="$compressor" -xf "$artifact" -C "$tmp" ".${file}"
   if [ ! -e "$tmp$file" ] && [ ! -L "$tmp$file" ]; then
     echo "missing rootfs file: $file" >&2
     exit 1
@@ -71,11 +70,12 @@ if printf '%s' " $LY_ROUTE_ROOTFS_REQUIRED_FILES " | grep -q ' /usr/lib/ly-route
 fi
 if [ -f "$tmp/etc/ly-route/runtime.env" ]; then
   grep -q 'LY_ROUTE_ENABLE_SERVICE_RUNTIME=true' "$tmp/etc/ly-route/runtime.env"
+  grep -q '^LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=false$' "$tmp/etc/ly-route/runtime.env"
 fi
 if [ -f "$tmp/etc/ly-route/vpp-command-map.json" ]; then
   grep -q '"operations"' "$tmp/etc/ly-route/vpp-command-map.json"
 fi
-if grep -Eiq 'dpdk|af_packet|no-zero-copy|native-driver-auto|generic[-_]?xdp|generic[-_]?skb' \
+if grep -Eiq 'no-zero-copy|native-driver-auto|generic[-_]?xdp|generic[-_]?skb' \
   "$tmp/etc/ly-route/runtime.env" \
   "$tmp/etc/ly-route/default-config.json" \
   "$tmp/etc/ly-route/vpp-command-map.json"; then
@@ -87,7 +87,8 @@ if [ -f "$tmp/etc/systemd/system/ly-route-control-api.service" ]; then
   grep -q 'After=network.target ly-route-firstboot.service ly-route-runtime-check.service' "$tmp/etc/systemd/system/ly-route-control-api.service"
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-policy-routing.service" ]; then
-  grep -q '/usr/lib/ly-route/policy-routing-apply-default' "$tmp/usr/lib/ly-route/policy-routing-apply-default"
+  grep -q '/usr/lib/ly-route/policy-routing-apply-default' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
+  test -x "$tmp/usr/lib/ly-route/policy-routing-apply-default"
   grep -q '^PartOf=vpp.service$' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
   grep -q 'ly-route-vpp-apply.service' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
   test -L "$tmp/etc/systemd/system/multi-user.target.wants/ly-route-policy-routing.service"
@@ -109,7 +110,7 @@ if [ -f "$tmp/etc/nginx/conf.d/ly-route-admin.conf" ]; then
   grep -q 'proxy_pass http://127.0.0.1:8080/api/v1/' "$tmp/etc/nginx/conf.d/ly-route-admin.conf"
 fi
 if [ -f "$tmp/opt/ly-route/admin/index.html" ]; then
-  grep -q 'Ly Route 管理控制台' "$tmp/opt/ly-route/admin/index.html"
+  grep -q 'Ly Route 出口网关' "$tmp/opt/ly-route/admin/index.html"
   if grep -q 'mock-api.js' "$tmp/opt/ly-route/admin/index.html"; then
     echo "production admin UI must not load mock-api.js" >&2
     exit 1

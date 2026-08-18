@@ -59,6 +59,69 @@ func TestProductConfigExportBindsManifestAndPayloadHash(t *testing.T) {
 	}
 }
 
+func TestConfigPackageHashIsStableAcrossBrowserJSONNormalization(t *testing.T) {
+	payload := ConfigPackagePayload{
+		SchemaVersion: ConfigPackageSchemaVersion,
+		ContentType:   configContentType,
+		Product:       product.Gateway().ID(),
+		DeviceMode:    "gateway",
+		Resources: map[string][]json.RawMessage{
+			"wan_link": {json.RawMessage(`{ "name": "WAN", "id": "wan-1", "enabled": true }`)},
+		},
+	}
+	browserNormalized := payload
+	browserNormalized.Resources = map[string][]json.RawMessage{
+		"wan_link": {json.RawMessage(`{"enabled":true,"id":"wan-1","name":"WAN"}`)},
+	}
+	if hashConfigPayload(payload) != hashConfigPayload(browserNormalized) {
+		t.Fatalf("hash must not depend on browser JSON formatting: %q != %q", hashConfigPayload(payload), hashConfigPayload(browserNormalized))
+	}
+}
+
+func TestProductConfigImportAcceptsItsOwnExport(t *testing.T) {
+	server, _, cookie := productTestServer(t, product.Gateway())
+	exported := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/config/export", "", cookie)
+	if exported.Code != http.StatusOK {
+		t.Fatalf("export status = %d: %s", exported.Code, exported.Body.String())
+	}
+	var body struct {
+		PackageManifest ConfigPackageManifest `json:"package_manifest"`
+		Payload         ConfigPackagePayload  `json:"payload"`
+	}
+	decode(t, exported, &body)
+	response := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/config/import", configImportJSON(t, ConfigImportRequest{
+		DryRun:          true,
+		PackageManifest: body.PackageManifest,
+		Payload:         body.Payload,
+	}), cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"dry_run"`) {
+		t.Fatalf("self-export import dry-run = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProductConfigImportAcceptsExportedRedactionMetadataDuringDryRun(t *testing.T) {
+	server, _, cookie := productTestServer(t, product.Gateway())
+	payload := ConfigPackagePayload{
+		SchemaVersion: ConfigPackageSchemaVersion,
+		ContentType:   configContentType,
+		Product:       product.Gateway().ID(),
+		DeviceMode:    "gateway",
+		Resources: map[string][]json.RawMessage{
+			"wan_link": {json.RawMessage(`{"id":"wan-pppoe","credential_ref":"local-secret:pppoe:wan-pppoe","pppoe_password_redacted":"redacted"}`)},
+			"proxy_node": {json.RawMessage(`{"id":"proxy-node","credential_ref":"local-secret:proxy_node:proxy-node:secret","secret_redacted":"redacted","uri_redacted":"redacted"}`)},
+		},
+	}
+
+	response := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/config/import", configImportJSON(t, ConfigImportRequest{
+		DryRun:          true,
+		PackageManifest: manifestForPayload(payload),
+		Payload:         payload,
+	}), cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"dry_run"`) {
+		t.Fatalf("redacted config import dry-run = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestProductConfigImportRejectsCrossProductDuringDryRunWithoutWrites(t *testing.T) {
 	// Given
 	server, store, cookie := productTestServer(t, product.Orchestrator())

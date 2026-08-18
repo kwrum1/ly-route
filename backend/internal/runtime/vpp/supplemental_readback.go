@@ -90,37 +90,12 @@ func verifySupplementalOperation(operation Operation, results []VPPCTLCommandRes
 }
 
 func verifyDNSTransparentReadback(interception DNSTransparentInterception, results []VPPCTLCommandResult) error {
-	v4Policy := stableID("dns-transparent-v4", 9000, 999)
-	v6Policy := stableID("dns-transparent-v6", 9000, 999)
-	v4Output, err := commandOutputLast(results, fmt.Sprintf("show abf policy %d", v4Policy))
+	interceptOutput, err := commandOutputLast(results, "show ly-route dns-intercept")
 	if err != nil {
 		return err
 	}
-	if _, present := observedABFACLID(v4Output); !present {
-		return snapshotDecodeError("transparent DNS IPv4 ABF policy %d is absent", v4Policy)
-	}
-	v6Output, err := commandOutputLast(results, fmt.Sprintf("show abf policy %d", v6Policy))
-	if err != nil {
-		return err
-	}
-	if _, present := observedABFACLID(v6Output); !present {
-		return snapshotDecodeError("transparent DNS IPv6 ABF policy %d is absent", v6Policy)
-	}
-	attachments, err := commandOutputLast(results, "show abf attach "+interception.LANInterface)
-	if err != nil {
-		return err
-	}
-	if !routePolicyAttached(attachments, v4Policy) || !routePolicyAttached(attachments, v6Policy) {
-		return snapshotDecodeError("transparent DNS ABF attachment readback is incomplete for %s", interception.LANInterface)
-	}
-	acls, err := commandOutputLast(results, "show acl-plugin acl")
-	if err != nil {
-		return err
-	}
-	for _, tag := range []string{"ly-route-dns-transparent-v4", "ly-route-dns-transparent-v6"} {
-		if !strings.Contains(acls, tag) {
-			return snapshotDecodeError("transparent DNS ACL tag %s is absent", tag)
-		}
+	if !strings.Contains(interceptOutput, "enabled 1") || !strings.Contains(interceptOutput, interception.LANInterface) {
+		return snapshotDecodeError("transparent DNS pre-NAT interception is absent for %s", interception.LANInterface)
 	}
 	v4FIB, err := commandOutputLast(results, fmt.Sprintf("show ip fib table %d", dnsIPv4TableID))
 	if err != nil {
@@ -130,16 +105,6 @@ func verifyDNSTransparentReadback(interception DNSTransparentInterception, resul
 		prefix = canonicalFIBPrefix(prefix)
 		if !strings.Contains(v4FIB, prefix) {
 			return snapshotDecodeError("transparent DNS IPv4 route %s is absent", prefix)
-		}
-	}
-	v6FIB, err := commandOutputLast(results, fmt.Sprintf("show ip6 fib table %d", dnsIPv6TableID))
-	if err != nil {
-		return err
-	}
-	for _, prefix := range append([]string{"::/0"}, interception.IPv6Prefixes...) {
-		prefix = canonicalFIBPrefix(prefix)
-		if !strings.Contains(v6FIB, prefix) {
-			return snapshotDecodeError("transparent DNS IPv6 route %s is absent", prefix)
 		}
 	}
 	return nil
@@ -160,12 +125,13 @@ func verifyDNSServiceNetworkReadback(network DNSServiceNetwork, results []VPPCTL
 	if err := requireSupplementalIdentity(results, "show ip fib table "+strconv.Itoa(network.TableID), strconv.Itoa(network.TableID)); err != nil {
 		return err
 	}
-	natInterfaces, err := commandOutput(results, "show nat44 interfaces")
-	if err != nil {
-		return err
+	natInterfaces, natErr := commandOutput(results, "show nat44 interfaces")
+	natEIInterfaces, natEIErr := commandOutput(results, "show nat44 ei interfaces")
+	if natErr != nil && natEIErr != nil {
+		return natErr
 	}
-	if strings.Contains(natInterfaces, network.VPPInterface) {
-		return snapshotDecodeError("DNS service interface %q must not be a NAT44 input interface", network.VPPInterface)
+	if !strings.Contains(natInterfaces, network.VPPInterface+" in") && !strings.Contains(natEIInterfaces, network.VPPInterface+" in") {
+		return snapshotDecodeError("DNS service interface %q is missing its NAT44 input role", network.VPPInterface)
 	}
 	return requireSupplementalIdentity(results, "show tap", network.VPPInterface)
 }
@@ -215,12 +181,23 @@ func verifyProxySteeringReadback(steering proxy.VPPSteeringInstruction, results 
 		if err := requireSupplementalIdentity(results, "show ip fib table "+strconv.Itoa(network.OutboundTableID), strconv.Itoa(network.OutboundTableID)); err != nil {
 			return err
 		}
-		natInterfaces, err := commandOutput(results, "show nat44 interfaces")
-		if err != nil {
-			return err
-		}
-		if strings.Contains(natInterfaces, network.EgressVPPInterface) {
-			return snapshotDecodeError("proxy service egress %q must not be a NAT44 input interface", network.EgressVPPInterface)
+		// The proxy egress is a NAT inside interface in full-cone (NAT44 EI)
+		// mode. Endpoint-dependent mode deliberately leaves it detached during
+		// the VPP phase because the Linux service artifact attaches it after the
+		// gateway transaction. Infer the expected behavior from the typed show
+		// command emitted by this operation instead of hard-coding one NAT mode.
+		if natEIInterfaces, err := commandOutput(results, "show nat44 ei interfaces"); err == nil {
+			if !strings.Contains(natEIInterfaces, network.EgressVPPInterface+" in") {
+				return snapshotDecodeError("proxy service egress %q is missing its NAT44 EI input role", network.EgressVPPInterface)
+			}
+		} else {
+			natInterfaces, natErr := commandOutput(results, "show nat44 interfaces")
+			if natErr != nil {
+				return err
+			}
+			if strings.Contains(natInterfaces, network.EgressVPPInterface) {
+				return snapshotDecodeError("proxy service egress %q must not be a NAT44 input interface during gateway apply", network.EgressVPPInterface)
+			}
 		}
 		return requireSupplementalIdentity(results, "show tap", network.IngressVPPInterface)
 	default:

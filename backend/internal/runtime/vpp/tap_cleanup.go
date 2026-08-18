@@ -9,13 +9,12 @@ import (
 	"strings"
 )
 
-// CleanupManagedTAPs removes only extra copies of Ly Route's DNS/proxy TAPs.
-// It runs before a gateway snapshot so an interrupted replay cannot make a
-// valid configuration unreadable through duplicate interface names. One
-// existing copy is deliberately retained; the normal apply replay can then
-// refresh it without causing a needless dataplane outage.
-func (a Adapter) CleanupManagedTAPs(ctx context.Context, plan Plan) error {
-	targets := managedTAPNames(plan)
+// CleanupManagedTAPs removes duplicate TAPs and orphaned Ly Route service
+// handoffs that are absent from both the persisted and desired plans. Keeping
+// both plans protects an active ABF path until its normal route lifecycle has
+// completed, while preventing deleted DNS or proxy services from accumulating
+// in VPP across configuration transactions.
+func (a Adapter) CleanupManagedTAPs(ctx context.Context, plans ...Plan) error {
 	if a.Client == nil {
 		return nil
 	}
@@ -24,7 +23,16 @@ func (a Adapter) CleanupManagedTAPs(ctx context.Context, plan Plan) error {
 		return fmt.Errorf("open TAP cleanup channel: %w", err)
 	}
 	defer channel.Close()
-	requestID := strings.TrimSpace(plan.RequestID)
+	requestID := ""
+	targets := make(map[string]struct{})
+	for _, plan := range plans {
+		if requestID == "" {
+			requestID = strings.TrimSpace(plan.RequestID)
+		}
+		for name := range managedTAPNames(plan) {
+			targets[name] = struct{}{}
+		}
+	}
 	reply, err := channel.Do(ctx, Operation{
 		Name:           "vpp.tap.cleanup",
 		RequestID:      requestID,
@@ -51,11 +59,7 @@ func (a Adapter) CleanupManagedTAPs(ctx context.Context, plan Plan) error {
 	if strings.TrimSpace(output) == "" {
 		return nil
 	}
-	type tapRecord struct {
-		index   int
-		matches []string
-	}
-	records := make([]tapRecord, 0)
+	records := make([]managedTAPRecord, 0)
 	for _, block := range tapInventoryBlocks(output) {
 		index, names, ok := parseTAPInventoryBlock(block)
 		if !ok {
@@ -71,36 +75,17 @@ func (a Adapter) CleanupManagedTAPs(ctx context.Context, plan Plan) error {
 			continue
 		}
 		sort.Strings(matches)
-		records = append(records, tapRecord{index: index, matches: matches})
+		records = append(records, managedTAPRecord{index: index, matches: matches})
 	}
-	// Keep one object only for names still present in the desired plan. Any
-	// Ly Route DNS/proxy TAP that is no longer desired is stale and is removed,
-	// even when it is the sole remaining copy.
-	keep := make(map[int]bool)
-	for target := range targets {
-		indices := make([]int, 0)
-		for _, record := range records {
-			if containsTAPName(record.matches, target) {
-				indices = append(indices, record.index)
-			}
-		}
-		if len(indices) > 0 {
-			sort.Ints(indices)
-			keep[indices[0]] = true
-		}
-	}
-	for _, record := range records {
-		if keep[record.index] {
-			continue
-		}
+	for _, index := range managedTAPDeleteIndices(records, targets) {
 		_, deleteErr := channel.Do(ctx, Operation{
 			Name:           "vpp.tap.cleanup.delete",
 			RequestID:      requestID,
-			Resource:       strconv.Itoa(record.index),
-			VPPCtlCommands: []string{fmt.Sprintf("delete tap sw_if_index %d", record.index)},
+			Resource:       strconv.Itoa(index),
+			VPPCtlCommands: []string{fmt.Sprintf("delete tap sw_if_index %d", index)},
 		})
 		if deleteErr != nil {
-			return fmt.Errorf("remove stale TAP sw_if_index %d: %w", record.index, deleteErr)
+			return fmt.Errorf("remove stale managed TAP sw_if_index %d: %w", index, deleteErr)
 		}
 	}
 	return nil
@@ -133,7 +118,49 @@ func managedTAPNames(plan Plan) map[string]struct{} {
 		add(network.IngressVPPInterface, network.IngressHostInterface,
 			network.EgressVPPInterface, network.EgressHostInterface)
 	}
+	// Route policies can reference a proxy service chain directly even when
+	// the compiled proxy steering list is not persisted in the gateway plan.
+	// Preserve those TAPs during reconciliation; deleting the ingress TAP here
+	// makes the subsequent ABF next-hop command fail with VPP's misleading
+	// "unknown input"/Invalid policy response.
+	for _, route := range plan.Policy.RoutePolicies {
+		if route.Path != nil {
+			add(route.Path.VPPInterface)
+		}
+	}
+	for _, group := range plan.Policy.WANGroups {
+		for _, path := range group.Paths {
+			add(path.VPPInterface)
+		}
+	}
 	return targets
+}
+
+type managedTAPRecord struct {
+	index   int
+	matches []string
+}
+
+func managedTAPDeleteIndices(records []managedTAPRecord, targets map[string]struct{}) []int {
+	sort.Slice(records, func(i, j int) bool { return records[i].index < records[j].index })
+	seen := make(map[string]struct{})
+	deletes := make([]int, 0)
+	for _, record := range records {
+		keep := false
+		for _, name := range record.matches {
+			if _, wanted := targets[name]; !wanted {
+				continue
+			}
+			if _, exists := seen[name]; !exists {
+				seen[name] = struct{}{}
+				keep = true
+			}
+		}
+		if !keep {
+			deletes = append(deletes, record.index)
+		}
+	}
+	return deletes
 }
 
 var tapInventoryBlockPattern = regexp.MustCompile(`(?m)^Interface:\s`)

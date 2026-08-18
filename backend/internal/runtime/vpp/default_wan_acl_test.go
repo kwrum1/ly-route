@@ -22,4 +22,7 @@ func TestBuildOperationsDefaultWANDenyNeverAttachesToLAN(t *testing.T) {
 	if !strings.Contains(commands, "intfc lyroute-eth2") || strings.Contains(commands, "intfc lyroute-eth1") {
 		t.Fatalf("default WAN deny attachment = %q", commands)
 	}
+	if !strings.Contains(commands, "set interface input acl intfc lyroute-eth2") || strings.Contains(commands, "set interface output acl intfc lyroute-eth2") {
+		t.Fatalf("default WAN deny direction = %q", commands)
+	}
 }

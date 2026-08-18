@@ -43,9 +43,31 @@ func (channel vppctlChannel) doSecurityGenerationLifecycle(ctx context.Context, 
 		if err != nil {
 			return Reply{}, err
 		}
-		attached, err := channel.runServiceChainCommands(ctx, operation,
-			fmt.Sprintf("set acl-plugin interface %s %s acl %d", group.Interface, group.Direction, aclID),
-			fmt.Sprintf("show acl-plugin acl index %d", aclID), "show acl-plugin interface", "show interface")
+		inventory, err := channel.runServiceChainCommands(ctx, operation, "show acl-plugin interface", "show interface")
+		if err != nil {
+			return Reply{}, err
+		}
+		existingACLs := securityACLInterfaceIDs(
+			resultStdoutLast(inventory, "show acl-plugin interface"),
+			resultStdoutLast(inventory, "show interface"),
+			group.Interface,
+			group.Direction,
+		)
+		attachCommands := []string{fmt.Sprintf("set acl-plugin interface %s %s acl %d", group.Interface, group.Direction, aclID)}
+		// ACL-plugin stops at the first matching rule across the attached list.
+		// Keep security policy ahead of QoS/classification ACLs while preserving
+		// every pre-existing attachment and its relative order.
+		for _, existingID := range existingACLs {
+			if existingID == aclID {
+				continue
+			}
+			attachCommands = append(attachCommands,
+				fmt.Sprintf("set acl-plugin interface %s %s acl %d del", group.Interface, group.Direction, existingID),
+				fmt.Sprintf("set acl-plugin interface %s %s acl %d", group.Interface, group.Direction, existingID),
+			)
+		}
+		attachCommands = append(attachCommands, fmt.Sprintf("show acl-plugin acl index %d", aclID), "show acl-plugin interface", "show interface")
+		attached, err := channel.runServiceChainCommands(ctx, operation, attachCommands...)
 		if err != nil {
 			return Reply{}, err
 		}
@@ -320,13 +342,31 @@ func verifySecurityInterfaceACL(group SecurityInterfaceACL, id int, results []VP
 			actual = append(actual, match[1])
 		}
 	}
-	if strings.Join(actual, "\n") != strings.Join(expected, "\n") {
+	if strings.Join(normalizeSecurityACLRules(actual), "\n") != strings.Join(normalizeSecurityACLRules(expected), "\n") {
 		return snapshotDecodeError("security ACL generation %q rules do not match desired order", group.Interface)
 	}
 	if !securityACLInterfaceAttached(resultStdoutLast(results, "show acl-plugin interface"), resultStdoutLast(results, "show interface"), group.Interface, group.Direction, id) {
 		return snapshotDecodeError("security ACL generation %q is not attached %s", group.Interface, group.Direction)
 	}
 	return nil
+}
+
+func normalizeSecurityACLRules(rules []string) []string {
+	normalized := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		fields := strings.Fields(rule)
+		for index := 0; index+1 < len(fields); index++ {
+			if fields[index] != "sport" && fields[index] != "dport" {
+				continue
+			}
+			parts := strings.Split(fields[index+1], "-")
+			if len(parts) == 2 && parts[0] == parts[1] {
+				fields[index+1] = parts[0]
+			}
+		}
+		normalized = append(normalized, strings.Join(fields, " "))
+	}
+	return normalized
 }
 
 func verifySecurityMACIP(group SecurityMACIPACL, id int, results []VPPCTLCommandResult) error {

@@ -33,6 +33,16 @@ func TestDecodeServiceChainReadback_accepts_stock_attachment_format(t *testing.T
 	}
 }
 
+func TestTaggedServiceChainACLIDsAcceptsStockVPPHeader(t *testing.T) {
+	output := `acl-index 2 count 1 tag {ly-route-flow_30}
+          0: ipv4 permit src 192.168.50.102/32 dst 0.0.0.0/0 proto 6 sport 0-65535 dport 0-65535
+`
+	ids := taggedServiceChainACLIDs(output, "ly-route-flow_30")
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("tagged ACL IDs = %#v, want [2]", ids)
+	}
+}
+
 func TestDecodeServiceChainReadback_rejects_wrong_observed_acl(t *testing.T) {
 	tests := []struct {
 		name       string

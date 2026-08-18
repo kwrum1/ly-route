@@ -31,7 +31,7 @@ func BuildServiceChainOperations(requestID string, chain orchestrator.ServiceCha
 	}
 	interfaces := make(map[string]string, len(attachments))
 	for _, attachment := range attachments {
-		dpdkIdentityApproved := attachment.Mode == NativeModeDPDKVFIO && (decimalIdentifierSafe(attachment.IOMMUGroup) || attachment.IOMMUGroup == "noiommu") ||
+		dpdkIdentityApproved := attachment.Mode == NativeModeDPDKVFIO && decimalIdentifierSafe(attachment.IOMMUGroup) ||
 			attachment.Mode == NativeModeDPDKUIO && attachment.IOMMUGroup == "none"
 		approvedTier := (attachment.Tier == "" || attachment.Tier == DataplaneTierNative) && approvedNativeMode(attachment.Hook, attachment.Mode) ||
 			attachment.Tier == DataplaneTierDPDK && attachment.Hook == NativeHookDPDK && pciAddressSafe(attachment.PCIAddress) && dpdkIdentityApproved

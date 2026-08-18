@@ -17,11 +17,12 @@ On pull requests and `main`, the workflow verifies the source and uploads:
 On a `v*` tag, the release job also publishes these files to GitHub Releases,
 creates a combined `SHA256SUMS`, and emits build provenance attestations.
 
-## Build Gates
+## Build Stages
 
-The verification job runs the frontend bundle build, all Go tests, product
-builder contracts, rootfs scaffold validation, shell syntax checks, and a
-private-material scan. Artifact jobs run only after this gate passes.
+Pull requests run only the fast source gate (`bash scripts/ci-verify.sh`). It
+checks whitespace, shell syntax, and Go compilation without building a rootfs,
+ISO, VPP packages, or release artifacts. Artifact jobs run only on the main
+branch, tags, or an explicit release dispatch, after the fast gate passes.
 
 x86 uses FD.io VPP Debian packages. ARM64 uses the native GitHub ARM64 runner
 and builds VPP from the pinned source commit. The ARM checkout also fetches the

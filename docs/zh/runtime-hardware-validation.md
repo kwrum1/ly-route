@@ -1,10 +1,12 @@
 # 运行态与容器性能验证
 
+> 本文是功能批次和明确硬件任务的测试参考，不是日常开发门禁。热修复不需要等待容器全矩阵、性能或物理硬件；按[开发、热修复与验收流程](development-workflow.md)执行。
+
 语言：[English](../runtime-hardware-validation.md) | 简体中文
 
 本文档定义容器功能验收和性能回归。完整软件矩阵以[双产品全功能验收设计](container-network-validation.md)为准。仓库单元测试只能验证控制面和配置编译；Linux 容器网络必须验证 DNS/DHCP、路由/NAT、PPPoE、代理、QoS、服务链、故障恢复以及 PPPoE NAT/路由/64B 小包基准。真实硬件、驱动、温度和板卡行为不属于当前发布门禁。
 
-## 容器功能验收（发布前强制）
+## 容器功能验收（功能批次/发布前按需）
 
 - 在 Linux CI/测试机使用独立 network namespace、veth、bridge 和 macvlan/等价二层接口；macvlan 依赖 Linux 宿主，不在 Windows Docker Engine 上执行。
 - Gateway 拓扑至少包含：被测 rootfs/路由器、LAN 客户端、两个 WAN/互联网端、PPPoE 服务器、两个可区分的 DNS 上游、客户端私设外部 DNS、DHCP 测试端、代理固定节点与多个订阅候选、流量发生器和抓包点。

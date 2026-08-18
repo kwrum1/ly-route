@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -14,21 +15,21 @@ import (
 type NativeHook string
 
 const (
-	NativeHookAFXDP   NativeHook = "af_xdp"
-	NativeHookRDMA    NativeHook = "rdma"
-	NativeHookVMXNET3 NativeHook = "vmxnet3"
-	NativeHookDPDK    NativeHook = "dpdk"
+	NativeHookAFXDP    NativeHook = "af_xdp"
+	NativeHookAFPacket NativeHook = "af_packet"
+	NativeHookRDMA     NativeHook = "rdma"
+	NativeHookDPDK     NativeHook = "dpdk"
 )
 
 type NativeMode string
 
 const (
-	NativeModeZeroCopy    NativeMode = "zero_copy"
-	NativeModeRDMADV      NativeMode = "rdma_dv"
-	NativeModeVMXNET3VFIO NativeMode = "vmxnet3_vfio"
-	NativeModeCopy        NativeMode = "copy"
-	NativeModeDPDKVFIO    NativeMode = "vfio_pci"
-	NativeModeDPDKUIO     NativeMode = "uio_pci_generic"
+	NativeModeZeroCopy NativeMode = "zero_copy"
+	NativeModeRDMADV   NativeMode = "rdma_dv"
+	NativeModeCopy     NativeMode = "copy"
+	NativeModeAFPacket NativeMode = "linux_packet_socket"
+	NativeModeDPDKVFIO NativeMode = "vfio_pci"
+	NativeModeDPDKUIO  NativeMode = "uio_pci_generic"
 )
 
 type DataplaneTier string
@@ -40,8 +41,7 @@ const (
 
 func approvedNativeMode(hook NativeHook, mode NativeMode) bool {
 	return hook == NativeHookAFXDP && mode == NativeModeZeroCopy ||
-		hook == NativeHookRDMA && mode == NativeModeRDMADV ||
-		hook == NativeHookVMXNET3 && mode == NativeModeVMXNET3VFIO
+		hook == NativeHookRDMA && mode == NativeModeRDMADV
 }
 
 func proveNativeAttachment(attachment NativeAttachment) NativeAttachment {
@@ -52,7 +52,7 @@ func proveNativeAttachment(attachment NativeAttachment) NativeAttachment {
 func nativeAttachmentFingerprint(attachment NativeAttachment) string {
 	// Hook and mode already distinguish native from DPDK attachments. Keep the
 	// persisted fingerprint stable for pre-tier native receipts during upgrade.
-	digest := sha256.Sum256([]byte(strings.Join([]string{attachment.LinuxInterface, attachment.VPPInterface, string(attachment.Hook), string(attachment.Mode)}, "\x00")))
+	digest := sha256.Sum256([]byte(strings.Join([]string{attachment.LinuxInterface, attachment.VPPInterface, string(attachment.Hook), string(attachment.Mode), strings.ToLower(strings.TrimSpace(attachment.MACAddress))}, "\x00")))
 	return fmt.Sprintf("%x", digest)
 }
 
@@ -61,7 +61,6 @@ type ProofSource string
 const (
 	ProofSourceRuntimeProbe          ProofSource = "runtime_probe"
 	ProofSourceActiveRuntimeReadback ProofSource = "active_runtime_readback"
-	ProofSourceHardwarePreflight     ProofSource = "hardware_preflight"
 )
 
 type CapabilityProof struct {
@@ -69,6 +68,7 @@ type CapabilityProof struct {
 	Hook                    NativeHook    `json:"hook"`
 	Mode                    NativeMode    `json:"mode"`
 	VPPInterface            string        `json:"vpp_interface,omitempty"`
+	MACAddress              string        `json:"mac_address,omitempty"`
 	Source                  ProofSource   `json:"source"`
 	RuntimeVerified         bool          `json:"runtime_verified"`
 	Native                  bool          `json:"native"`
@@ -81,12 +81,12 @@ type CapabilityProof struct {
 	IOMMUGroup              string        `json:"iommu_group,omitempty"`
 	IOMMUProtected          bool          `json:"iommu_protected,omitempty"`
 	VFIOAvailable           bool          `json:"vfio_available,omitempty"`
-	VFIONoIOMMUAvailable    bool          `json:"vfio_no_iommu_available,omitempty"`
 	UIOPCIAvailable         bool          `json:"uio_pci_available,omitempty"`
 	HugepagesAvailable      bool          `json:"hugepages_available,omitempty"`
 	DPDKPluginAvailable     bool          `json:"dpdk_plugin_available,omitempty"`
 	HQoSAvailable           bool          `json:"hqos_available,omitempty"`
 	SmartQoSPluginAvailable bool          `json:"smart_qos_plugin_available,omitempty"`
+	AcceptanceOnly          bool          `json:"acceptance_only,omitempty"`
 }
 
 type NativeAssignment struct {
@@ -103,11 +103,13 @@ type NativePathRequest struct {
 	Assignments         []NativeAssignment   `json:"assignments"`
 	ReportPrerequisites []PrerequisiteResult `json:"report_prerequisites,omitempty"`
 	Now                 time.Time            `json:"-"`
+	AcceptanceAFPacket  bool                 `json:"-"`
 }
 
 type NativeAttachment struct {
 	LinuxInterface        string        `json:"linux_interface"`
 	VPPInterface          string        `json:"vpp_interface"`
+	MACAddress            string        `json:"mac_address,omitempty"`
 	Tier                  DataplaneTier `json:"tier,omitempty"`
 	Hook                  NativeHook    `json:"hook"`
 	Mode                  NativeMode    `json:"mode"`
@@ -200,7 +202,7 @@ func SelectNativePath(request NativePathRequest) (NativePath, error) {
 		runtimeProof := isRuntimeCapabilityProof(proof) && proof.RuntimeVerified && !proof.ObservedAt.IsZero()
 		freshProof := runtimeProof && !request.Now.IsZero() && !proof.ValidUntil.Before(request.Now) && !proof.ObservedAt.After(request.Now)
 		proofLifetime := proof.ValidUntil.Sub(proof.ObservedAt)
-		shortLivedProof := runtimeProof && proofLifetime > 0 && proofLifetime <= 10*time.Minute
+		validProofLifetime := runtimeProof && proofLifetime > 0
 		approvedMode := approvedNativeMode(proof.Hook, proof.Mode)
 		results = append(results,
 			prerequisite("interface_assigned", name, name != "", "data interface name is required"),
@@ -210,11 +212,14 @@ func SelectNativePath(request NativePathRequest) (NativePath, error) {
 			prerequisite("management_excluded", name, management != "" && (request.ManagementShared || name != management), "management interface is permanently excluded"),
 			prerequisite("runtime_capability_proof", name, runtimeProof, "runtime capability proof is required"),
 			prerequisite("fresh_runtime_proof", name, freshProof, "runtime capability proof is missing or stale"),
-			prerequisite("short_lived_runtime_proof", name, shortLivedProof, "runtime capability proof validity exceeds the allowed window"),
-			prerequisite("approved_native_mode", name, approvedMode, "hook and mode are not an approved VPP-native high-performance path"),
+			prerequisite("valid_runtime_proof_lifetime", name, validProofLifetime, "runtime capability proof validity must end after observation"),
+			prerequisite("approved_native_mode", name, approvedMode || acceptanceAFPacketProof(request.AcceptanceAFPacket, proof), "hook and mode are not an approved VPP-native high-performance path"),
 			prerequisite("native_hook", name, proof.Native, "proof does not identify a native hook"),
-			prerequisite("high_performance", name, proof.HighPerformance, "proof does not establish high-performance mode"),
+			prerequisite("high_performance", name, proof.HighPerformance || acceptanceAFPacketProof(request.AcceptanceAFPacket, proof), "proof does not establish high-performance mode"),
 		)
+		if acceptanceAFPacketProof(request.AcceptanceAFPacket, proof) {
+			results = append(results, prerequisite("af_packet_mac_address", name, hardwareAddressSafe(proof.MACAddress), "AF_PACKET attachment requires the current Linux interface MAC address"))
+		}
 		// Preserve the legacy attachment payload shape until a multi-candidate
 		// report opts this interface into explicit tier negotiation.
 		vppInterface := strings.TrimSpace(proof.VPPInterface)
@@ -224,6 +229,7 @@ func SelectNativePath(request NativePathRequest) (NativePath, error) {
 		attachments = append(attachments, proveNativeAttachment(NativeAttachment{
 			LinuxInterface: name,
 			VPPInterface:   vppInterface,
+			MACAddress:     strings.TrimSpace(proof.MACAddress),
 			Tier:           proof.Tier,
 			Hook:           proof.Hook,
 			Mode:           proof.Mode,
@@ -244,8 +250,6 @@ func isRuntimeCapabilityProof(proof CapabilityProof) bool {
 	switch proof.Source {
 	case ProofSourceRuntimeProbe, ProofSourceActiveRuntimeReadback:
 		return true
-	case ProofSourceHardwarePreflight:
-		return proof.Hook == NativeHookVMXNET3
 	default:
 		return false
 	}
@@ -305,7 +309,18 @@ func LoadNativePathRequestWithSharedManagement(path, management string, interfac
 		reportPrerequisites = append(reportPrerequisites, prerequisite("capability_report_interface_unique", name, proofCounts[name] <= 1, "runtime capability report contains duplicate interface entries"))
 		assignments = append(assignments, NativeAssignment{LinuxInterface: name, Explicit: true, Proof: proofs[name], Candidates: candidates[name]})
 	}
-	return NativePathRequest{ManagementInterface: strings.TrimSpace(management), ManagementShared: managementShared, Assignments: assignments, ReportPrerequisites: reportPrerequisites, Now: now}
+	return NativePathRequest{
+		ManagementInterface: strings.TrimSpace(management),
+		ManagementShared:    managementShared,
+		Assignments:         assignments,
+		ReportPrerequisites: reportPrerequisites,
+		Now:                 now,
+		AcceptanceAFPacket:  os.Getenv("LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE") == "true",
+	}
+}
+
+func acceptanceAFPacketProof(enabled bool, proof CapabilityProof) bool {
+	return enabled && proof.AcceptanceOnly && proof.Hook == NativeHookAFPacket && proof.Mode == NativeModeAFPacket && strings.EqualFold(strings.TrimSpace(proof.KernelDriver), "vmxnet3")
 }
 
 func interfaceNameSafe(name string) bool {
@@ -319,6 +334,19 @@ func interfaceNameSafe(name string) bool {
 		return false
 	}
 	return true
+}
+
+func hardwareAddressSafe(value string) bool {
+	hardwareAddress, err := net.ParseMAC(strings.TrimSpace(value))
+	if err != nil || len(hardwareAddress) != 6 || hardwareAddress[0]&1 != 0 {
+		return false
+	}
+	for _, octet := range hardwareAddress {
+		if octet != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func prerequisite(name, interfaceName string, passed bool, reason string) PrerequisiteResult {

@@ -11,6 +11,7 @@ modprobe vfio-pci >/dev/null 2>&1 || true
 
 network=/etc/ly-route/installed-network.json
 rows_file=/etc/ly-route/vfio-devices
+startup=/etc/vpp/startup.conf
 management_pci=
 pci_rows=
 if [ -r "$rows_file" ]; then
@@ -26,7 +27,11 @@ with open(sys.argv[1], encoding="utf-8") as source:
 management = document.get("management", {})
 print("management|" + str(management.get("pci", "")).strip())
 for interface in document.get("data_interfaces", []):
-    print("data|" + str(interface.get("pci", "")).strip())
+    selected = interface.get("selected")
+    if not isinstance(selected, dict):
+        continue
+    if selected.get("tier") == "vpp_dpdk" and selected.get("hook") == "dpdk":
+        print("data|" + str(interface.get("pci", "")).strip())
 PY
   ) || fail 'installer NIC mapping is invalid'
   management_pci=$(printf '%s\n' "$network_rows" | awk -F'|' '$1 == "management" {print $2; exit}')
@@ -37,7 +42,7 @@ else
 fi
 [ -n "$management_pci" ] || fail 'management PCI identity is missing'
 if [ -z "$pci_rows" ]; then
-  printf '%s\n' 'VPP ownership preflight: no data PCI identity is configured'
+  printf '%s\n' 'VPP ownership preflight: native path selected; Linux retains NIC drivers'
   exit 0
 fi
 
@@ -54,28 +59,6 @@ driver_name() {
   basename "$(readlink -f "/sys/bus/pci/devices/$device/driver" 2>/dev/null || true)"
 }
 
-is_virtual_vmxnet3() {
-  vmx_pci=$1
-  vmx_device=/sys/bus/pci/devices/$vmx_pci
-  [ -r "$vmx_device/vendor" ] || return 1
-  [ -r "$vmx_device/class" ] || return 1
-  [ "$(cat "$vmx_device/vendor" 2>/dev/null)" = 0x15ad ] || return 1
-  case "$(cat "$vmx_device/class" 2>/dev/null)" in
-    0x0200*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-is_pci_bridge() {
-  bridge_pci=$1
-  class_file=/sys/bus/pci/devices/$bridge_pci/class
-  [ -r "$class_file" ] || return 1
-  case "$(cat "$class_file" 2>/dev/null)" in
-    0x0604*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 check_group_viable() {
   pci=$1
   device=/sys/bus/pci/devices/$pci
@@ -84,55 +67,18 @@ check_group_viable() {
     group=$(basename "$(readlink -f "$group_link")")
     group_dir=/sys/kernel/iommu_groups/$group/devices
     [ -d "$group_dir" ] || fail "$pci has no readable IOMMU group $group"
-    virtual_vmxnet3=false
-    if is_virtual_vmxnet3 "$pci"; then
-      virtual_vmxnet3=true
-    fi
     for member in "$group_dir"/*; do
       [ -e "$member" ] || continue
       member_pci=$(basename "$member")
       [ "$member_pci" = "$pci" ] && continue
       member_driver=$(driver_name "$member_pci")
-      # VMware places VMXNET3 behind a virtual PCI root port. The root port
-      # is not a data-plane function and may be detached only on this path.
-      if [ "$virtual_vmxnet3" = true ] && is_pci_bridge "$member_pci"; then
-        continue
-      fi
       if ! is_selected "$member_pci" && [ -n "$member_driver" ]; then
         fail "$pci IOMMU group $group is shared by $member_pci ($member_driver)"
       fi
     done
     return 0
   fi
-  parameter=/sys/module/vfio/parameters/enable_unsafe_noiommu_mode
-  [ -r "$parameter" ] && [ "$(cat "$parameter" 2>/dev/null)" = Y ] || \
-    fail "$pci has no IOMMU group and VFIO_NOIOMMU is unavailable"
-}
-
-bind_group_bridges_for_virtual_vmxnet3() {
-  pci=$1
-  is_virtual_vmxnet3 "$pci" || return 0
-  device=/sys/bus/pci/devices/$pci
-  # ESXi can expose several virtual root ports in one IOMMU group. Only the
-  # direct parent of this VMXNET3 function participates in its ownership path;
-  # attempting to bind every empty sibling port returns EINVAL and used to
-  # abort the whole preflight.
-  parent_path=$(dirname "$(readlink -f "$device")")
-  parent_pci=$(basename "$parent_path")
-  is_pci_bridge "$parent_pci" || return 0
-  parent_driver=$(driver_name "$parent_pci")
-  if [ "$parent_driver" != vfio-pci ]; then
-    printf '%s\n' vfio-pci > "/sys/bus/pci/devices/$parent_pci/driver_override" || \
-      fail "$parent_pci cannot set vfio-pci driver override"
-    if [ -n "$parent_driver" ]; then
-      printf '%s\n' "$parent_pci" > "/sys/bus/pci/drivers/$parent_driver/unbind" || \
-        fail "$parent_pci cannot unbind $parent_driver"
-    fi
-    printf '%s\n' "$parent_pci" > /sys/bus/pci/drivers/vfio-pci/bind || \
-      fail "$parent_pci cannot bind vfio-pci"
-  fi
-  [ "$(driver_name "$parent_pci")" = vfio-pci ] || \
-    fail "$parent_pci bridge ownership is not vfio-pci"
+  fail "$pci has no isolated IOMMU group"
 }
 
 bind_one() {
@@ -165,7 +111,26 @@ for pci in $pci_rows; do
     break
   done
   [ -z "$iface" ] || ip link set dev "$iface" down 2>/dev/null || true
-  bind_group_bridges_for_virtual_vmxnet3 "$pci"
   bind_one "$pci"
   printf '%s\n' "VPP ownership prepared: ${iface:-pci} $pci"
 done
+
+[ -f "$startup" ] || fail 'VPP startup configuration is missing'
+sed -i '/^# BEGIN LY ROUTE DPDK$/,/^# END LY ROUTE DPDK$/d' "$startup"
+if grep -q 'plugin dpdk_plugin.so { disable }' "$startup"; then
+  sed -i 's/plugin dpdk_plugin\.so { disable }/plugin dpdk_plugin.so { enable }/' "$startup"
+else
+  fail 'VPP startup configuration does not declare the DPDK plugin'
+fi
+{
+  printf '\n# BEGIN LY ROUTE DPDK\n'
+  printf 'dpdk {\n'
+  for pci in $pci_rows; do
+    case "$pci" in
+      [0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f].[0-7]) ;;
+      *) fail "invalid selected DPDK PCI address: $pci" ;;
+    esac
+    printf '  dev %s\n' "$pci"
+  done
+  printf '}\n# END LY ROUTE DPDK\n'
+} >> "$startup"

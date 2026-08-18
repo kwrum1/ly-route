@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ly Route <ly-route@example.invalid>
+Date: Tue, 11 Aug 2026 16:45:00 +0800
+Subject: [PATCH] pppoe: refresh rewrites when reusing session interfaces
+
+VPP keeps neighbour and midchain adjacencies when a PPPoE hardware
+interface is returned to the free pool. Reusing that interface without
+refreshing its adjacencies leaves the previous PPPoE session ID in the
+cached Ethernet rewrite. Refresh every adjacency after rebinding the
+interface to the new session.
+
+---
+ src/plugins/pppoe/pppoe.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/src/plugins/pppoe/pppoe.c b/src/plugins/pppoe/pppoe.c
+index 0000000..0000000 100644
+--- a/src/plugins/pppoe/pppoe.c
++++ b/src/plugins/pppoe/pppoe.c
+@@ -254,6 +254,31 @@ pppoe_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
+   dpo_reset (&dpo);
+ }
+
++static adj_walk_rc_t
++pppoe_refresh_adj_cb (adj_index_t ai, void *ctx)
++{
++  vnet_main_t *vnm = ctx;
++
++  vnet_update_adjacency_for_sw_interface (
++    vnm, adj_get_sw_if_index (ai), ai);
++
++  return ADJ_WALK_RC_CONTINUE;
++}
++
++static void
++pppoe_refresh_adjacencies (vnet_main_t *vnm, u32 sw_if_index)
++{
++  /* PPPoE routes use midchain adjacencies, which are not all present in the
++   * neighbour walk. Inspect the complete adjacency pool so service tables,
++   * policy tables, and both IP families are refreshed together. */
++  adj_index_t ai;
++  pool_foreach_index (ai, adj_pool)
++    {
++      if (adj_get_sw_if_index (ai) == sw_if_index)
++	pppoe_refresh_adj_cb (ai, vnm);
++    }
++}
++
+ VNET_HW_INTERFACE_CLASS (pppoe_hw_class) =
+ {
+   .name = "PPPoE",
+@@ -412,6 +437,11 @@
+       vnet_set_interface_l3_output_node (vnm->vlib_main, sw_if_index,
+ 					 (u8 *) "tunnel-output");
+
++      /* A freed hardware interface can retain neighbour adjacencies from the
++	 previous session. Refresh them after binding the reused interface to the
++	 new session so their PPPoE rewrite contains the current session ID. */
++      pppoe_refresh_adjacencies (vnm, sw_if_index);
++
+       /* add reverse route for client ip */
+       fib_table_entry_path_add (a->decap_fib_index, &pfx,
+ 				pppoe_fib_src, FIB_ENTRY_FLAG_NONE,
+--
+2.39.2

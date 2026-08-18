@@ -156,6 +156,14 @@ func TestCompileIntentProducesBehaviorPolicyTargets(t *testing.T) {
 	if !hasVPPGroup(compiled.VPPGroups, "vpp.acl.drop") || !hasVPPGroup(compiled.VPPGroups, "vpp.behavior.rate") {
 		t.Fatalf("behavior groups = %#v", compiled.VPPGroups)
 	}
+	if hasVPPGroup(compiled.VPPGroups, "vpp.policer") {
+		t.Fatalf("matched rate rule must not also create an interface policer: %#v", compiled.VPPGroups)
+	}
+	for _, group := range compiled.VPPGroups {
+		if len(group.Objects) == 0 {
+			t.Fatalf("compiled intent contains empty VPP group %q", group.Kind)
+		}
+	}
 }
 
 func hasVPPGroup(groups []VPPObjectGroup, kind string) bool {
@@ -186,9 +194,6 @@ func TestCompileIntentCarriesRemarkBehaviorMetadata(t *testing.T) {
 	}
 
 	wantGroups := []VPPObjectGroup{
-		{Kind: "vpp.qos.classify"},
-		{Kind: "vpp.qos.record"},
-		{Kind: "vpp.qos.store"},
 		{Kind: "vpp.qos.egress-map", Objects: []VPPObject{
 			{Name: "remark-policy/class/business_critical/qos.egress-map", RuleID: "remark-protected", Granularity: ClassGranularity, Action: ActionRemark, Class: "business_critical", DSCP: "AF31", RemarkBehavior: &RemarkBehavior{ProtectedClass: "control", DownstreamPolicy: "remark-protected"}},
 			{Name: "remark-policy/class/default/qos.egress-map", RuleID: "remark-downstream", Granularity: ClassGranularity, Action: ActionRemark, Class: "default", DSCP: "AF21", RemarkBehavior: &RemarkBehavior{ProtectedClass: "default", DownstreamPolicy: "wan-low-latency"}},
@@ -197,7 +202,6 @@ func TestCompileIntentCarriesRemarkBehaviorMetadata(t *testing.T) {
 			{Name: "remark-policy/class/business_critical/qos.mark", RuleID: "remark-protected", Granularity: ClassGranularity, Action: ActionRemark, Class: "business_critical", DSCP: "AF31", RemarkBehavior: &RemarkBehavior{ProtectedClass: "control", DownstreamPolicy: "remark-protected"}},
 			{Name: "remark-policy/class/default/qos.mark", RuleID: "remark-downstream", Granularity: ClassGranularity, Action: ActionRemark, Class: "default", DSCP: "AF21", RemarkBehavior: &RemarkBehavior{ProtectedClass: "default", DownstreamPolicy: "wan-low-latency"}},
 		}},
-		{Kind: "vpp.policer"},
 	}
 	if !reflect.DeepEqual(compiled.VPPGroups, wantGroups) {
 		t.Fatalf("vpp groups = %#v, want %#v", compiled.VPPGroups, wantGroups)
@@ -227,17 +231,17 @@ func TestCompileIntentSupportsRemarkProtectedClassAndDownstreamPolicyMetadata(t 
 		t.Fatal("compiled remark behavior must not alias input action behavior")
 	}
 
-	for _, groupIndex := range []int{3, 4} {
-		objects := compiled.VPPGroups[groupIndex].Objects
+	for _, group := range compiled.VPPGroups {
+		objects := group.Objects
 		if len(objects) != 3 {
-			t.Fatalf("%s object count = %d, want 3", compiled.VPPGroups[groupIndex].Kind, len(objects))
+			t.Fatalf("%s object count = %d, want 3", group.Kind, len(objects))
 		}
 		for index, object := range objects {
 			if !reflect.DeepEqual(object.RemarkBehavior, wantTargets[index].RemarkBehavior) {
-				t.Fatalf("%s object %d remark behavior = %#v, want %#v", compiled.VPPGroups[groupIndex].Kind, index, object.RemarkBehavior, wantTargets[index].RemarkBehavior)
+				t.Fatalf("%s object %d remark behavior = %#v, want %#v", group.Kind, index, object.RemarkBehavior, wantTargets[index].RemarkBehavior)
 			}
 			if object.RemarkBehavior == intent.Rules[index].Actions[0].RemarkBehavior {
-				t.Fatalf("%s object %d remark behavior aliases input action behavior", compiled.VPPGroups[groupIndex].Kind, index)
+				t.Fatalf("%s object %d remark behavior aliases input action behavior", group.Kind, index)
 			}
 		}
 	}

@@ -39,7 +39,7 @@ func (reconciler *productionGatewayReconciler) prepare(ctx context.Context, plan
 	// A stale TAP can make even a no-op snapshot ambiguous. Clean managed
 	// service handoffs before deciding whether the snapshot needs capabilities;
 	// this is deliberately independent of the diff list.
-	if err := reconciler.adapter.CleanupManagedTAPs(ctx, plan.GatewayPlan); err != nil {
+	if err := reconciler.adapter.CleanupManagedTAPs(ctx, prior, plan.GatewayPlan); err != nil {
 		return fmt.Errorf("managed TAP cleanup: %w", err)
 	}
 	if len(request.Capabilities) > 0 {
@@ -83,7 +83,10 @@ func (adapter *productionGatewayAdapter) Name() string { return adapter.name }
 
 func (adapter *productionGatewayAdapter) Applicable(plan Plan) bool {
 	diff, live, found := adapter.reconciler.state(plan.Request.TransactionID)
-	return found && (gatewayDiffApplies(adapter.name, diff) || gatewaySnapshotHasResource(adapter.name, live) || adapter.hasSupplemental(plan.GatewayPlan))
+	if !found {
+		return false
+	}
+	return gatewayDiffApplies(adapter.name, diff) || gatewaySnapshotHasResource(adapter.name, live) || adapter.hasSupplemental(plan.GatewayPlan) || adapter.hasSupplementalReconciliation(plan)
 }
 
 func (adapter *productionGatewayAdapter) Apply(ctx context.Context, plan Plan) (GatewayResourceResult, error) {
@@ -91,7 +94,7 @@ func (adapter *productionGatewayAdapter) Apply(ctx context.Context, plan Plan) (
 	if !found {
 		return GatewayResourceResult{}, fmt.Errorf("%s apply: reconciliation is unavailable", adapter.name)
 	}
-	supplemental, err := adapter.applySupplemental(ctx, plan.GatewayPlan)
+	supplemental, err := adapter.reconcileSupplemental(ctx, plan)
 	if err != nil {
 		return GatewayResourceResult{}, fmt.Errorf("%s supplemental apply: %w", adapter.name, err)
 	}
@@ -161,6 +164,32 @@ func (adapter *productionGatewayAdapter) applySupplemental(ctx context.Context, 
 		return nil, nil
 	}
 	return adapter.reconciler.adapter.ApplySupplemental(ctx, plan, owner)
+}
+
+func (adapter *productionGatewayAdapter) hasSupplementalReconciliation(plan Plan) bool {
+	owner := adapter.supplementalOwner()
+	if owner == "" || plan.Previous.GatewayPlan == nil {
+		return false
+	}
+	cleanup, err := vpp.SupplementalReconciliationCleanupOperations(*plan.Previous.GatewayPlan, plan.GatewayPlan, owner)
+	return err != nil || len(cleanup) > 0
+}
+
+func (adapter *productionGatewayAdapter) reconcileSupplemental(ctx context.Context, plan Plan) ([]vpp.SupplementalOperationReadback, error) {
+	owner := adapter.supplementalOwner()
+	if owner == "" {
+		return nil, nil
+	}
+	if plan.Previous.GatewayPlan != nil {
+		cleanup, err := vpp.SupplementalReconciliationCleanupOperations(*plan.Previous.GatewayPlan, plan.GatewayPlan, owner)
+		if err != nil {
+			return nil, err
+		}
+		if err := adapter.reconciler.adapter.ExecuteOperations(ctx, cleanup); err != nil {
+			return nil, err
+		}
+	}
+	return adapter.applySupplemental(ctx, plan.GatewayPlan)
 }
 
 func gatewaySnapshotHasResource(name string, snapshot vpp.Snapshot) bool {

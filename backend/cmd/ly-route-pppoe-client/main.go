@@ -29,10 +29,12 @@ func main() {
 	defaultRoute := flag.Bool("default-route", true, "install the VPP default route")
 	nat := flag.Bool("nat", true, "enable NAT44 outside on the PPPoE session")
 	wanInterface := flag.String("wan-interface", "", "VPP WAN interface; when set, prepare the VPP control-plane tap")
+	sessionInterface := flag.String("session-interface", "", "stable VPP PPPoE session interface name")
 	tapID := flag.Int("tap-id", 700, "VPP control-plane tap ID")
 	statusFile := flag.String("status-file", "", "runtime status JSON path")
-	reconcileUnit := flag.String("reconcile-unit", "ly-route-policy-routing.service", "systemd unit to reconcile after PPPoE connects")
+	reconcileUnit := flag.String("reconcile-unit", "ly-route-recovery.service", "systemd unit to reconcile after PPPoE connects")
 	natInsideInterfaces := []string{}
+	natBehavior := "endpoint_dependent"
 	ipv6LANInterfaces := []string{}
 	ipv6PrefixGroup := ""
 	flag.Parse()
@@ -44,6 +46,7 @@ func main() {
 		var config struct {
 			ControlInterface    string   `json:"control_interface"`
 			WANInterface        string   `json:"wan_interface"`
+			SessionInterface    string   `json:"session_interface"`
 			Username            string   `json:"username"`
 			Password            string   `json:"password"`
 			VPPCTL              string   `json:"vppctl"`
@@ -55,6 +58,7 @@ func main() {
 			DefaultRoute        *bool    `json:"default_route"`
 			NAT                 *bool    `json:"nat"`
 			NATInsideInterfaces []string `json:"nat_inside_interfaces"`
+			NATBehavior         string   `json:"nat_behavior"`
 			IPv6LANInterfaces   []string `json:"ipv6_lan_interfaces"`
 			IPv6PrefixGroup     string   `json:"ipv6_prefix_group"`
 			ReconcileUnit       string   `json:"reconcile_unit"`
@@ -63,6 +67,7 @@ func main() {
 			fatal(err)
 		}
 		*interfaceName, *wanInterface = config.ControlInterface, config.WANInterface
+		*sessionInterface = config.SessionInterface
 		*username, *password = config.Username, config.Password
 		if config.VPPCTL != "" {
 			*vppctl = config.VPPCTL
@@ -87,6 +92,16 @@ func main() {
 			*nat = *config.NAT
 		}
 		natInsideInterfaces = append(natInsideInterfaces, config.NATInsideInterfaces...)
+		if config.NATBehavior != "" {
+			// The control plane validates the value; keep the client strict when
+			// started directly from a hand-written appliance config.
+			if config.NATBehavior != "endpoint_dependent" && config.NATBehavior != "full_cone" {
+				fatal(fmt.Errorf("unsupported nat_behavior %q", config.NATBehavior))
+			}
+		}
+		if config.NATBehavior != "" {
+			natBehavior = config.NATBehavior
+		}
 		ipv6LANInterfaces = append(ipv6LANInterfaces, config.IPv6LANInterfaces...)
 		ipv6PrefixGroup = config.IPv6PrefixGroup
 		if config.ReconcileUnit != "" {
@@ -141,7 +156,7 @@ func main() {
 		session = sessionWithPrefixLease(session, prefixLease)
 	}
 	encoded, _ := json.Marshal(session)
-	programmed, err := pppoeclient.ProgramVPP(ctx, pppoeclient.VPPConfig{Binary: *vppctl, TableID: *tableID, MTU: uint16(*mru), InstallDefaultRoute: *defaultRoute, EnableNAT: *nat, NATInsideInterfaces: natInsideInterfaces, IPv6PrefixGroup: ipv6PrefixGroup, IPv6LANInterfaces: ipv6LANInterfaces}, session)
+	programmed, err := pppoeclient.ProgramVPP(ctx, pppoeclient.VPPConfig{Binary: *vppctl, WANInterface: *wanInterface, SessionInterface: *sessionInterface, TableID: *tableID, MTU: uint16(*mru), InstallDefaultRoute: *defaultRoute, EnableNAT: *nat, NATInsideInterfaces: natInsideInterfaces, NATBehavior: natBehavior, IPv6PrefixGroup: ipv6PrefixGroup, IPv6LANInterfaces: ipv6LANInterfaces}, session)
 	if err != nil {
 		fatal(err)
 	}
@@ -152,7 +167,10 @@ func main() {
 	if err := notifyDependentRuntime(*reconcileUnit); err != nil {
 		fmt.Fprintf(os.Stderr, "dependent runtime reconciliation: %v\n", err)
 	}
-	defer writeStatus(*statusFile, map[string]any{"state": "disconnected"})
+	// Keep the last connected status until VPP removes the session.  The control
+	// plane validates it against VPP before using it, so a stale file is safe;
+	// writing "disconnected" here is not, because an older instance can race a
+	// newly connected replacement during a systemd restart.
 	defer client.Disconnect(context.Background())
 	serve := client.Serve
 	if prefixLease.Prefix.IsValid() {
@@ -201,17 +219,32 @@ func notifyDependentRuntime(unit string) error {
 		return fmt.Errorf("invalid reconciliation unit %q", unit)
 	}
 	stateOutput, stateErr := runServiceCommand("systemctl", "show", "--property=ActiveState", "--value", unit)
+	action := "try-restart"
 	if stateErr == nil {
 		switch strings.TrimSpace(string(stateOutput)) {
-		case "activating", "deactivating":
-			// The policy renderer already waits for the selected VPP underlay.
-			// Do not interrupt that transaction when PPPoE reaches connected.
+		case "activating":
+			if unit == "ly-route-recovery.service" {
+				// The boot recovery transaction is already waiting for every saved
+				// PPPoE peer. Restarting it here races the remaining peer sessions.
+				return nil
+			}
+			// Boot may have rendered a prior PPPoE interface index while the
+			// native client was still negotiating. Queue a restart now that the
+			// status file contains the current VPP session interface.
+			action = "restart"
+		case "deactivating":
 			return nil
+		case "inactive":
+			// Recovery is a oneshot unit and is normally inactive after it exits.
+			// try-restart is a no-op for inactive units, so start it explicitly.
+			action = "start"
+		case "failed":
+			action = "restart"
 		}
 	}
-	output, err := runServiceCommand("systemctl", "--no-block", "try-restart", unit)
+	output, err := runServiceCommand("systemctl", "--no-block", action, unit)
 	if err != nil {
-		return fmt.Errorf("systemctl try-restart %s: %w: %s", unit, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("systemctl %s %s: %w: %s", action, unit, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -227,10 +260,24 @@ func writeStatus(path string, value any) {
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return
 	}
-	temporary := path + ".tmp"
-	if os.WriteFile(temporary, append(content, '\n'), 0600) == nil {
-		_ = os.Rename(temporary, path)
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return
 	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0600); err != nil {
+		_ = temporary.Close()
+		return
+	}
+	if _, err := temporary.Write(append(content, '\n')); err != nil {
+		_ = temporary.Close()
+		return
+	}
+	if err := temporary.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(temporaryPath, path)
 }
 
 func fatal(err error) {

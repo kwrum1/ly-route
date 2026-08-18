@@ -1,0 +1,15 @@
+[Unit]
+Description=Ly Route VPP session layer readiness
+BindsTo=vpp.service
+After=vpp.service
+PartOf=vpp.service
+Before=ly-route-runtime-check.service ly-route-vpp-apply.service ly-route-dns-vpp-v6-namespace.service ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service ly-route-dns-vpp-session.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+ExecStart=/usr/lib/ly-route/enable-vpp-session.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

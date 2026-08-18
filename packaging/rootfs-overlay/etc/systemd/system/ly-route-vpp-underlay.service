@@ -1,0 +1,18 @@
+[Unit]
+Description=Ly Route VPP data interface preparation
+After=vpp.service ly-route-firstboot.service
+Requires=vpp.service ly-route-firstboot.service
+BindsTo=vpp.service
+PartOf=vpp.service
+Before=ly-route-pppoe.target ly-route-vpp-apply.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ly-route/runtime.env
+EnvironmentFile=-/etc/ly-route/control-api.env
+Environment=LY_ROUTE_VPP_RECEIPT=/var/lib/ly-route/vpp-underlay-apply-receipt.json
+ExecStart=/usr/lib/ly-route/vpp-apply /var/lib/ly-route/vpp/operations.json
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

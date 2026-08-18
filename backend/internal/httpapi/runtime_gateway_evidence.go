@@ -83,7 +83,9 @@ func proveDesiredGatewayResource(evidence apply.GatewayResourceEvidence, desired
 	case "nat44":
 		matched = equalGatewaySlice(evidence.After.NAT.StaticMappings, desired.NAT.StaticMappings)
 	case "port-maps":
-		matched = equalGatewaySlice(evidence.After.NAT.PortMappings, desired.NAT.PortMappings)
+		// VPP lists static mappings in its own order. Port-map identity is its
+		// fields, not database insertion order, so a reorder is not degradation.
+		matched = equalGatewaySliceUnordered(evidence.After.NAT.PortMappings, desired.NAT.PortMappings)
 	}
 	if matched {
 		owner := vpp.SupplementalOwner(evidence.Resource)

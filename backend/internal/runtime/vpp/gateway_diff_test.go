@@ -3,7 +3,10 @@ package vpp
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
+
+	"ly-route/backend/internal/runtime/trafficpolicy"
 )
 
 func TestGatewayDesiredLiveDiffClassifiesEveryResourceClass(t *testing.T) {
@@ -45,7 +48,7 @@ func TestGatewayDesiredLiveDiffClassifiesEveryResourceClass(t *testing.T) {
 
 func TestGatewayDesiredLiveDiffCarriesLANVPPIngressIntoRouteLifecycle(t *testing.T) {
 	desired := Plan{AddressAssignments: []AddressAssignment{
-		{ID: "lan", Role: "lan", LinuxInterface: "ens192", VPPInterface: "lyroute-ens192"},
+		{ID: "lan", Role: "lan", LinuxInterface: "ens192", VPPInterface: "lyroute-ens192", CIDR: "192.168.50.1/24"},
 		{ID: "wan", Role: "wan", LinuxInterface: "ens224", VPPInterface: "lyroute-ens224"},
 	}}
 
@@ -58,6 +61,132 @@ func TestGatewayDesiredLiveDiffCarriesLANVPPIngressIntoRouteLifecycle(t *testing
 	}
 	if diff.Routes.IngressVPPInterface != "lyroute-ens192" {
 		t.Fatalf("route ingress = %q, want LAN VPP interface", diff.Routes.IngressVPPInterface)
+	}
+	if !reflect.DeepEqual(diff.Routes.LocalDestinations, []string{"192.168.50.0/24"}) {
+		t.Fatalf("route local destinations = %#v, want LAN prefix", diff.Routes.LocalDestinations)
+	}
+}
+
+func TestGatewayReconcileDeletesRetiredRoutePolicyWithoutPriorSnapshot(t *testing.T) {
+	active := trafficpolicy.RoutePolicy{ID: "route-active", Action: "route", Egress: "wan0"}
+	desired := Plan{
+		Policy:                trafficpolicy.Config{RoutePolicies: []trafficpolicy.RoutePolicy{active}},
+		RetiredRoutePolicyIDs: []string{"route-disabled", "route-active", "route-disabled", ""},
+	}
+
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{
+		TransactionID:       "txn-retired-route",
+		Desired:             desired,
+		RepairVerifiedDrift: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(diff.Routes.DeleteRoutes, []string{"route-disabled"}) {
+		t.Fatalf("retired route deletes = %#v", diff.Routes.DeleteRoutes)
+	}
+}
+
+func TestGatewayReconcileCarriesWANGroupContextIntoRetiredRouteDelete(t *testing.T) {
+	group := trafficpolicy.WANGroup{ID: "wan-weighted", Members: []string{"wan-a", "wan-b"}}
+	route := trafficpolicy.RoutePolicy{ID: "route-active", Priority: 50, Action: "nat", Egress: group.ID}
+	prior := Plan{Policy: trafficpolicy.Config{
+		RoutePolicies: []trafficpolicy.RoutePolicy{route},
+		WANGroups:     []trafficpolicy.WANGroup{group},
+	}}
+	desired := prior
+	desired.RetiredRoutePolicyIDs = []string{"route-disabled"}
+	live := Snapshot{
+		RoutePolicies: []trafficpolicy.RoutePolicy{route},
+		WANGroups:     []trafficpolicy.WANGroup{group},
+	}
+
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{
+		TransactionID:       "txn-retired-group-context",
+		Prior:               prior,
+		Desired:             desired,
+		Live:                live,
+		RepairVerifiedDrift: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(diff.Routes.DeleteRoutes, "route-disabled") {
+		t.Fatalf("route deletes = %#v, want retired route", diff.Routes.DeleteRoutes)
+	}
+	groups := diff.Routes.WANGroupsContext.RouteGroups()
+	if len(groups) != 1 || groups[0].ID != group.ID {
+		t.Fatalf("route WAN-group context = %#v, want %q", groups, group.ID)
+	}
+}
+
+func TestGatewayReconcileRebuildsRoutesThatReferenceChangedWANGroup(t *testing.T) {
+	priorGroup := trafficpolicy.WANGroup{
+		ID:      "wan-pool",
+		Mode:    trafficpolicy.WANGroupWeighted,
+		Members: []string{"wan-a", "wan-b"},
+		Weights: map[string]int{"wan-a": 7, "wan-b": 3},
+	}
+	desiredGroup := priorGroup
+	desiredGroup.Mode = trafficpolicy.WANGroupFiveTuple
+	desiredGroup.Weights = map[string]int{"wan-a": 1, "wan-b": 1}
+	route := trafficpolicy.RoutePolicy{ID: "route-via-pool", Priority: 50, Action: "nat", Egress: priorGroup.ID}
+	prior := Plan{Policy: trafficpolicy.Config{
+		WANGroups:     []trafficpolicy.WANGroup{priorGroup},
+		RoutePolicies: []trafficpolicy.RoutePolicy{route},
+	}}
+	desired := Plan{Policy: trafficpolicy.Config{
+		WANGroups:     []trafficpolicy.WANGroup{desiredGroup},
+		RoutePolicies: []trafficpolicy.RoutePolicy{route},
+	}}
+	live := Snapshot{
+		WANGroups:     []trafficpolicy.WANGroup{priorGroup},
+		RoutePolicies: []trafficpolicy.RoutePolicy{route},
+	}
+
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{
+		TransactionID:       "txn-wan-group-dependent-route",
+		Prior:               prior,
+		Desired:             desired,
+		Live:                live,
+		RepairVerifiedDrift: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(diff.WANGroups.DeleteWANGroups, []string{priorGroup.ID}) || len(diff.WANGroups.WANGroups) != 1 {
+		t.Fatalf("WAN-group diff = %#v, want replace", diff.WANGroups)
+	}
+	if !slices.Equal(diff.Routes.DeleteRoutes, []string{route.ID}) || len(diff.Routes.Routes) != 1 || diff.Routes.Routes[0].ID != route.ID {
+		t.Fatalf("route diff = %#v, want dependent delete and replay", diff.Routes)
+	}
+}
+
+func TestGatewayVerifiedReconcileAlwaysRebuildsPPPoERuntimePath(t *testing.T) {
+	route := trafficpolicy.RoutePolicy{
+		ID:       "route-pppoe",
+		Priority: 10,
+		Action:   "route",
+		Egress:   "wan-pppoe",
+		Path: &trafficpolicy.WANPath{
+			VPPInterface: "pppoe_session0",
+			NextHop:      "10.67.0.1",
+			RuntimeToken: "pppoe:2:10.67.0.10:10.67.0.1",
+		},
+	}
+	plan := Plan{Policy: trafficpolicy.Config{RoutePolicies: []trafficpolicy.RoutePolicy{route}}}
+	diff, err := ReconcileGatewayPlan(GatewayReconciliationInput{
+		TransactionID:       "txn-pppoe-reconnect",
+		Prior:               plan,
+		Desired:             plan,
+		Live:                Snapshot{RoutePolicies: []trafficpolicy.RoutePolicy{route}},
+		RepairVerifiedDrift: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff.Routes.Routes) != 1 || diff.Routes.Routes[0].ID != route.ID {
+		t.Fatalf("PPPoE route diff = %#v, want runtime-token reconciliation without a drift signal", diff.Routes.Routes)
 	}
 }
 

@@ -51,4 +51,17 @@ func TestLANDHCPBroadcastPolicyReadbackUsesReceivePath(t *testing.T) {
 	if !strings.Contains(serviceChainACLTag(policy), "lan_dhcp_broadcast") {
 		t.Fatalf("unexpected DHCP bypass tag: %s", serviceChainACLTag(policy))
 	}
+	aclOutput := `acl-index 3 count 1 tag {ly-route-lan_dhcp_broadcast_forward_0}
+          0: ipv4 permit src 0.0.0.0/32 dst 255.255.255.255/32 proto 17 sport 0-65535 dport 67
+  applied inbound on sw_if_index:
+  applied outbound on sw_if_index:
+  used in lookup context index: 1
+`
+	acl, err := parseObservedServiceChainACL(aclOutput)
+	if err != nil {
+		t.Fatalf("VPP ACL attachment-state readback failed: %v", err)
+	}
+	if acl.ID != 3 || acl.Tag != serviceChainACLTag(policy) || acl.Match != policy.Match {
+		t.Fatalf("VPP ACL attachment-state readback = %#v", acl)
+	}
 }

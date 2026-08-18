@@ -29,3 +29,13 @@ func TestPPPPathFromStatusJSONRejectsDisconnectedState(t *testing.T) {
 		t.Fatal("disconnected PPPoE state reported as connected")
 	}
 }
+
+func TestPPPRuntimePathTokenChangesAcrossReconnects(t *testing.T) {
+	first := []byte(`{"state":"connected","interface":"pppoe_session0","session":{"session_id":1,"local_address":"10.67.0.10","remote_address":"10.67.0.1"}}`)
+	second := []byte(`{"state":"connected","interface":"pppoe_session0","session":{"session_id":2,"local_address":"10.67.0.10","remote_address":"10.67.0.1"}}`)
+	_, _, firstToken, firstConnected := pppRuntimePathFromStatusJSON(first)
+	_, _, secondToken, secondConnected := pppRuntimePathFromStatusJSON(second)
+	if !firstConnected || !secondConnected || firstToken == "" || firstToken == secondToken {
+		t.Fatalf("PPPoE runtime tokens = %q, %q", firstToken, secondToken)
+	}
+}

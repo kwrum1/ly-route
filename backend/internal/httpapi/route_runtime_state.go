@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"ly-route/backend/internal/runtime/apply"
+	"ly-route/backend/internal/runtime/trafficpolicy"
 )
 
 func (server *Server) decorateRoutePolicyRuntimeStates(ctx context.Context, items []map[string]any) []map[string]any {
@@ -34,30 +35,41 @@ func (server *Server) appliedRoutePolicyIDs(ctx context.Context) map[string]stru
 		return nil
 	}
 
-	routeEvidenceMatches := false
+	var appliedSnapshot []trafficpolicy.RoutePolicy
 	for _, evidence := range result.GatewayEvidence {
-		if evidence.Resource != "routes" || evidence.Deleted || evidence.TransactionID != result.TransactionID {
+		if evidence.Resource != "routes" || evidence.TransactionID != result.TransactionID {
 			continue
 		}
 		if evidence.ApplyReceipt.Status != apply.ReceiptApplied || evidence.ApplyReceipt.TransactionID != result.TransactionID {
 			continue
 		}
-		if equalGatewaySlice(evidence.After.RoutePolicies, result.GatewayPlan.Policy.RoutePolicies) {
-			routeEvidenceMatches = true
-			break
-		}
+		appliedSnapshot = evidence.After.RoutePolicies
+		break
 	}
-	if !routeEvidenceMatches {
+	if appliedSnapshot == nil {
 		return nil
 	}
 
 	current, err := server.currentTrafficPolicyConfig(ctx)
-	if err != nil || !equalGatewaySlice(current.RoutePolicies, result.GatewayPlan.Policy.RoutePolicies) {
+	if err != nil {
 		return nil
 	}
 	applied := make(map[string]struct{}, len(current.RoutePolicies))
-	for _, policy := range current.RoutePolicies {
-		applied[policy.ID] = struct{}{}
+	for _, currentPolicy := range current.RoutePolicies {
+		plannedPolicy, planned := routePolicyWithID(result.GatewayPlan.Policy.RoutePolicies, currentPolicy.ID)
+		observedPolicy, observed := routePolicyWithID(appliedSnapshot, currentPolicy.ID)
+		if planned && observed && equalGatewaySlice([]trafficpolicy.RoutePolicy{currentPolicy}, []trafficpolicy.RoutePolicy{plannedPolicy}) && equalGatewaySlice([]trafficpolicy.RoutePolicy{currentPolicy}, []trafficpolicy.RoutePolicy{observedPolicy}) {
+			applied[currentPolicy.ID] = struct{}{}
+		}
 	}
 	return applied
+}
+
+func routePolicyWithID(items []trafficpolicy.RoutePolicy, id string) (trafficpolicy.RoutePolicy, bool) {
+	for _, item := range items {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return trafficpolicy.RoutePolicy{}, false
 }

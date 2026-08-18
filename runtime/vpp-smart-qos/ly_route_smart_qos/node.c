@@ -13,11 +13,234 @@ typedef enum
   LY_SQ_N_ERROR,
 } ly_sq_error_t;
 
+typedef enum
+{
+  LY_SQ_RATE_ERROR_PASSED,
+  LY_SQ_RATE_ERROR_MATCHED,
+  LY_SQ_RATE_ERROR_DROPPED,
+  LY_SQ_RATE_N_ERROR,
+} ly_sq_rate_error_t;
+
 static char *ly_sq_error_strings[] = {
   "packets enqueued",
   "packets transmitted",
   "packets dropped by CoDel",
   "packets dropped on queue overflow",
+};
+
+static char *ly_sq_rate_error_strings[] = {
+  "packets passed without rate match",
+  "packets matched by rate rule",
+  "packets dropped by rate rule",
+};
+
+static_always_inline int
+ly_sq_rate_prefix_match (ip4_address_t address, ip4_address_t prefix,
+                         u8 prefix_len)
+{
+  u32 mask;
+  if (prefix_len == 0)
+    return 1;
+  mask = prefix_len == 32 ? ~0u : clib_host_to_net_u32 (~0u << (32 - prefix_len));
+  return (address.as_u32 & mask) == (prefix.as_u32 & mask);
+}
+
+static_always_inline ip4_header_t *
+ly_sq_rate_ip4_header (vlib_buffer_t *buffer, u8 direction,
+                       u32 *network_length)
+{
+  u8 *data = vlib_buffer_get_current (buffer);
+  u32 length = buffer->current_length;
+
+  if (length >= sizeof (ip4_header_t) && (data[0] >> 4) == 4)
+    {
+      *network_length = length;
+      return (ip4_header_t *) data;
+    }
+  if (direction != LY_SQ_RATE_DIRECTION_OUTPUT ||
+      length < sizeof (ethernet_header_t))
+    return 0;
+
+  ethernet_header_t *ethernet = (ethernet_header_t *) data;
+  u16 ethernet_type = clib_net_to_host_u16 (ethernet->type);
+  u8 *network = data + sizeof (*ethernet);
+  length -= sizeof (*ethernet);
+  while (ethernet_frame_is_tagged (ethernet_type) &&
+         length >= sizeof (ethernet_vlan_header_t))
+    {
+      ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) network;
+      ethernet_type = clib_net_to_host_u16 (vlan->type);
+      network += sizeof (*vlan);
+      length -= sizeof (*vlan);
+    }
+  if (ethernet_type == 0x8864 && length >= 8)
+    {
+      u16 ppp_protocol = clib_net_to_host_u16 (*(u16 *) (network + 6));
+      network += 8;
+      length -= 8;
+      if (ppp_protocol != 0x0021)
+        return 0;
+    }
+  else if (ethernet_type != ETHERNET_TYPE_IP4)
+    return 0;
+  if (length < sizeof (ip4_header_t) || (network[0] >> 4) != 4)
+    return 0;
+  *network_length = length;
+  return (ip4_header_t *) network;
+}
+
+static_always_inline int
+ly_sq_rate_rule_matches (ly_sq_rate_rule_t *rule, u32 sw_if_index,
+                         u8 direction, ip4_header_t *ip4, u32 packet_length)
+{
+  u16 source_port = 0, destination_port = 0;
+  u32 header_length;
+  if (!rule->enabled || rule->sw_if_index != sw_if_index ||
+      rule->direction != direction ||
+      (rule->protocol && rule->protocol != ip4->protocol) ||
+      !ly_sq_rate_prefix_match (ip4->src_address, rule->source,
+                                rule->source_prefix_len) ||
+      !ly_sq_rate_prefix_match (ip4->dst_address, rule->destination,
+                                rule->destination_prefix_len))
+    return 0;
+  header_length = ip4_header_bytes (ip4);
+  if (ip4->protocol == IP_PROTOCOL_TCP || ip4->protocol == IP_PROTOCOL_UDP)
+    {
+      udp_header_t *transport;
+      if (packet_length < header_length + sizeof (*transport))
+        return 0;
+      transport = (udp_header_t *) ((u8 *) ip4 + header_length);
+      source_port = clib_net_to_host_u16 (transport->src_port);
+      destination_port = clib_net_to_host_u16 (transport->dst_port);
+    }
+  return source_port >= rule->source_port_first &&
+         source_port <= rule->source_port_last &&
+         destination_port >= rule->destination_port_first &&
+         destination_port <= rule->destination_port_last;
+}
+
+static_always_inline int
+ly_sq_rate_police (vlib_main_t *vm, vlib_buffer_t *buffer,
+                   ly_sq_rate_rule_t *rule, u32 packet_length)
+{
+  f64 now = vlib_time_now (vm);
+  int dropped;
+  if (rule->bucket_index >= LY_SQ_RATE_BUCKET_COUNT ||
+      !ly_sq_main.rate_buckets[rule->bucket_index].enabled)
+    return 0;
+  ly_sq_rate_bucket_t *bucket =
+    &ly_sq_main.rate_buckets[rule->bucket_index];
+  clib_spinlock_lock (&bucket->lock);
+  if (bucket->last_refill <= 0 || now < bucket->last_refill)
+    bucket->last_refill = now;
+  bucket->tokens +=
+    (now - bucket->last_refill) * bucket->rate_bytes_per_second;
+  if (bucket->tokens > bucket->burst_bytes)
+    bucket->tokens = bucket->burst_bytes;
+  bucket->last_refill = now;
+  dropped = bucket->tokens < packet_length;
+  if (!dropped)
+    bucket->tokens -= packet_length;
+  rule->matched_packets++;
+  rule->matched_bytes += packet_length;
+  if (!dropped)
+    rule->conform_packets++;
+  else
+    rule->dropped_packets++;
+  clib_spinlock_unlock (&bucket->lock);
+  (void) buffer;
+  return dropped;
+}
+
+static_always_inline uword
+ly_sq_rate_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
+                   vlib_frame_t *frame, u8 direction)
+{
+  u32 *from = vlib_frame_vector_args (frame);
+  u16 nexts[VLIB_FRAME_SIZE];
+  u32 index;
+  for (index = 0; index < frame->n_vectors; index++)
+    {
+      vlib_buffer_t *buffer = vlib_get_buffer (vm, from[index]);
+      u32 network_length = 0;
+      ip4_header_t *ip4 =
+        ly_sq_rate_ip4_header (buffer, direction, &network_length);
+      int matched = 0;
+      u32 sw_if_index = vnet_buffer (buffer)->sw_if_index[
+        direction == LY_SQ_RATE_DIRECTION_INPUT ? VLIB_RX : VLIB_TX];
+      nexts[index] = 0;
+      vnet_feature_next_u16 (&nexts[index], buffer);
+      if (PREDICT_FALSE (!ip4))
+        continue;
+      for (u32 rule_index = 0; rule_index < ly_sq_main.rate_rule_count;
+           rule_index++)
+        {
+          ly_sq_rate_rule_t *rule = &ly_sq_main.rate_rules[rule_index];
+          if (!ly_sq_rate_rule_matches (rule, sw_if_index, direction, ip4,
+                                        network_length))
+            continue;
+          matched = 1;
+          vlib_node_increment_counter (vm, node->node_index,
+                                       LY_SQ_RATE_ERROR_MATCHED, 1);
+          if (ly_sq_rate_police (vm, buffer, rule,
+                                 vlib_buffer_length_in_chain (vm, buffer)))
+            {
+              nexts[index] = 0;
+              vlib_node_increment_counter (vm, node->node_index,
+                                           LY_SQ_RATE_ERROR_DROPPED, 1);
+            }
+          break;
+        }
+      if (!matched)
+        vlib_node_increment_counter (vm, node->node_index,
+                                     LY_SQ_RATE_ERROR_PASSED, 1);
+    }
+  vlib_buffer_enqueue_to_next (vm, node, from, nexts, frame->n_vectors);
+  return frame->n_vectors;
+}
+
+VLIB_NODE_FN (ly_sq_rate_input_node) (vlib_main_t *vm,
+                                      vlib_node_runtime_t *node,
+                                      vlib_frame_t *frame)
+{
+  return ly_sq_rate_inline (vm, node, frame, LY_SQ_RATE_DIRECTION_INPUT);
+}
+
+VLIB_NODE_FN (ly_sq_rate_output_node) (vlib_main_t *vm,
+                                       vlib_node_runtime_t *node,
+                                       vlib_frame_t *frame)
+{
+  return ly_sq_rate_inline (vm, node, frame, LY_SQ_RATE_DIRECTION_OUTPUT);
+}
+
+VLIB_REGISTER_NODE (ly_sq_rate_input_node) = {
+  .name = "ly-route-flow-rate-input",
+  .vector_size = sizeof (u32),
+  .n_errors = LY_SQ_RATE_N_ERROR,
+  .error_strings = ly_sq_rate_error_strings,
+  .n_next_nodes = 1,
+  .next_nodes = { [0] = "error-drop" },
+};
+
+VLIB_REGISTER_NODE (ly_sq_rate_output_node) = {
+  .name = "ly-route-flow-rate-output",
+  .vector_size = sizeof (u32),
+  .n_errors = LY_SQ_RATE_N_ERROR,
+  .error_strings = ly_sq_rate_error_strings,
+  .n_next_nodes = 1,
+  .next_nodes = { [0] = "error-drop" },
+};
+
+VNET_FEATURE_INIT (ly_sq_rate_input_feature, static) = {
+  .arc_name = "ip4-unicast",
+  .node_name = "ly-route-flow-rate-input",
+  .runs_before = VNET_FEATURES ("ly-route-pre-nat-route-ip4", "ip4-lookup"),
+};
+
+VNET_FEATURE_INIT (ly_sq_rate_output_feature, static) = {
+  .arc_name = "interface-output",
+  .node_name = "ly-route-flow-rate-output",
+  .runs_before = VNET_FEATURES ("ly-route-smart-qos-output"),
 };
 
 static_always_inline void
@@ -466,7 +689,7 @@ VLIB_NODE_FN (ly_sq_feature_node) (vlib_main_t *vm,
       u32 n_handoff = handoff - handoffs;
       u32 n_enqueued = vlib_buffer_enqueue_to_thread (
         vm, node, sqm->frame_queue_index, handoffs, handoff_threads,
-        n_handoff, 1);
+        n_handoff);
       if (n_enqueued < n_handoff)
         vlib_node_increment_counter (vm, node->node_index,
                                      LY_SQ_ERROR_OVERFLOW_DROP,

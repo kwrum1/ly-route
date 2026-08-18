@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"ly-route/backend/internal/runtime/dns"
+	"ly-route/backend/internal/runtime/nat"
 	"ly-route/backend/internal/runtime/proxy"
 	"ly-route/backend/internal/runtime/vpp"
 )
@@ -23,6 +24,15 @@ func TestRenderedArtifactHashesAndRedactsAuditSummary(t *testing.T) {
 		if strings.Contains(strings.ToLower(artifact.AuditSummary), forbidden) {
 			t.Fatalf("audit summary leaked %q: %s", forbidden, artifact.AuditSummary)
 		}
+	}
+}
+
+func TestSmartDNSUpstreamRoutingSelectorKeepsMarkAndInterface(t *testing.T) {
+	var rendered strings.Builder
+	writeSmartDNSRoutingSelector(&rendered, SmartDNSUpstream{SocketMark: 0x400dd20, Interface: "lydnsh6e1de0"})
+
+	if got, want := rendered.String(), " -set-mark 67165472 -interface lydnsh6e1de0"; got != want {
+		t.Fatalf("SmartDNS routing selector = %q, want %q", got, want)
 	}
 }
 
@@ -65,8 +75,8 @@ func TestRenderGatewayNftablesCaptureRejectsUnsafeLANInterface(t *testing.T) {
 func TestExpectedNftablesRulesAllowsProxyOnlyCapture(t *testing.T) {
 	content := `table inet ly_route_proxy_capture {
   chain proxy_prerouting {
-    iifname "proxy-in" meta l4proto tcp tproxy to :20001 meta mark set 0x101 accept
-    iifname "proxy-in" meta l4proto udp tproxy to :20001 meta mark set 0x101 accept
+    iifname "proxy-in" meta l4proto tcp meta mark set 0x101 tproxy to :20001 accept
+    iifname "proxy-in" meta l4proto udp meta mark set 0x101 tproxy to :20001 accept
   }
 }`
 	family, table, rules, err := expectedNftablesRules(content)
@@ -81,8 +91,8 @@ func TestExpectedNftablesRulesAllowsProxyOnlyCapture(t *testing.T) {
 func TestExpectedNftablesRulesRejectsDNSAfterTProxy(t *testing.T) {
 	content := `table inet ly_route_proxy_capture {
   chain proxy_prerouting {
-    iifname "proxy-in" meta l4proto tcp tproxy to :20001 meta mark set 0x101 accept
-    iifname "proxy-in" meta l4proto udp tproxy to :20001 meta mark set 0x101 accept
+    iifname "proxy-in" meta l4proto tcp meta mark set 0x101 tproxy to :20001 accept
+    iifname "proxy-in" meta l4proto udp meta mark set 0x101 tproxy to :20001 accept
     iifname "lan0" udp dport 53 redirect to :53
     iifname "lan0" tcp dport 53 redirect to :53
   }
@@ -290,15 +300,12 @@ func TestRenderServiceArtifactsForRuntimeTargets(t *testing.T) {
 	if len(vppArtifacts) != 1 || vppArtifacts[0].Service != VPP || vppArtifacts[0].Path != "/var/lib/ly-route/vpp/operations.json" || !strings.Contains(vppArtifacts[0].Content, "vpp.proxy-service.network") {
 		t.Fatalf("vpp artifacts = %#v", vppArtifacts)
 	}
-	routingArtifacts, err := RenderLinuxPolicyRouting(compiledProxy.LinuxPolicyRouting, dnsNetwork)
+	routingArtifacts, err := RenderLinuxPolicyRouting(compiledProxy.LinuxPolicyRouting, nat.BehaviorEndpointDependent, dnsNetwork)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(routingArtifacts) != 1 || !strings.Contains(routingArtifacts[0].Content, "ensure_tap") || !strings.Contains(routingArtifacts[0].Content, "wait_vpp_underlay lyroute-wan0") || !strings.Contains(routingArtifacts[0].Content, "set interface mtu packet 1460") || !strings.Contains(routingArtifacts[0].Content, "mtu 1460 up") || !strings.Contains(routingArtifacts[0].Content, "set interface ip address "+compiledProxy.ServiceNetwork.EgressVPPInterface+" "+compiledProxy.ServiceNetwork.EgressCIDR+" del") || !strings.Contains(routingArtifacts[0].Content, "set interface nat44 in "+compiledProxy.ServiceNetwork.EgressVPPInterface+" del") || !strings.Contains(routingArtifacts[0].Content, "ip route replace 192.168.88.0/24") || !strings.Contains(routingArtifacts[0].Content, "net.ipv4.conf."+compiledProxy.ServiceNetwork.IngressHostInterface+".accept_local=1") || !strings.Contains(routingArtifacts[0].Content, "ip route add "+dnsNetwork.HostAddress+"/32 via "+dnsNetwork.HostAddress+" "+dnsNetwork.VPPInterface) || !strings.Contains(routingArtifacts[0].Content, "vpp-return "+dnsNetwork.HostAddress+" "+dnsNetwork.VPPInterface) {
+	if len(routingArtifacts) != 1 || !strings.Contains(routingArtifacts[0].Content, "ensure_tap") || !strings.Contains(routingArtifacts[0].Content, "wait_vpp_underlay lyroute-wan0") || !strings.Contains(routingArtifacts[0].Content, "set interface mtu packet 1460") || !strings.Contains(routingArtifacts[0].Content, "mtu 1460 up") || !strings.Contains(routingArtifacts[0].Content, "set interface ip address del "+compiledProxy.ServiceNetwork.EgressVPPInterface+" "+compiledProxy.ServiceNetwork.EgressCIDR) || !strings.Contains(routingArtifacts[0].Content, "nat44 plugin enable") || !strings.Contains(routingArtifacts[0].Content, "set interface nat44 in "+compiledProxy.ServiceNetwork.EgressVPPInterface+" out lyroute-wan0 output-feature del") || !strings.Contains(routingArtifacts[0].Content, "set interface nat44 in "+compiledProxy.ServiceNetwork.EgressVPPInterface+" out lyroute-wan0\n") || !strings.Contains(routingArtifacts[0].Content, "ip route replace 192.168.88.0/24") || !strings.Contains(routingArtifacts[0].Content, "net.ipv4.conf."+compiledProxy.ServiceNetwork.IngressHostInterface+".accept_local=1") || !strings.Contains(routingArtifacts[0].Content, "net.ipv4.ip_nonlocal_bind=1") || !strings.Contains(routingArtifacts[0].Content, "IN_TAP_MAC") || !strings.Contains(routingArtifacts[0].Content, "set ip neighbor "+compiledProxy.ServiceNetwork.IngressVPPInterface+" "+compiledProxy.ServiceNetwork.IngressHostAddress) || !strings.Contains(routingArtifacts[0].Content, "set ip neighbor "+compiledProxy.ServiceNetwork.EgressVPPInterface+" "+compiledProxy.ServiceNetwork.EgressHostAddress) || !strings.Contains(routingArtifacts[0].Content, "ip route add "+dnsNetwork.HostAddress+"/32 via "+dnsNetwork.HostAddress+" "+dnsNetwork.VPPInterface) || !strings.Contains(routingArtifacts[0].Content, "vpp-return "+dnsNetwork.HostAddress+" "+dnsNetwork.VPPInterface) || !strings.Contains(routingArtifacts[0].Content, "lypxhin*|lypxhout*") || !strings.Contains(routingArtifacts[0].Content, "lydnsh*") || !strings.Contains(routingArtifacts[0].Content, "ip link delete dev \"$host_if\"") {
 		t.Fatalf("proxy service routing artifacts = %#v", routingArtifacts)
-	}
-	if strings.Contains(routingArtifacts[0].Content, "set interface nat44 in "+compiledProxy.ServiceNetwork.EgressVPPInterface+" 2>") {
-		t.Fatalf("proxy service TAP was configured as a NAT44 input: %s", routingArtifacts[0].Content)
 	}
 
 	pppoeArtifacts, err := RenderPPPoE(PPPoEPeer{ID: "wan", Interface: "eth0", Username: "user", Password: "secret"})
@@ -339,10 +346,13 @@ func TestRenderSmartDNSBundlePinsDNSPolicyToSelectedWANAndBoundsCache(t *testing
 		t.Fatal(err)
 	}
 	content := artifacts[0].Content
-	for _, required := range []string{"server 9.9.9.9 -group dns-wan-primary -exclude-default-group -interface wan0", "address /-.updates.example/-", "nameserver /-.updates.example/dns-wan-primary", "ipset /-.updates.example/lyroute_dns_fixed-wan", "cache-persist no", "cache-size 32768", "rr-ttl-min 60", "rr-ttl-max 600", "prefetch-domain yes"} {
+	for _, required := range []string{"server 9.9.9.9 -group dns-wan-primary -exclude-default-group -interface wan0", "nameserver /-.updates.example/dns-wan-primary", "ipset /-.updates.example/lyroute_dns_fixed-wan", "address #", "cache-persist no", "ipset-timeout yes", "cache-size 32768", "rr-ttl-min 60", "rr-ttl-max 600", "prefetch-domain yes"} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("smartdns bundle missing %q: %s", required, content)
 		}
+	}
+	if strings.Contains(content, "address /-.updates.example/-") {
+		t.Fatalf("direct SmartDNS rule must not suppress upstream answers: %s", content)
 	}
 }
 
@@ -360,8 +370,8 @@ func TestRenderSmartDNSBundleSupportsDoHAndFixedWANMiss(t *testing.T) {
 		ID:     "active",
 		Render: compiled.RenderSmartDNS(),
 		Upstreams: []SmartDNSUpstream{
-			{ID: "dns-ali", Servers: []string{"https://dns.alidns.com/dns-query"}, Interface: "ppp0", WANEgressID: "pppoe"},
-			{ID: "dns-cf", Servers: []string{"https://cloudflare-dns.com/dns-query"}, Interface: "proxy0", WANEgressID: "proxy"},
+			{ID: "dns-ali", Servers: []string{"https://dns.alidns.com/dns-query"}, BootstrapServers: []string{"223.5.5.5"}, ResolvedHostIPs: map[string][]string{"dns.alidns.com": {"223.6.6.6"}}, Interface: "ppp0", WANEgressID: "pppoe"},
+			{ID: "dns-cf", Servers: []string{"https://cloudflare-dns.com/dns-query"}, BootstrapServers: []string{"1.1.1.1"}, ResolvedHostIPs: map[string][]string{"cloudflare-dns.com": {"1.1.1.1"}}, Interface: "proxy0", WANEgressID: "proxy"},
 		},
 	}})
 	if err != nil {
@@ -369,14 +379,19 @@ func TestRenderSmartDNSBundleSupportsDoHAndFixedWANMiss(t *testing.T) {
 	}
 	content := artifacts[0].Content
 	for _, required := range []string{
-		"server-https https://dns.alidns.com/dns-query -group dns-ali -exclude-default-group -interface ppp0",
-		"server-https https://cloudflare-dns.com/dns-query -group dns-cf -exclude-default-group -interface proxy0",
+		"server-https https://223.6.6.6/dns-query -group dns-ali -exclude-default-group -host-name dns.alidns.com -http-host dns.alidns.com -tls-host-verify dns.alidns.com -interface ppp0",
+		"server-https https://1.1.1.1/dns-query -group dns-cf -exclude-default-group -host-name cloudflare-dns.com -http-host cloudflare-dns.com -tls-host-verify cloudflare-dns.com -interface proxy0",
 		"nameserver /./dns-cf",
+		"nameserver /dns.alidns.com/dns-ali-bootstrap",
+		"nameserver /cloudflare-dns.com/dns-cf-bootstrap",
 		"ipset /-.cn.example/lyroute_dns_cn",
 	} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("DoH/fixed-WAN SmartDNS output missing %q: %s", required, content)
 		}
+	}
+	if strings.Index(content, "nameserver /dns.alidns.com/dns-ali-bootstrap") < strings.Index(content, "nameserver /./dns-cf") {
+		t.Fatalf("Bootstrap hostname rule must follow the global DNS miss rule: %s", content)
 	}
 }
 
@@ -540,8 +555,8 @@ func TestRenderPPPoERejectsUnsafeProductionConfig(t *testing.T) {
 
 func TestRenderPPPoEConfigCreatesIndependentMultiWANPeersAndNativeSecrets(t *testing.T) {
 	artifacts, err := RenderPPPoEConfig([]PPPoEPeer{
-		{ID: "wan-blue", Interface: "eth7", Username: "blue-user", Password: "blue-secret", NATInsideInterfaces: []string{"lyroute-lan0"}},
-		{ID: "wan-green", Interface: "eth8", Username: "green-user", Password: "green-secret"},
+		{ID: "wan-blue", Interface: "eth7", Username: "same-account-text", Password: "blue-secret", NATInsideInterfaces: []string{"lyroute-lan0"}},
+		{ID: "wan-green", Interface: "eth8", Username: "same-account-text", Password: "green-secret"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -559,9 +574,15 @@ func TestRenderPPPoEConfigCreatesIndependentMultiWANPeersAndNativeSecrets(t *tes
 		if !strings.Contains(artifact.Content, `"vppctl": "vppctl"`) || strings.Contains(artifact.Content, "/usr/local/bin/ly-route-vppctl") {
 			t.Fatalf("native client config does not use the production VPP CLI from PATH: %s", artifact.Content)
 		}
+		if !strings.Contains(artifact.Content, `"username": "same-account-text"`) {
+			t.Fatalf("independent WAN account text was not preserved: %s", artifact.Content)
+		}
 	}
 	if !strings.Contains(artifacts[0].Content, "nat_inside_interfaces") || !strings.Contains(artifacts[0].Content, "lyroute-lan0") {
 		t.Fatalf("PPPoE artifact omitted NAT inside interfaces: %s", artifacts[0].Content)
+	}
+	if strings.Contains(artifacts[0].Content, `"session_interface"`) || strings.Contains(artifacts[1].Content, `"session_interface"`) {
+		t.Fatalf("PPPoE artifacts must not pin VPP-native session names: %s %s", artifacts[0].Content, artifacts[1].Content)
 	}
 	units := applyUnits(PPPd, artifacts)
 	if got, want := strings.Join(units, ","), "ly-route-pppoe@ly-route-wan-blue.service,ly-route-pppoe@ly-route-wan-green.service"; got != want {
@@ -671,6 +692,28 @@ func TestFilesystemControllerWritesArtifactsAndRunsServiceCommand(t *testing.T) 
 	}
 	if got, want := strings.Join(runner.commands, " "), "systemctl reload-or-restart smartdns.service systemctl show smartdns.service --property=ActiveEnterTimestampMonotonic --value"; got != want {
 		t.Fatalf("commands = %q, want %q", got, want)
+	}
+}
+
+func TestFilesystemControllerSkipsUnchangedHealthyServiceRestart(t *testing.T) {
+	runner := availableRunner(SmartDNS, map[string]string{
+		"systemctl show smartdns.service --property=ActiveEnterTimestampMonotonic --value": "77123",
+	})
+	controller := FilesystemController{RootDir: t.TempDir(), Runner: runner}
+	artifacts := []RenderedArtifact{
+		NewArtifact(SmartDNS, "/etc/smartdns/ly-route-default.json", `{"ok":true}`, "reload"),
+	}
+
+	if err := controller.ReloadOrRestart(context.Background(), SmartDNS, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	runner.commands = nil
+	if err := controller.ReloadOrRestart(context.Background(), SmartDNS, artifacts); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := strings.Join(runner.commands, " "), "systemctl show smartdns.service --property=ActiveEnterTimestampMonotonic --value"; got != want {
+		t.Fatalf("unchanged service commands = %q, want %q", got, want)
 	}
 }
 
@@ -815,17 +858,25 @@ type fakeController struct {
 }
 
 type fakeRunner struct {
-	commands []string
-	health   map[ServiceName]Health
-	outputs  map[string]string
-	readErrs map[ServiceName]error
-	runErrs  map[string]error
+	commands     []string
+	health       map[ServiceName]Health
+	outputs      map[string]string
+	readErrs     map[ServiceName]error
+	runErrs      map[string]error
+	runErrCounts map[string]int
 }
 
 func (runner *fakeRunner) Run(_ context.Context, name string, args ...string) error {
 	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	runner.commands = append(runner.commands, command)
 	if err := runner.runErrs[command]; err != nil {
+		if runner.runErrCounts != nil {
+			if remaining := runner.runErrCounts[command]; remaining > 0 {
+				runner.runErrCounts[command] = remaining - 1
+				return err
+			}
+			return nil
+		}
 		return err
 	}
 	return nil

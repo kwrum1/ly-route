@@ -69,6 +69,29 @@ func TestGatewayACLQoSDeleteConfirmsAbsence(t *testing.T) {
 	}
 }
 
+func TestBuildACLQoSOperationsDeletesReplacementBeforeCreate(t *testing.T) {
+	prior := flow.VPPObjectGroup{Kind: "vpp.behavior.rate", Objects: []flow.VPPObject{{RuleID: "flow-30", Action: flow.ActionPolicer}}}
+	desired := flow.VPPObjectGroup{Kind: "vpp.behavior.rate", Objects: []flow.VPPObject{{RuleID: "flow-30", Action: flow.ActionPolicer, Policer: &flow.Policer{RateBPS: 1_000_000}}}}
+	operations, err := BuildACLQoSOperations(ACLQoSPlan{
+		TransactionID: "txn-qos-replace",
+		QoS:           []flow.VPPObjectGroup{desired},
+		DeleteQoS:     []string{prior.Kind},
+		DeleteQoSState: []flow.VPPObjectGroup{prior},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(operations) != 2 {
+		t.Fatalf("operations = %#v, want delete and create", operations)
+	}
+	if !strings.Contains(strings.Join(operations[0].VPPCtlCommands, "\n"), "policer del") {
+		t.Fatalf("first operation = %#v, want replacement delete", operations[0])
+	}
+	if !strings.Contains(strings.Join(operations[1].VPPCtlCommands, "\n"), "policer add") {
+		t.Fatalf("second operation = %#v, want replacement create", operations[1])
+	}
+}
+
 func TestGatewayACLQoSApplyFailureRollsBackPriorSnapshot(t *testing.T) {
 	// Given
 	priorACL := trafficpolicy.SecurityACL{ID: "acl-prior", Action: "permit"}
@@ -96,6 +119,19 @@ func TestGatewayACLQoSApplyFailureRollsBackPriorSnapshot(t *testing.T) {
 	}
 	if client.rollbackOperations != 2 {
 		t.Fatalf("rollback operations = %d, want prior ACL and QoS snapshot replay", client.rollbackOperations)
+	}
+	foundTypedQoSRollback := false
+	for _, operation := range client.operations {
+		if operation.Name != "vpp.qos.rollback" {
+			continue
+		}
+		if _, ok := operation.Payload.(flow.VPPObjectGroup); !ok {
+			t.Fatalf("rollback QoS operation = %#v, want typed QoS payload", operation)
+		}
+		foundTypedQoSRollback = true
+	}
+	if !foundTypedQoSRollback {
+		t.Fatalf("operations = %#v, want typed QoS rollback", client.operations)
 	}
 }
 

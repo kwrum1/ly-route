@@ -30,10 +30,10 @@ func TestRuntimeCharacterization_preserves_full_apply_and_rollback_order(t *test
 	}
 
 	// Then
-	if got, want := strings.Join(controller.applied, ","), "vpp,pppd,linux-routing,smartdns,kea,xray,nftables,ipv6-ra"; got != want {
+	if got, want := strings.Join(controller.applied, ","), "vpp,pppoe,linux-routing,smartdns,kea,xray,nftables,ipv6-ra"; got != want {
 		t.Fatalf("apply order = %s, want %s", got, want)
 	}
-	if got, want := strings.Join(controller.rolledBack, ","), "ipv6-ra,nftables,xray,kea,smartdns,linux-routing,pppd,vpp"; got != want {
+	if got, want := strings.Join(controller.rolledBack, ","), "ipv6-ra,nftables,xray,kea,smartdns,linux-routing,pppoe,vpp"; got != want {
 		t.Fatalf("rollback order = %s, want %s", got, want)
 	}
 }

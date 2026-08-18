@@ -42,6 +42,95 @@ func TestFilesystemController_missing_daemon_runner_restores_prior_artifact(t *t
 	}
 }
 
+func TestFilesystemController_failed_apply_restores_prior_receipt_and_clears_rollback_metadata(t *testing.T) {
+	root := t.TempDir()
+	artifactPath := filepath.Join(root, "etc/kea/kea-dhcp4.conf")
+	receiptPath := filepath.Join(root, "var/lib/ly-route/service-runtime/receipt-kea.json")
+	for _, path := range []string{artifactPath, receiptPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(artifactPath, []byte("prior-config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{runErrs: map[string]error{
+		"systemctl start kea-dhcp4-server.service": errors.New("kea start failed"),
+	}, runErrCounts: map[string]int{"systemctl start kea-dhcp4-server.service": 1}}
+	controller := FilesystemController{RootDir: root, Runner: runner}
+	if err := controller.saveApplyRecord(Kea, []RenderedArtifact{
+		NewArtifact(Kea, "/etc/kea/kea-dhcp4.conf", "prior-config", "restart"),
+	}, "prior-transaction"); err != nil {
+		t.Fatal(err)
+	}
+	priorReceipt, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = controller.ReloadOrRestart(context.Background(), Kea, []RenderedArtifact{
+		NewArtifact(Kea, "/etc/kea/kea-dhcp4.conf", "desired-config", "restart"),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "kea start failed") {
+		t.Fatalf("apply error = %v", err)
+	}
+	for path, want := range map[string]string{
+		artifactPath: "prior-config",
+		receiptPath:  string(priorReceipt),
+	} {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if got := string(content); got != want {
+			t.Fatalf("%s after failed apply = %q, want %q", path, got, want)
+		}
+	}
+	rollbackPath := filepath.Join(root, "var/lib/ly-route/service-runtime/rollback-kea.json")
+	if _, statErr := os.Stat(rollbackPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed transaction left rollback metadata: %v", statErr)
+	}
+}
+
+func TestFilesystemController_failed_apply_discards_stale_prior_receipt(t *testing.T) {
+	root := t.TempDir()
+	artifactPath := filepath.Join(root, "etc/kea/kea-dhcp4.conf")
+	if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifactPath, []byte("prior-config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{runErrs: map[string]error{
+		"systemctl start kea-dhcp4-server.service": errors.New("kea start failed"),
+	}}
+	controller := FilesystemController{RootDir: root, Runner: runner}
+	if err := controller.saveApplyRecord(Kea, []RenderedArtifact{
+		NewArtifact(Kea, "/etc/kea/kea-dhcp4.conf", "different-config", "restart"),
+	}, "stale-transaction"); err != nil {
+		t.Fatal(err)
+	}
+
+	err := controller.ReloadOrRestart(context.Background(), Kea, []RenderedArtifact{
+		NewArtifact(Kea, "/etc/kea/kea-dhcp4.conf", "desired-config", "restart"),
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "kea start failed") {
+		t.Fatalf("apply error = %v", err)
+	}
+	content, readErr := os.ReadFile(artifactPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := string(content); got != "prior-config" {
+		t.Fatalf("artifact after failed apply = %q", got)
+	}
+	if _, statErr := os.Stat(controller.applyRecordPath(Kea)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("stale receipt survived failed apply: %v", statErr)
+	}
+}
+
 func TestFilesystemController_receipt_and_readback_bind_live_artifact_hashes(t *testing.T) {
 	// Given
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
@@ -175,7 +264,7 @@ func TestFilesystemController_failed_PPPoE_restores_prior_peer(t *testing.T) {
 	if err := os.WriteFile(path, []byte("prior-peer"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	runner := &fakeRunner{runErrs: map[string]error{"systemctl reload-or-restart ly-route-pppoe@ly-route-wan.service": errors.New("PPPoE authentication failed")}}
+	runner := &fakeRunner{runErrs: map[string]error{"systemctl restart ly-route-pppoe@ly-route-wan.service": errors.New("PPPoE authentication failed")}}
 	controller := FilesystemController{RootDir: root, Runner: runner}
 
 	// When

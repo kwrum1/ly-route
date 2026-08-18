@@ -2,9 +2,15 @@ name: Gateway production artifacts
 
 on:
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -20,6 +26,13 @@ permissions:
   contents: read
 
 env:
+  LY_ROUTE_GO_VERSION: go1.24.4
+  GOTOOLCHAIN: local
+  CGO_ENABLED: '1'
+  GOPROXY: https://goproxy.io,direct
+  GOSUMDB: off
+  TZ: UTC
+  LC_ALL: C.UTF-8
   LY_ROUTE_MIRROR: https://mirrors.ustc.edu.cn/debian
   LY_ROUTE_SECURITY_MIRROR: https://mirrors.ustc.edu.cn/debian-security
   LY_ROUTE_SMARTDNS_REF: Release48.3
@@ -27,16 +40,35 @@ env:
   LY_ROUTE_VPP_COMMIT: 744d3c7159ae130fb57f669a826ff1e45ed51836
 
 jobs:
+  verify:
+    name: Fast source verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.4'
+          cache-dependency-path: backend/go.sum
+      - name: Run daily source gate
+        run: bash scripts/ci-verify.sh
+
   x86:
     name: x86-64 IMG and upgrade
+    needs: verify
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.x'
+          go-version: '1.24.4'
           cache-dependency-path: backend/go.sum
+      - name: Normalize source line endings
+        run: bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
+      - name: Verify compiler environment
+        run: bash scripts/verify-compiler-environment.sh
       - name: Reclaim runner disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
@@ -81,6 +113,7 @@ jobs:
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
           ./scripts/build-runtime-debs.sh vpp-apply
+          sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-pppoe-client
           sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-smart-qos
           sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-security-guard
       - name: Build gateway rootfs and upgrade
@@ -122,14 +155,24 @@ jobs:
 
   arm64:
     name: Armbian arm64 installer and upgrade
+    needs: verify
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: '1.26.x'
+          go-version: '1.24.4'
           cache-dependency-path: backend/go.sum
+      - name: Normalize source line endings
+        run: bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
+      - name: Verify compiler environment
+        env:
+          LY_ROUTE_EXPECT_HOST_ARCH: aarch64
+          LY_ROUTE_EXPECT_GOARCH: arm64
+          LY_ROUTE_EXPECT_DEB_ARCH: arm64
+        run: bash scripts/verify-compiler-environment.sh
       - name: Reclaim runner disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
@@ -165,6 +208,7 @@ jobs:
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
           ./scripts/build-runtime-debs.sh vpp-apply
+          ./scripts/build-runtime-debs.sh vpp-pppoe-client
           ./scripts/build-runtime-debs.sh vpp-smart-qos
           ./scripts/build-runtime-debs.sh vpp-security-guard
       - name: Build ARM64 gateway rootfs, installer and upgrade
@@ -191,9 +235,10 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [x86, arm64]
+    needs: [verify, x86, arm64]
     if: >-
-      always() && (needs.x86.result == 'success' || needs.arm64.result == 'success') &&
+      always() && needs.verify.result == 'success' &&
+      (needs.x86.result == 'success' || needs.arm64.result == 'success') &&
       (startsWith(github.ref, 'refs/tags/v') ||
       (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
     runs-on: ubuntu-24.04

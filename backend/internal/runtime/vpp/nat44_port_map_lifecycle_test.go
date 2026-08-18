@@ -34,6 +34,56 @@ func TestGatewayNAT44PortMapApplyReadsBackTypedState(t *testing.T) {
 	}
 }
 
+func TestFullConeNATCommandsUseResolvedWANOutput(t *testing.T) {
+	operations, err := BuildNAT44Operations(NAT44Plan{
+		TransactionID:       "txn-full-cone-ingress",
+		Behavior:            nat.BehaviorFullCone,
+		IngressVPPInterface: "lyroute-ens34",
+		PortMappings: []nat.PortMapping{{
+			ID:              "web",
+			Protocol:        "tcp",
+			ExternalAddress: "203.0.113.10",
+			ExternalPort:    8443,
+			InternalHost:    "192.168.88.20",
+			InternalPort:    443,
+			WANInterface:    "pppoe_session0",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Join(operations[0].VPPCtlCommands, "\n")
+	if !strings.Contains(commands, "set interface nat44 ei in pppoe_session0 output-feature") {
+		t.Fatalf("full-cone NAT commands missing resolved WAN output: %s", commands)
+	}
+	if strings.Contains(commands, "lyroute-ens34") {
+		t.Fatalf("full-cone NAT commands re-enable LAN input NAT: %s", commands)
+	}
+	if strings.Contains(commands, "$LY_ROUTE_LAN_INTERFACE") {
+		t.Fatalf("full-cone NAT commands retain an unresolved LAN template: %s", commands)
+	}
+}
+
+func TestFullConeNATMappingCommandsDoNotResetEITable(t *testing.T) {
+	staticCommands := strings.Join(natStaticMappingCommandsForBehavior(nat.BehaviorFullCone, nat.StaticMapping{
+		ID: "host", InternalAddress: "192.168.88.20", ExternalAddress: "203.0.113.10",
+	}), "\n")
+	portCommands := strings.Join(natPortMappingCommandsForBehavior(nat.BehaviorFullCone, nat.PortMapping{
+		ID: "web", Protocol: "tcp", InternalHost: "192.168.88.20", InternalPort: 443, ExternalAddress: "203.0.113.10", ExternalPort: 8443,
+	}), "\n")
+	for _, commands := range []string{staticCommands, portCommands} {
+		if strings.Contains(commands, "nat44 ei plugin disable") {
+			t.Fatalf("full-cone mapping commands reset the EI table: %s", commands)
+		}
+		if strings.Contains(commands, "nat44 ei plugin enable") {
+			t.Fatalf("full-cone mapping commands repeat lifecycle initialization: %s", commands)
+		}
+	}
+	if commands := strings.Join(natInitializeCommands(nat.BehaviorFullCone), "\n"); !strings.Contains(commands, "nat44 ei plugin enable") {
+		t.Fatalf("full-cone lifecycle does not enable EI: %s", commands)
+	}
+}
+
 func TestGatewayNAT44PortMapReadbackRejectsMismatchedPayload(t *testing.T) {
 	// Given
 	client := &nat44LifecycleClient{replies: map[string]Reply{

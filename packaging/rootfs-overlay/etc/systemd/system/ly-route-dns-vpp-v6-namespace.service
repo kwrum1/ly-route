@@ -1,8 +1,8 @@
 [Unit]
 Description=LY-Route VPP DNS application namespaces
-Requires=vpp.service ly-route-vpp-apply.service
+Requires=vpp.service ly-route-vpp-session-enable.service
 PartOf=vpp.service
-After=vpp.service ly-route-vpp-apply.service
+After=vpp.service ly-route-vpp-session-enable.service
 Before=ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service
 
 [Service]

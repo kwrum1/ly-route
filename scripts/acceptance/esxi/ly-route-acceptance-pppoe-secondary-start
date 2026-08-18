@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+ip link set ens256 up
+
+exec /usr/sbin/pppoe-server \
+  -I ens256 \
+  -L 10.68.0.1 \
+  -R 10.68.0.10 \
+  -N 8 \
+  -C LY-ROUTE-AC-SECONDARY \
+  -O /etc/ppp/ly-route-acceptance-options \
+  -X /run/ly-route-pppoe-server-secondary.pid

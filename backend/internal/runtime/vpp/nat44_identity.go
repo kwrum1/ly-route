@@ -10,8 +10,22 @@ func deleteNATStaticCommands(mapping nat.StaticMapping) []string {
 	return []string{fmt.Sprintf("nat44 add static mapping local %s external %s del", mapping.InternalAddress, mapping.ExternalAddress), "show nat44 static mappings", "show nat44 sessions"}
 }
 
+func deleteNATStaticCommandsForBehavior(behavior nat.Behavior, mapping nat.StaticMapping) []string {
+	if behavior == nat.BehaviorFullCone {
+		return []string{fmt.Sprintf("nat44 ei add static mapping local %s external %s del", mapping.InternalAddress, mapping.ExternalAddress), "show nat44 ei static mappings", "show nat44 ei sessions"}
+	}
+	return deleteNATStaticCommands(mapping)
+}
+
 func deleteNATPortCommands(mapping nat.PortMapping) []string {
 	return []string{fmt.Sprintf("nat44 add static mapping %s local %s %d external %s %d del", mapping.Protocol, mapping.InternalHost, mapping.InternalPort, mapping.ExternalAddress, mapping.ExternalPort), "show nat44 static mappings", "show nat44 sessions"}
+}
+
+func deleteNATPortCommandsForBehavior(behavior nat.Behavior, mapping nat.PortMapping) []string {
+	if behavior == nat.BehaviorFullCone {
+		return []string{fmt.Sprintf("nat44 ei add static mapping %s local %s %d external %s %d del", mapping.Protocol, mapping.InternalHost, mapping.InternalPort, mapping.ExternalAddress, mapping.ExternalPort), "show nat44 ei static mappings", "show nat44 ei sessions"}
+	}
+	return deleteNATPortCommands(mapping)
 }
 
 func staticMappingByID(mappings []nat.StaticMapping, id string) (nat.StaticMapping, bool) {

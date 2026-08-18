@@ -79,7 +79,12 @@ func (adapter *productionGatewayAdapter) applyDiff(ctx context.Context, diff vpp
 	case "routes":
 		plan := diff.Routes
 		plan.DeleteRoutes = nil
-		plan.WANGroupsContext = adapter.routeWANGroupsContext()
+		// Route compilation and readback need the complete desired WAN-group
+		// inventory even when no group changed in this transaction.  Relying on
+		// the preceding wan-groups adapter left this context empty on route-only
+		// repairs, so a valid lookup-in-table path was compared with the literal
+		// group ID and rejected as drift.
+		plan.WANGroupsContext = vpp.NewWANGroupsContext(prior.WANGroups, desired.Policy.WANGroups)
 		plan.RoutePolicyContext = append([]trafficpolicy.RoutePolicy(nil), desired.Policy.RoutePolicies...)
 		result, err := adapter.reconciler.adapter.ApplyRouteWANGroup(ctx, plan, prior)
 		return result.Readback, err

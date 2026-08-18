@@ -16,16 +16,30 @@ const natReturnGuardPriority = 2
 var errNATReturnGuardDrift = errors.New("NAT return guard is missing or mismatched")
 
 type natReturnGuard struct {
-	resource        string
-	externalAddress string
-	wanInterface    string
-	wanNextHop      string
+	resource            string
+	externalAddress     string
+	internalAddress     string
+	protocol            string
+	internalPort        int
+	wanInterface        string
+	wanNextHop          string
+	ingressVPPInterface string
+}
+
+func (guard natReturnGuard) ingress() string {
+	if strings.TrimSpace(guard.ingressVPPInterface) != "" {
+		return strings.TrimSpace(guard.ingressVPPInterface)
+	}
+	return configuredLANVPPInterface()
 }
 
 func natReturnGuardForPortMapping(mapping nat.PortMapping) natReturnGuard {
 	return natReturnGuard{
 		resource:        mapping.ID,
 		externalAddress: mapping.ExternalAddress,
+		internalAddress: mapping.InternalHost,
+		protocol:        mapping.Protocol,
+		internalPort:    mapping.InternalPort,
 		wanInterface:    mapping.WANInterface,
 		wanNextHop:      mapping.WANNextHop,
 	}
@@ -35,6 +49,8 @@ func natReturnGuardForStaticMapping(mapping nat.StaticMapping) natReturnGuard {
 	return natReturnGuard{
 		resource:        mapping.ID,
 		externalAddress: mapping.ExternalAddress,
+		internalAddress: mapping.InternalAddress,
+		protocol:        "any",
 		wanInterface:    mapping.WANInterface,
 		wanNextHop:      mapping.WANNextHop,
 	}
@@ -78,24 +94,34 @@ func natReturnGuardDrift(err error) error {
 
 func nat44SnapshotCommands(request SnapshotRequest) []string {
 	commands := []string{"show nat44 static mappings"}
+	if request.NATBehavior == nat.BehaviorFullCone {
+		// NAT44-EI has its own inventory namespace. Return-path ACL guards are
+		// still checked below, but the mapping readback must use the EI table.
+		commands = []string{"show nat44 ei static mappings", "show nat44 ei interfaces", "show nat44 ei sessions"}
+	}
 	if !request.VerifyNATReturnGuards {
 		return commands
 	}
 	commands = append(commands, "show acl-plugin acl")
+	commands = append(commands, "show ly-route pre-nat-route")
 	for _, mapping := range request.Candidates.NATStaticMappings {
 		commands = appendUnique(commands, fmt.Sprintf("show abf policy %d", natReturnGuardForStaticMapping(mapping).policyID()))
 	}
 	for _, mapping := range request.Candidates.NATPortMappings {
 		commands = appendUnique(commands, fmt.Sprintf("show abf policy %d", natReturnGuardForPortMapping(mapping).policyID()))
 	}
-	if ingress := configuredLANVPPInterface(); ingress != "" {
+	ingress := strings.TrimSpace(request.NATIngressVPPInterface)
+	if ingress == "" {
+		ingress = configuredLANVPPInterface()
+	}
+	if ingress != "" {
 		commands = appendUnique(commands, "show abf attach "+ingress)
 	}
 	return commands
 }
 
 func verifyNATReturnGuardReadback(results []VPPCTLCommandResult, guard natReturnGuard) error {
-	ingress := configuredLANVPPInterface()
+	ingress := guard.ingress()
 	if ingress == "" {
 		return snapshotDecodeError("NAT return guard %q has no resolved LAN VPP interface", guard.resource)
 	}
@@ -133,6 +159,13 @@ func verifyNATReturnGuardReadback(results []VPPCTLCommandResult, guard natReturn
 	if !routePolicyAttached(attachOutput, guard.policyID()) {
 		return natReturnGuardDrift(snapshotDecodeError("NAT return guard %q attachment is missing", guard.resource))
 	}
+	preNATOutput, err := commandOutputAllowEmpty(results, "show ly-route pre-nat-route")
+	if err != nil {
+		return err
+	}
+	if err := verifyNATPreRouteBypass(preNATOutput, guard); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -158,7 +191,12 @@ func nat44MappingOperationDeletes(operation Operation) bool {
 	}
 	for _, raw := range operation.VPPCtlCommands {
 		command := strings.TrimSpace(strings.TrimPrefix(raw, "?"))
-		if strings.HasPrefix(command, "nat44 add static mapping ") && !strings.HasSuffix(command, " del") {
+		// Both NAT44-ED and NAT44-EI use a static-mapping command.  The
+		// return-path guard must be installed for either mode; otherwise a
+		// full-cone port mapping would be mistaken for a delete operation and
+		// its inbound guard would be removed immediately after the mapping was
+		// created.
+		if (strings.HasPrefix(command, "nat44 add static mapping ") || strings.HasPrefix(command, "nat44 ei add static mapping ")) && !strings.HasSuffix(command, " del") {
 			return false
 		}
 	}
@@ -182,7 +220,7 @@ func (channel vppctlChannel) replaceNATReturnGuard(ctx context.Context, operatio
 	if err != nil {
 		return removed, err
 	}
-	ingress := configuredLANVPPInterface()
+	ingress := guard.ingress()
 	if ingress == "" {
 		return removed, snapshotDecodeError("NAT return guard %q has no resolved LAN VPP interface", guard.resource)
 	}
@@ -195,12 +233,19 @@ func (channel vppctlChannel) replaceNATReturnGuard(ctx context.Context, operatio
 	if err != nil {
 		return append(removed, created...), err
 	}
+	bypass, err := guard.preNATBypassCommand()
+	if err != nil {
+		return append(removed, created...), err
+	}
 	applied, err := channel.runServiceChainCommands(ctx, operation,
+		guard.preNATBypassDeleteCommand(),
+		bypass,
 		fmt.Sprintf("abf policy add id %d acl %d via %s", guard.policyID(), aclID, guard.via()),
 		fmt.Sprintf("abf attach ip4 policy %d priority %d %s", guard.policyID(), natReturnGuardPriority, ingress),
 		fmt.Sprintf("show acl-plugin acl index %d", aclID),
 		fmt.Sprintf("show abf policy %d", guard.policyID()),
-		"show abf attach "+ingress)
+		"show abf attach "+ingress,
+		"show ly-route pre-nat-route")
 	results := append(append(removed, created...), applied...)
 	if err != nil {
 		return results, err
@@ -217,6 +262,9 @@ func (channel vppctlChannel) replaceNATReturnGuard(ctx context.Context, operatio
 	if !routePolicyAttached(resultStdoutLast(results, "show abf attach "+ingress), guard.policyID()) {
 		return results, snapshotDecodeError("NAT return guard %q is not attached to LAN", guard.resource)
 	}
+	if err := verifyNATPreRouteBypass(resultStdoutLast(results, "show ly-route pre-nat-route"), guard); err != nil {
+		return results, err
+	}
 	return results, nil
 }
 
@@ -226,6 +274,7 @@ func (channel vppctlChannel) removeNATReturnGuard(ctx context.Context, operation
 		return nil, snapshotDecodeError("NAT return guard %q has no resolved LAN VPP interface", guard.resource)
 	}
 	results, err := channel.runServiceChainCommands(ctx, operation,
+		guard.preNATBypassDeleteCommand(),
 		fmt.Sprintf("show abf policy %d", guard.policyID()),
 		"show ip fib summary",
 		"show acl-plugin acl")

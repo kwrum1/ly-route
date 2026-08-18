@@ -45,6 +45,7 @@ static void require_port(const uint8_t *query, size_t length, const struct socka
 
 int main(int argc, char **argv) {
     if (argc != 3) return 2;
+    resolve_libc();
     if (load_source_routes(argv[1]) != 0) return 3;
 
     struct sockaddr_in client4 = {.sin_family = AF_INET};
@@ -58,10 +59,38 @@ int main(int argc, char **argv) {
     size_t length = make_query(query, "updates.example");
     require_port(query, length, (const struct sockaddr *)&client4, 12000);
     require_port(query, length, (const struct sockaddr *)&client6, 12000);
-    require_port(query, length, (const struct sockaddr *)&outside4, 1053);
+    require_port(query, length, (const struct sockaddr *)&outside4, 53);
+
+    int default_upstream = open_upstream(53, SOCK_DGRAM);
+    if (default_upstream < 0) {
+        fputs("default SmartDNS upstream could not be opened\n", stderr);
+        return 8;
+    }
+    struct sockaddr_in default_peer = {0};
+    socklen_t default_peer_length = sizeof(default_peer);
+    char default_peer_address[INET_ADDRSTRLEN] = {0};
+    if (getpeername(default_upstream, (struct sockaddr *)&default_peer, &default_peer_length) != 0 ||
+        !inet_ntop(AF_INET, &default_peer.sin_addr, default_peer_address, sizeof(default_peer_address)) ||
+        strcmp(default_peer_address, "127.0.0.53") != 0 || ntohs(default_peer.sin_port) != 53) {
+        fputs("default SmartDNS upstream is not 127.0.0.53:53\n", stderr);
+        return 9;
+    }
+    libc_close(default_upstream);
 
     length = make_query(query, "cdn.video.example");
     require_port(query, length, (const struct sockaddr *)&client4, 12001);
+
+    uint8_t servfail[12] = {0};
+    servfail[3] = 2;
+    if (!dns_response_is_servfail(servfail, sizeof(servfail))) {
+        fputs("SERVFAIL response was not detected\n", stderr);
+        return 6;
+    }
+    servfail[3] = 0;
+    if (dns_response_is_servfail(servfail, sizeof(servfail)) || dns_response_is_servfail(servfail, 11)) {
+        fputs("non-SERVFAIL response was detected as retryable\n", stderr);
+        return 7;
+    }
 
     uint8_t compressed[64] = {0};
     compressed[2] = 1;

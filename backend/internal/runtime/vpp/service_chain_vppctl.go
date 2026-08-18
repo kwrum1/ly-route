@@ -199,7 +199,13 @@ func taggedServiceChainACLIDs(output, tag string) []int {
 	var ids []int
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 6 || fields[0] != "acl-index" || strings.Trim(fields[5], "{}") != tag {
+		// Stock VPP prints: `acl-index <id> count <n> tag {<tag>}`.
+		// The tag is one field; requiring a sixth field silently skipped every
+		// dynamic ACL and left stale objects behind during replacement.
+		if len(fields) < 5 || fields[0] != "acl-index" || fields[2] != "count" || fields[4] != "tag" {
+			continue
+		}
+		if len(fields) < 6 || strings.Trim(fields[5], "{}") != tag {
 			continue
 		}
 		if id, err := strconv.Atoi(fields[1]); err == nil {

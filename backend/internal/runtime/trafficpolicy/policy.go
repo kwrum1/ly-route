@@ -73,16 +73,23 @@ type SecurityACL struct {
 }
 
 type WANGroup struct {
-	ID      string             `json:"id"`
-	Mode    WANGroupMode       `json:"mode"`
-	Members []string           `json:"members"`
-	Weights map[string]int     `json:"weights,omitempty"`
-	Paths   map[string]WANPath `json:"paths,omitempty"`
+	ID            string             `json:"id"`
+	Mode          WANGroupMode       `json:"mode"`
+	Members       []string           `json:"members"`
+	PrimaryMember string             `json:"primary_member,omitempty"`
+	BackupMember  string             `json:"backup_member,omitempty"`
+	Weights       map[string]int     `json:"weights,omitempty"`
+	Paths         map[string]WANPath `json:"paths,omitempty"`
 }
 
 type WANPath struct {
 	VPPInterface string `json:"vpp_interface"`
 	NextHop      string `json:"next_hop,omitempty"`
+	// RuntimeToken identifies the live underlay generation.  PPPoE creates a
+	// new session interface/rewrite after every reconnect; keeping that
+	// generation in the path makes the VPP operation diff rebuild stale ABF
+	// paths instead of reusing the previous session id.
+	RuntimeToken string `json:"runtime_token,omitempty"`
 }
 
 type WANGroupMode string
@@ -158,7 +165,10 @@ func CompileWANGroupsWithBindings(items []map[string]any, bindings map[string]WA
 		if id == "" {
 			return nil, fmt.Errorf("wan_group requires id")
 		}
-		members := uniqueStrings(append(wanMemberIDs(item["wan_members"]), wanMemberIDs(item["members"])...))
+		members, err := compileWANGroupMembers(item)
+		if err != nil {
+			return nil, fmt.Errorf("wan_group %q: %w", id, err)
+		}
 		if len(members) < 2 {
 			return nil, fmt.Errorf("wan_group %q requires at least two members", id)
 		}
@@ -170,6 +180,14 @@ func CompileWANGroupsWithBindings(items []map[string]any, bindings map[string]WA
 		mode, err := wanGroupMode(item)
 		if err != nil {
 			return nil, fmt.Errorf("wan_group %q: %w", id, err)
+		}
+		primaryMember := ""
+		backupMember := ""
+		if mode == WANGroupPrimaryBackup {
+			members, primaryMember, backupMember, err = compilePrimaryBackupMembers(item, members)
+			if err != nil {
+				return nil, fmt.Errorf("wan_group %q: %w", id, err)
+			}
 		}
 		weights, err := wanGroupWeights(item, members)
 		if err != nil {
@@ -212,7 +230,15 @@ func CompileWANGroupsWithBindings(items []map[string]any, bindings map[string]WA
 			}
 			paths[member] = path
 		}
-		groups = append(groups, WANGroup{ID: id, Mode: mode, Members: members, Weights: weights, Paths: paths})
+		groups = append(groups, WANGroup{
+			ID:            id,
+			Mode:          mode,
+			Members:       members,
+			PrimaryMember: primaryMember,
+			BackupMember:  backupMember,
+			Weights:       weights,
+			Paths:         paths,
+		})
 	}
 	return groups, nil
 }
@@ -898,10 +924,10 @@ func normalizedDirection(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "both", "bidirectional", "input_output", "inbound_outbound", "双向":
 		return "both"
-	case "egress", "output", "out", "lan_to_wan":
-		return "output"
-	case "ingress", "input", "in", "wan_to_lan":
+	case "ingress", "input", "in", "lan_to_wan":
 		return "input"
+	case "egress", "output", "out", "wan_to_lan":
+		return "output"
 	default:
 		return "input"
 	}

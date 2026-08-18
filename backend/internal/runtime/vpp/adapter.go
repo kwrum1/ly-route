@@ -33,10 +33,13 @@ type Plan struct {
 	Flow                flow.CompiledIntent
 	NAT                 nat.CompiledConfig
 	Policy              trafficpolicy.Config
-	Security            SecurityGeneration
-	DNSInterception     bool
-	DNSServiceNetworks  []DNSServiceNetwork `json:"dns_service_networks,omitempty"`
-	DataplanePrepared   bool                `json:"-"`
+	// RetiredRoutePolicyIDs keeps disabled policy identities available to
+	// reconciliation when an older runtime snapshot has already lost them.
+	RetiredRoutePolicyIDs []string `json:"retired_route_policy_ids,omitempty"`
+	Security              SecurityGeneration
+	DNSInterception       bool
+	DNSServiceNetworks    []DNSServiceNetwork `json:"dns_service_networks,omitempty"`
+	DataplanePrepared     bool                `json:"-"`
 }
 
 type DNSTransparentInterception struct {
@@ -337,19 +340,25 @@ func BuildOperations(plan Plan) ([]Operation, error) {
 		operation.VPPCtlCommands = flowGroupCommands(group)
 		operations = append(operations, operation)
 	}
-	for _, target := range plan.Flow.Targets {
-		operation := Operation{Name: target.Kind, RequestID: plan.RequestID, Resource: target.RuleID, Payload: target}
-		operation.VPPCtlCommands = flowTargetCommands(target)
-		operations = append(operations, operation)
+	if planRequiresNAT(plan) {
+		operations = append(operations, Operation{
+			Name:           "vpp.nat44.initialize",
+			RequestID:      plan.RequestID,
+			Resource:       string(plan.NAT.Behavior),
+			Payload:        plan.NAT.Behavior,
+			VPPCtlCommands: natInitializeCommands(plan.NAT.Behavior),
+		})
 	}
+	// VPPGroups are the executable, deduplicated representation of Targets.
+	// Executing both creates the same ACL/policer twice for matched rules.
 	for _, mapping := range plan.NAT.StaticMappings {
 		operation := Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: plan.RequestID, Resource: mapping.ID, Payload: mapping}
-		operation.VPPCtlCommands = natStaticMappingCommands(mapping)
+		operation.VPPCtlCommands = natStaticMappingCommandsForBehavior(plan.NAT.Behavior, mapping)
 		operations = append(operations, operation)
 	}
 	for _, mapping := range plan.NAT.PortMappings {
 		operation := Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: plan.RequestID, Resource: mapping.ID, Payload: mapping}
-		operation.VPPCtlCommands = natPortMappingCommands(mapping)
+		operation.VPPCtlCommands = natPortMappingCommandsForBehavior(plan.NAT.Behavior, mapping)
 		operations = append(operations, operation)
 	}
 	for _, group := range plan.Policy.WANGroups {
@@ -365,19 +374,20 @@ func BuildOperations(plan Plan) ([]Operation, error) {
 			return nil, fmt.Errorf("DNS service network %q has no safe VPP underlay route", network.UpstreamID)
 		}
 		operation := Operation{Name: "vpp.dns-service.network", RequestID: plan.RequestID, Resource: network.UpstreamID, Payload: network}
-		operation.VPPCtlCommands = dnsServiceNetworkCommands(network)
+		operation.VPPCtlCommands = dnsServiceNetworkCommands(network, plan.NAT.Behavior)
 		operations = append(operations, operation)
 	}
 	// A proxy service network uses the selected WAN group table as its
 	// underlay, so create its VPP handoff after WAN groups are present.
 	for _, steering := range plan.Proxy.VPPSteering {
 		operation := Operation{Name: steering.TargetKind, RequestID: plan.RequestID, Resource: steering.EgressID, Payload: steering}
-		operation.VPPCtlCommands = proxySteeringCommands(steering)
+		operation.VPPCtlCommands = proxySteeringCommands(steering, plan.NAT.Behavior)
 		operations = append(operations, operation)
 	}
 	routePolicies := orderedRoutePoliciesForVPP(plan.Policy.RoutePolicies, wanGroups)
 	routeOptions := buildRoutePolicyCommandOptions(routePolicies, wanGroups)
-	if err := validateLargeRoutePolicyFallback(routePolicies, routeOptions); err != nil {
+	addRoutePolicyLocalDestinations(routeOptions, routePolicies, plan.AddressAssignments)
+	if err := validateLargeRoutePolicyFallback(routePolicies, routeOptions, wanGroups); err != nil {
 		return nil, err
 	}
 	for _, policy := range routePolicies {
@@ -590,32 +600,19 @@ func dnsTransparentInterception(assignments []AddressAssignment) (DNSTransparent
 }
 
 func dnsTransparentCommands(interception DNSTransparentInterception) []string {
-	v4Policy := stableID("dns-transparent-v4", 9000, 999)
-	v6Policy := stableID("dns-transparent-v6", 9000, 999)
-	v4ACL := stableID("dns-transparent-v4-acl", 50000, 9999)
-	v6ACL := stableID("dns-transparent-v6-acl", 50000, 9999)
 	commands := []string{
-		fmt.Sprintf("set acl-plugin acl index %d permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 17 sport 0-65535 dport 53-53, permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 6 sport 0-65535 dport 53-53 tag ly-route-dns-transparent-v4", v4ACL),
-		fmt.Sprintf("ip table add %d", dnsIPv4TableID),
-		fmt.Sprintf("ip route add table %d 0.0.0.0/0 via local", dnsIPv4TableID),
-		fmt.Sprintf("abf policy add id %d acl %d via ip4-lookup-in-table %d", v4Policy, v4ACL, dnsIPv4TableID),
-		fmt.Sprintf("abf attach ip4 policy %d priority 0 %s", v4Policy, interception.LANInterface),
-		fmt.Sprintf("ip6 table add %d", dnsIPv6TableID),
-		fmt.Sprintf("ip route add table %d ::/0 via local", dnsIPv6TableID),
+		"?set ly-route dns-intercept disable",
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", dnsIPv4TableID),
+		fmt.Sprintf("?ip table add %d", dnsIPv4TableID),
+		fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via local", dnsIPv4TableID),
 	}
 	for _, prefix := range interception.IPv4Prefixes {
-		commands = append(commands, fmt.Sprintf("ip route add table %d %s via %s", dnsIPv4TableID, prefix, interception.LANInterface))
-	}
-	for _, prefix := range interception.IPv6Prefixes {
-		commands = append(commands, fmt.Sprintf("ip route add table %d %s via %s", dnsIPv6TableID, prefix, interception.LANInterface))
+		commands = append(commands, fmt.Sprintf("?ip route add table %d %s via %s", dnsIPv4TableID, prefix, interception.LANInterface))
 	}
 	return append(commands,
-		fmt.Sprintf("set acl-plugin acl index %d permit src ::/0 dst ::/0 proto 17 sport 0-65535 dport 53-53, permit src ::/0 dst ::/0 proto 6 sport 0-65535 dport 53-53 tag ly-route-dns-transparent-v6", v6ACL),
-		fmt.Sprintf("abf policy add id %d acl %d via ip6-lookup-in-table %d", v6Policy, v6ACL, dnsIPv6TableID),
-		fmt.Sprintf("abf attach ip6 policy %d priority 0 %s", v6Policy, interception.LANInterface),
-		fmt.Sprintf("show abf policy %d", v4Policy), fmt.Sprintf("show abf policy %d", v6Policy),
-		fmt.Sprintf("show abf attach %s", interception.LANInterface), "show acl-plugin acl",
-		fmt.Sprintf("show ip fib table %d", dnsIPv4TableID), fmt.Sprintf("show ip6 fib table %d", dnsIPv6TableID))
+		fmt.Sprintf("set ly-route dns-intercept interface %s table %d", interception.LANInterface, dnsIPv4TableID),
+		"show ly-route dns-intercept",
+		fmt.Sprintf("show ip fib table %d", dnsIPv4TableID))
 }
 
 func commandReferencesInterface(command, interfaceName string) bool {
@@ -658,7 +655,7 @@ func interfaceAddressCommands(assignment AddressAssignment) []string {
 		for _, cidr := range assignment.RemoveCIDRs {
 			cidr = strings.TrimSpace(cidr)
 			if cidr != "" {
-				commands = append(commands, fmt.Sprintf("?set interface ip address %s %s del", name, cidr))
+				commands = append(commands, fmt.Sprintf("?set interface ip address del %s %s", name, cidr))
 			}
 		}
 		commands = append(commands,
@@ -688,8 +685,8 @@ func DataplaneAttachOperation(requestID string, attachment NativeAttachment) Ope
 			Resource:  attachment.LinuxInterface,
 			Payload:   attachment,
 			VPPCtlCommands: []string{
-				// VPP restarts recreate the DPDK/VMXNET3 device with admin state
-				// down. Explicitly bring every native DPDK port back up so a
+				// VPP restarts recreate DPDK devices with admin state down.
+				// Explicitly bring every DPDK port back up so a
 				// reboot/replay does not silently lose the WAN carrier.
 				fmt.Sprintf("set interface state %s up", attachment.VPPInterface),
 				fmt.Sprintf("show hardware-interfaces %s", attachment.VPPInterface),
@@ -699,6 +696,26 @@ func DataplaneAttachOperation(requestID string, attachment NativeAttachment) Ope
 	}
 	commands := []string(nil)
 	switch {
+	case attachment.Hook == NativeHookAFPacket && attachment.Mode == NativeModeAFPacket:
+		commands = []string{
+			// AF_PACKET is an acceptance-only fallback. Its virtual path does not
+			// reliably complete checksum/GSO offloads, so packets must leave VPP
+			// with their checksums already materialized.
+			fmt.Sprintf("?create host-interface name %s cksum-gso-disable", attachment.LinuxInterface),
+			fmt.Sprintf("?set interface name host-%s %s", attachment.LinuxInterface, attachment.VPPInterface),
+		}
+		// VPP assigns a locally administered address to AF_PACKET host interfaces.
+		// Linux peers learn the physical NIC address, so their frames otherwise fail
+		// VPP's L2 destination check. The probe persists that address in the
+		// attachment, allowing replay to restore both LAN and WAN deterministically.
+		if strings.TrimSpace(attachment.MACAddress) != "" {
+			commands = append(commands, fmt.Sprintf("set interface mac address %s %s", attachment.VPPInterface, attachment.MACAddress))
+		}
+		commands = append(commands,
+			fmt.Sprintf("set interface state %s up", attachment.VPPInterface),
+			fmt.Sprintf("show hardware-interfaces %s", attachment.VPPInterface),
+			fmt.Sprintf("show interface %s", attachment.VPPInterface),
+		)
 	case attachment.Hook == NativeHookAFXDP && attachment.Mode == NativeModeZeroCopy:
 		commands = []string{
 			fmt.Sprintf("?create interface af_xdp host-if %s name %s zero-copy", attachment.LinuxInterface, attachment.VPPInterface),
@@ -713,13 +730,6 @@ func DataplaneAttachOperation(requestID string, attachment NativeAttachment) Ope
 			fmt.Sprintf("show hardware-interfaces %s", attachment.VPPInterface),
 			fmt.Sprintf("show interface %s", attachment.VPPInterface),
 		}
-	case attachment.Hook == NativeHookVMXNET3 && attachment.Mode == NativeModeVMXNET3VFIO:
-		commands = []string{
-			fmt.Sprintf("?create interface vmxnet3 %s", attachment.PCIAddress),
-			fmt.Sprintf("set interface state %s up", attachment.VPPInterface),
-			fmt.Sprintf("show hardware-interfaces %s", attachment.VPPInterface),
-			fmt.Sprintf("show interface %s", attachment.VPPInterface),
-		}
 	}
 	return Operation{
 		Name:           "vpp.dataplane.attach",
@@ -730,7 +740,7 @@ func DataplaneAttachOperation(requestID string, attachment NativeAttachment) Ope
 	}
 }
 
-func proxySteeringCommands(steering proxy.VPPSteeringInstruction) []string {
+func proxySteeringCommands(steering proxy.VPPSteeringInstruction, behavior nat.Behavior) []string {
 	resource := steering.EgressID
 	if strings.TrimSpace(resource) == "" {
 		resource = string(steering.Handoff)
@@ -748,7 +758,7 @@ func proxySteeringCommands(steering proxy.VPPSteeringInstruction) []string {
 			underlay = "local"
 		}
 		underlayPath := routePathVia("", "", underlay)
-		return []string{
+		commands := []string{
 			fmt.Sprintf("?create tap id %d host-if-name %s no-gso", network.IngressTapID, network.IngressHostInterface),
 			fmt.Sprintf("?set interface name tap%d %s", network.IngressTapID, network.IngressVPPInterface),
 			fmt.Sprintf("?set interface state %s up", network.IngressVPPInterface),
@@ -763,14 +773,33 @@ func proxySteeringCommands(steering proxy.VPPSteeringInstruction) []string {
 			fmt.Sprintf("?set interface ip address %s %s", network.EgressVPPInterface, network.EgressCIDR),
 			fmt.Sprintf("?ip route del table %d 0.0.0.0/0", network.OutboundTableID),
 			fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via %s", network.OutboundTableID, underlayPath),
-			"?nat44 plugin enable",
-			fmt.Sprintf("?set interface nat44 in %s del", network.EgressVPPInterface),
+		}
+		underlayFields := strings.Fields(underlay)
+		if behavior == nat.BehaviorFullCone && len(underlayFields) > 0 {
+			wanInterface := underlayFields[len(underlayFields)-1]
+			commands = append(commands,
+				fmt.Sprintf("?set interface nat44 ei in %s out %s output-feature del", network.EgressVPPInterface, wanInterface),
+				fmt.Sprintf("?set interface nat44 ei in %s out %s", network.EgressVPPInterface, wanInterface),
+				fmt.Sprintf("?nat44 ei add interface address %s", wanInterface),
+			)
+		} else {
+			commands = append(commands,
+				fmt.Sprintf("?set interface nat44 in %s del", network.EgressVPPInterface),
+			)
+		}
+		commands = append(commands,
 			fmt.Sprintf("show interface address %s", network.IngressVPPInterface),
 			fmt.Sprintf("show interface address %s", network.EgressVPPInterface),
 			fmt.Sprintf("show ip fib table %d", network.OutboundTableID),
-			"show nat44 interfaces",
-			"show tap",
+		)
+		if behavior == nat.BehaviorFullCone {
+			commands = append(commands, "show nat44 ei interfaces")
+		} else {
+			commands = append(commands, "show nat44 interfaces")
 		}
+		return append(commands,
+			"show tap",
+		)
 	}
 	interfaceName := "lyroute-$LY_ROUTE_LAN_INTERFACE"
 	policyID := stableID("abf:"+resource, 1000, 8999)
@@ -810,9 +839,10 @@ func proxySteeringCommands(steering proxy.VPPSteeringInstruction) []string {
 	}
 }
 
-func dnsServiceNetworkCommands(network DNSServiceNetwork) []string {
+func dnsServiceNetworkCommands(network DNSServiceNetwork, behavior nat.Behavior) []string {
 	underlayPath := routePathVia("", "", network.UnderlayRoute)
-	return []string{
+	underlayInterface := dnsServiceNetworkUnderlayInterface(network)
+	commands := []string{
 		fmt.Sprintf("?create tap id %d host-if-name %s no-gso", network.TapID, network.HostInterface),
 		fmt.Sprintf("?set interface name tap%d %s", network.TapID, network.VPPInterface),
 		fmt.Sprintf("?set interface state %s up", network.VPPInterface),
@@ -822,13 +852,31 @@ func dnsServiceNetworkCommands(network DNSServiceNetwork) []string {
 		fmt.Sprintf("?set interface ip address %s %s", network.VPPInterface, network.CIDR),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", network.TableID),
 		fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via %s", network.TableID, underlayPath),
-		"?nat44 plugin enable",
-		fmt.Sprintf("?set interface nat44 in %s del", network.VPPInterface),
 		fmt.Sprintf("show interface address %s", network.VPPInterface),
 		fmt.Sprintf("show ip fib table %d", network.TableID),
-		"show nat44 interfaces",
 		"show tap",
 	}
+	if behavior == nat.BehaviorFullCone {
+		return append(commands,
+			fmt.Sprintf("?set interface nat44 ei in %s out %s output-feature del", network.VPPInterface, underlayInterface),
+			fmt.Sprintf("set interface nat44 ei in %s out %s", network.VPPInterface, underlayInterface),
+			fmt.Sprintf("?nat44 ei add interface address %s", underlayInterface),
+			"show nat44 ei interfaces",
+		)
+	}
+	return append(commands,
+		fmt.Sprintf("?set interface nat44 in %s out %s output-feature del", network.VPPInterface, underlayInterface),
+		fmt.Sprintf("set interface nat44 in %s out %s", network.VPPInterface, underlayInterface),
+		"show nat44 interfaces",
+	)
+}
+
+func dnsServiceNetworkUnderlayInterface(network DNSServiceNetwork) string {
+	fields := strings.Fields(network.UnderlayRoute)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
 }
 
 func flowGroupCommands(group flow.VPPObjectGroup) []string {
@@ -860,22 +908,7 @@ func flowTargetCommands(target flow.Target) []string {
 	policerName := "ly_route_" + safeTag(resource)
 	qosValue := qosClassValue(target)
 	dscp := dscpValue(target.DSCP)
-	policerRate := uint64(1_000_000)
-	policerBurst := uint64(100_000)
-	if target.Policer != nil {
-		if target.Policer.RateBPS > 0 {
-			policerRate = target.Policer.RateBPS / 1000
-			if policerRate == 0 {
-				policerRate = 1
-			}
-		}
-		if target.Policer.BurstBPS > 0 {
-			policerBurst = target.Policer.BurstBPS / 1000
-			if policerBurst == 0 {
-				policerBurst = 1
-			}
-		}
-	}
+	policerRate, policerBurst := policerValues(target)
 
 	switch target.Kind {
 	case "vpp.acl.drop":
@@ -887,14 +920,9 @@ func flowTargetCommands(target flow.Target) []string {
 		commands = append(commands, fmt.Sprintf("show acl-plugin acl index %d", aclID))
 		return commands
 	case "vpp.behavior.rate":
-		aclID := stableID("flow-acl-rate:"+resource, 10000, 49999)
-		commands := aclMatchCommands(aclID, resource, policyMatch(target.Match), "permit")
-		commands = append(commands, fmt.Sprintf("?policer add name %s type 1r2c cir %d cb %d rate kbps conform-action transmit exceed-action drop violate-action drop", policerName, policerRate, policerBurst))
-		for _, attachment := range target.Attachments {
-			commands = append(commands, flowAttachACLCommand(aclID, attachment))
-			commands = append(commands, flowAttachPolicerCommand(policerName, attachment))
-		}
-		commands = append(commands, fmt.Sprintf("show acl-plugin acl index %d", aclID), fmt.Sprintf("show policer name %s", policerName))
+		commands := []string{}
+		commands = append(commands, flowRateRuleCommands(target)...)
+		commands = append(commands, "show ly-route flow-rate")
 		return commands
 	case "vpp.qos.classify":
 		return []string{
@@ -954,6 +982,55 @@ func flowAttachPolicerCommand(policerName, attachment string) string {
 	return fmt.Sprintf("?policer input name %s %s", policerName, nativeLANInterface(strings.TrimPrefix(attachment, "input:")))
 }
 
+func flowRateRuleCommands(target flow.Target) []string {
+	commands := make([]string, 0)
+	clause := 0
+	rateKbps, burstBytes := policerValues(target)
+	for _, attachment := range target.Attachments {
+		direction := flowAttachmentDirection(attachment)
+		interfaceName := flowAttachmentInterface(attachment)
+		for _, source := range nonEmptyList(target.Match.Sources, "0.0.0.0/0") {
+			for _, destination := range nonEmptyList(target.Match.Destinations, "0.0.0.0/0") {
+				for _, protocol := range nonEmptyList(target.Match.Protocols, "any") {
+					for _, sourcePort := range nonEmptyList(target.Match.SourcePorts, "any") {
+						for _, destinationPort := range nonEmptyList(target.Match.DestPorts, "any") {
+							clauseSource, clauseDestination := source, destination
+							clauseSourcePort, clauseDestinationPort := sourcePort, destinationPort
+							if direction == "output" {
+								clauseSource, clauseDestination = clauseDestination, clauseSource
+								clauseSourcePort, clauseDestinationPort = clauseDestinationPort, clauseSourcePort
+							}
+							clause++
+							commands = append(commands, fmt.Sprintf(
+								"set ly-route flow-rate rule %s_%d interface %s direction %s source %s destination %s protocol %s source-port %s destination-port %s rate-kbps %d burst-bytes %d",
+								safeTag(target.RuleID), clause, interfaceName, direction,
+								aclAddressValue(clauseSource), aclAddressValue(clauseDestination), flowRateProtocolName(protocol),
+								portRange(clauseSourcePort), portRange(clauseDestinationPort), rateKbps, burstBytes,
+							))
+						}
+					}
+				}
+			}
+		}
+	}
+	return commands
+}
+
+func flowRateProtocolName(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "", "any", "0":
+		return "any"
+	case "tcp", "6":
+		return "tcp"
+	case "udp", "17":
+		return "udp"
+	case "icmp", "1":
+		return "icmp"
+	default:
+		return strings.ToLower(strings.TrimSpace(protocol))
+	}
+}
+
 func nativeLANInterface(name string) string {
 	if strings.TrimSpace(name) == "host-$LY_ROUTE_LAN_INTERFACE" {
 		return "lyroute-$LY_ROUTE_LAN_INTERFACE"
@@ -970,15 +1047,57 @@ func firstOrAny(values []string) string {
 	return "any"
 }
 
-func natStaticMappingCommands(mapping nat.StaticMapping) []string {
-	commands := []string{
-		"?nat44 plugin enable",
-		"?set interface nat44 in lyroute-$LY_ROUTE_LAN_INTERFACE",
+func planRequiresNAT(plan Plan) bool {
+	if len(plan.NAT.StaticMappings) > 0 || len(plan.NAT.PortMappings) > 0 || len(plan.DNSServiceNetworks) > 0 {
+		return true
 	}
+	for _, steering := range plan.Proxy.VPPSteering {
+		if steering.TargetKind == "vpp.proxy-service.network" {
+			return true
+		}
+	}
+	return false
+}
+
+func natInitializeCommands(behavior nat.Behavior) []string {
+	if behavior == nat.BehaviorFullCone {
+		return []string{
+			"?nat44 plugin disable",
+			"?nat44 ei plugin enable",
+		}
+	}
+	return []string{
+		"?nat44 ei plugin disable",
+		"?nat44 plugin enable",
+	}
+}
+
+func natStaticMappingCommands(mapping nat.StaticMapping) []string {
+	return natStaticMappingCommandsForBehavior(nat.BehaviorEndpointDependent, mapping)
+}
+
+func natStaticMappingCommandsForBehavior(behavior nat.Behavior, mapping nat.StaticMapping) []string {
+	if behavior == nat.BehaviorFullCone {
+		commands := []string{}
+		if mapping.WANInterface != "" {
+			commands = append(commands,
+				fmt.Sprintf("?set interface nat44 ei in %s output-feature del", mapping.WANInterface),
+				fmt.Sprintf("?set interface nat44 ei in %s output-feature", mapping.WANInterface),
+				fmt.Sprintf("?nat44 ei add interface address %s", mapping.WANInterface),
+			)
+		}
+		commands = append(commands,
+			fmt.Sprintf("?nat44 ei add static mapping local %s external %s", mapping.InternalAddress, mapping.ExternalAddress),
+			"show nat44 ei static mappings",
+			"show nat44 ei sessions",
+		)
+		return commands
+	}
+	commands := []string{}
 	if mapping.WANInterface != "" {
 		commands = append(commands,
-			fmt.Sprintf("?set interface nat44 out %s del", mapping.WANInterface),
-			fmt.Sprintf("?set interface nat44 out %s output-feature", mapping.WANInterface),
+			fmt.Sprintf("?set interface nat44 in %s output-feature del", mapping.WANInterface),
+			fmt.Sprintf("?set interface nat44 in %s output-feature", mapping.WANInterface),
 		)
 	}
 	commands = append(commands,
@@ -990,14 +1109,34 @@ func natStaticMappingCommands(mapping nat.StaticMapping) []string {
 }
 
 func natPortMappingCommands(mapping nat.PortMapping) []string {
-	commands := []string{
-		"?nat44 plugin enable",
-		"?set interface nat44 in lyroute-$LY_ROUTE_LAN_INTERFACE",
+	return natPortMappingCommandsForBehavior(nat.BehaviorEndpointDependent, mapping)
+}
+
+func natPortMappingCommandsForBehavior(behavior nat.Behavior, mapping nat.PortMapping) []string {
+	if behavior == nat.BehaviorFullCone {
+		commands := []string{}
+		if mapping.WANInterface != "" {
+			commands = append(commands,
+				fmt.Sprintf("?set interface nat44 ei in %s output-feature del", mapping.WANInterface),
+				fmt.Sprintf("?set interface nat44 ei in %s output-feature", mapping.WANInterface),
+				fmt.Sprintf("?nat44 ei add interface address %s", mapping.WANInterface),
+			)
+		}
+		mappingCommand := fmt.Sprintf("nat44 ei add static mapping %s local %s %d external %s %d", mapping.Protocol, mapping.InternalHost, mapping.InternalPort, mapping.ExternalAddress, mapping.ExternalPort)
+		commands = append(commands,
+			"show nat44 ei static mappings",
+			fmt.Sprintf("?%s del", mappingCommand),
+			fmt.Sprintf("?%s", mappingCommand),
+			"show nat44 ei static mappings",
+			"show nat44 ei sessions",
+		)
+		return commands
 	}
+	commands := []string{}
 	if mapping.WANInterface != "" {
 		commands = append(commands,
-			fmt.Sprintf("?set interface nat44 out %s del", mapping.WANInterface),
-			fmt.Sprintf("?set interface nat44 out %s output-feature", mapping.WANInterface),
+			fmt.Sprintf("?set interface nat44 in %s output-feature del", mapping.WANInterface),
+			fmt.Sprintf("?set interface nat44 in %s output-feature", mapping.WANInterface),
 		)
 	}
 	if mapping.Hairpin {
@@ -1024,8 +1163,53 @@ func natPortMappingCommands(mapping nat.PortMapping) []string {
 // deliberately retained for policies that contain source/port/protocol
 // predicates; those predicates cannot be represented by a plain FIB lookup.
 type routePolicyCommandOptions struct {
-	optimizedIPv4 bool
-	defaultVia    string
+	optimizedIPv4     bool
+	defaultVia        string
+	localDestinations []string
+}
+
+// addRoutePolicyLocalDestinations keeps a catch-all policy from stealing
+// traffic addressed to the gateway/LAN itself.  This is a routing invariant,
+// not a proxy-specific exception: the LAN prefix must remain reachable by
+// the normal local FIB even when the user deliberately selects an any-to-any
+// egress policy.
+func addRoutePolicyLocalDestinations(options map[string]routePolicyCommandOptions, policies []trafficpolicy.RoutePolicy, assignments []AddressAssignment) {
+	addRoutePolicyLocalDestinationPrefixes(options, policies, routePolicyLocalDestinations(assignments))
+}
+
+func addRoutePolicyLocalDestinationPrefixes(options map[string]routePolicyCommandOptions, policies []trafficpolicy.RoutePolicy, prefixes []string) {
+	if len(prefixes) == 0 {
+		return
+	}
+	for _, policy := range policies {
+		id := strings.TrimSpace(policy.ID)
+		if id == "" {
+			continue
+		}
+		option := options[id]
+		option.localDestinations = append([]string(nil), prefixes...)
+		options[id] = option
+	}
+}
+
+func routePolicyLocalDestinations(assignments []AddressAssignment) []string {
+	seen := map[string]struct{}{}
+	for _, assignment := range assignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(assignment.CIDR))
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		seen[prefix.Masked().String()] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for prefix := range seen {
+		result = append(result, prefix)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // orderedRoutePoliciesForVPP creates the lower-priority tables first.  A
@@ -1035,19 +1219,22 @@ type routePolicyCommandOptions struct {
 func orderedRoutePoliciesForVPP(policies []trafficpolicy.RoutePolicy, wanGroups map[string]trafficpolicy.WANGroup) []trafficpolicy.RoutePolicy {
 	ordered := append([]trafficpolicy.RoutePolicy(nil), policies...)
 	options := buildRoutePolicyCommandOptions(ordered, wanGroups)
-	if len(options) != len(ordered) || len(ordered) < 2 {
+	if len(options) == 0 || len(ordered) < 2 {
 		return ordered
 	}
 	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Priority == ordered[j].Priority {
+			return ordered[i].ID < ordered[j].ID
+		}
 		return ordered[i].Priority > ordered[j].Priority
 	})
 	return ordered
 }
 
-// buildRoutePolicyCommandOptions recognizes a complete, destination-only
-// route chain.  It is intentionally conservative: if one policy needs an
-// ACL predicate, every policy falls back to the ACL implementation so that
-// the relative semantics cannot be changed by an optimization.
+// buildRoutePolicyCommandOptions recognizes the destination-only suffix of an
+// ordered policy list. Earlier source/protocol exceptions are evaluated first
+// by their normal ACL rules; once they miss, the suffix can safely continue in
+// native FIB tables without changing policy precedence.
 func buildRoutePolicyCommandOptions(policies []trafficpolicy.RoutePolicy, wanGroups map[string]trafficpolicy.WANGroup) map[string]routePolicyCommandOptions {
 	options := make(map[string]routePolicyCommandOptions)
 	if len(policies) == 0 {
@@ -1055,19 +1242,44 @@ func buildRoutePolicyCommandOptions(policies []trafficpolicy.RoutePolicy, wanGro
 	}
 	ordered := append([]trafficpolicy.RoutePolicy(nil), policies...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Priority < ordered[j].Priority })
-	for _, policy := range ordered {
+	chainStart := 0
+	chainEnd := -1
+	for index, policy := range ordered {
 		if !routePolicyFIBChainEligible(policy) || len(routePolicyIPv4Destinations(policy.Match.Destinations)) == 0 {
-			return map[string]routePolicyCommandOptions{}
+			if chainEnd >= 0 {
+				// A lower-precedence non-FIB rule cannot be reached after the
+				// effective catch-all, but it must not invalidate the chain that
+				// was already established above it.
+				break
+			}
+			chainStart = index + 1
+			continue
+		}
+		// The first destination-only catch-all marks the effective end of the
+		// chain. Consecutive destination-only entries may still be part of the
+		// same native chain; a later ordinary rule closes it above.
+		if chainEnd < 0 && routePolicyHasIPv4CatchAll(policy.Match.Destinations) {
+			chainEnd = index + 1
+		} else if chainEnd >= 0 {
+			chainEnd = index + 1
 		}
 	}
-	last := ordered[len(ordered)-1]
-	if !routePolicyHasIPv4CatchAll(last.Match.Destinations) {
+	if chainEnd < 0 {
 		return map[string]routePolicyCommandOptions{}
 	}
-	for index, policy := range ordered {
+	chain := ordered[chainStart:chainEnd]
+	if len(chain) < 2 || !routePolicyHasIPv4CatchAll(chain[len(chain)-1].Match.Destinations) {
+		return map[string]routePolicyCommandOptions{}
+	}
+	// Equal priorities at the ACL/FIB boundary have no deterministic ordering,
+	// so keep the conservative ACL path in that ambiguous case.
+	if chainStart > 0 && ordered[chainStart-1].Priority == chain[0].Priority {
+		return map[string]routePolicyCommandOptions{}
+	}
+	for index, policy := range chain {
 		defaultVia := routePolicyTarget(policy, wanGroups)
-		if index+1 < len(ordered) {
-			defaultVia = fmt.Sprintf("ip4-lookup-in-table %d", stableID("route-table:"+ordered[index+1].ID, 50000, 49999))
+		if index+1 < len(chain) {
+			defaultVia = fmt.Sprintf("ip4-lookup-in-table %d", stableID("route-table:"+chain[index+1].ID, 50000, 49999))
 		}
 		options[policy.ID] = routePolicyCommandOptions{optimizedIPv4: true, defaultVia: defaultVia}
 	}
@@ -1080,7 +1292,7 @@ func buildRoutePolicyCommandOptions(policies []trafficpolicy.RoutePolicy, wanGro
 // incomplete chain and could fall back to a giant ACL.
 func orderedRoutePolicySubsetForVPP(routes, context []trafficpolicy.RoutePolicy, options map[string]routePolicyCommandOptions, wanGroups map[string]trafficpolicy.WANGroup) []trafficpolicy.RoutePolicy {
 	ordered := append([]trafficpolicy.RoutePolicy(nil), routes...)
-	if len(options) != len(context) || len(ordered) < 2 {
+	if len(options) == 0 {
 		return orderedRoutePoliciesForVPP(ordered, wanGroups)
 	}
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -1094,19 +1306,26 @@ func orderedRoutePolicySubsetForVPP(routes, context []trafficpolicy.RoutePolicy,
 
 const maxRoutePolicyACLIPv4Prefixes = 256
 
-// Large destination sets must never be serialized into one ACL command. A
-// complete destination-only policy chain uses VPP FIB tables; if it cannot be
-// proven safe, fail closed with a useful error instead of hanging vppctl.
-func validateLargeRoutePolicyFallback(routes []trafficpolicy.RoutePolicy, options map[string]routePolicyCommandOptions) error {
+// Large destination sets must never be serialized into one ACL command. The
+// pre-NAT Radix classifier is the primary native path because it preserves the
+// policy priority of every rule independently. A complete destination-only
+// FIB chain remains a useful optimization, but it must never be a prerequisite
+// for accepting a large GeoIP rule: an unrelated UI rule can legally sit
+// between the GeoIP policy and the terminal catch-all.
+func validateLargeRoutePolicyFallback(routes []trafficpolicy.RoutePolicy, options map[string]routePolicyCommandOptions, wanGroups map[string]trafficpolicy.WANGroup) error {
 	for _, route := range routes {
 		prefixes := routePolicyIPv4Destinations(route.Match.Destinations)
 		if len(prefixes) <= maxRoutePolicyACLIPv4Prefixes {
 			continue
 		}
-		if option, optimized := options[route.ID]; optimized && option.optimizedIPv4 {
+		option := options[route.ID]
+		if _, nativeRadix := compileRoutePolicyRadixPlan(route, wanGroups, option); nativeRadix {
 			continue
 		}
-		return fmt.Errorf("route policy %q has %d IPv4 destinations but no verified native FIB chain; refusing large ACL fallback", route.ID, len(prefixes))
+		if option.optimizedIPv4 {
+			continue
+		}
+		return fmt.Errorf("route policy %q has %d IPv4 destinations but no verified native Radix/FIB path; refusing large ACL fallback", route.ID, len(prefixes))
 	}
 	return nil
 }
@@ -1194,6 +1413,9 @@ func routePolicyCommandsWithOptions(policy trafficpolicy.RoutePolicy, wanGroups 
 	aclID := stableID("route-acl:"+policy.ID, 10000, 49999)
 	policyID := stableID("route-abf:"+policy.ID, 10000, 8999)
 	tableID := stableID("route-table:"+policy.ID, 50000, 49999)
+	if commands, ok := routePolicyRadixCommands(policy, wanGroups, options, policyID, tableID); ok {
+		return commands
+	}
 	groupTableID := 0
 	if _, ok := wanGroups[policy.Egress]; ok {
 		groupTableID = wanGroupTableID(policy.Egress)
@@ -1208,7 +1430,7 @@ func routePolicyCommandsWithOptions(policy trafficpolicy.RoutePolicy, wanGroups 
 			DestPorts:    []string{"any"},
 		}
 	}
-	commands := aclMatchCommands(aclID, policy.ID, match, routeACLAction(policy.Action))
+	commands := routePolicyACLCommands(aclID, policy.ID, match, routeACLAction(policy.Action), options)
 	commands = append(commands,
 		fmt.Sprintf("?ip table add %d", tableID),
 		fmt.Sprintf("?set ip flow-hash table %d src dst sport dport proto", tableID),
@@ -1217,6 +1439,9 @@ func routePolicyCommandsWithOptions(policy trafficpolicy.RoutePolicy, wanGroups 
 		routeTarget := routePolicyTarget(policy, wanGroups)
 		if options.optimizedIPv4 {
 			commands = append(commands, vppRouteBatchBegin)
+			for _, prefix := range options.localDestinations {
+				commands = append(commands, fmt.Sprintf("ip route add table %d %s via lyroute-$LY_ROUTE_LAN_INTERFACE", tableID, prefix))
+			}
 			for _, prefix := range routePolicyIPv4Destinations(policy.Match.Destinations) {
 				commands = append(commands, fmt.Sprintf("ip route add table %d %s via %s", tableID, prefix, routeTarget))
 			}
@@ -1225,7 +1450,13 @@ func routePolicyCommandsWithOptions(policy trafficpolicy.RoutePolicy, wanGroups 
 				routeTarget = options.defaultVia
 			}
 		}
-		commands = append(commands, fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via %s", tableID, routeTarget))
+		if strings.HasPrefix(routeTarget, "ip4-lookup-in-table ") || strings.HasPrefix(routeTarget, "ip6-lookup-in-table ") {
+			// VPP accepts the table before the prefix for regular next hops, but
+			// lookup DPOs require the documented prefix-before-table form.
+			commands = append(commands, fmt.Sprintf("?ip route add 0.0.0.0/0 table %d via %s", tableID, routeTarget))
+		} else {
+			commands = append(commands, fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via %s", tableID, routeTarget))
+		}
 	}
 	abfVia := routePolicyTarget(policy, wanGroups)
 	if options.optimizedIPv4 {
@@ -1238,6 +1469,12 @@ func routePolicyCommandsWithOptions(policy trafficpolicy.RoutePolicy, wanGroups 
 		fmt.Sprintf("?abf attach ip4 policy %d priority %d lyroute-$LY_ROUTE_LAN_INTERFACE", policyID, vppABFPriority(policy.Priority)),
 		fmt.Sprintf("show acl-plugin acl index %d", aclID),
 		fmt.Sprintf("show abf policy %d", policyID),
+		// VPP 25.x may render a point-to-point ABF path as
+		// "<next-hop> if_index:<n>". Keep the interface inventory in the
+		// same transaction so readback can prove that the path belongs to
+		// the intended service interface instead of accepting an arbitrary
+		// unresolved/stale path.
+		"show interface",
 		"show abf attach lyroute-$LY_ROUTE_LAN_INTERFACE",
 		fmt.Sprintf("show ip fib table %d", tableID),
 	)
@@ -1245,6 +1482,31 @@ func routePolicyCommandsWithOptions(policy trafficpolicy.RoutePolicy, wanGroups 
 		commands = append(commands, fmt.Sprintf("show ip fib table %d", groupTableID))
 	}
 	return commands
+}
+
+func routePolicyRadixCommands(policy trafficpolicy.RoutePolicy, wanGroups map[string]trafficpolicy.WANGroup, options routePolicyCommandOptions, policyID, tableID int) ([]string, bool) {
+	plan, ok := compileRoutePolicyRadixPlan(policy, wanGroups, options)
+	if !ok {
+		return nil, false
+	}
+	commands := []string{
+		fmt.Sprintf("?ip table add %d", tableID),
+		fmt.Sprintf("?set ip flow-hash table %d src dst sport dport proto", tableID),
+	}
+	if strings.HasPrefix(plan.routeTarget, "ip4-lookup-in-table ") {
+		commands = append(commands, fmt.Sprintf("?ip route add 0.0.0.0/0 table %d via %s", tableID, plan.routeTarget))
+	} else {
+		commands = append(commands, fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via %s", tableID, plan.routeTarget))
+	}
+	classifier, applied, err := buildPreNATRoutePolicyCommandsForTable(
+		policy, policyID, tableID, "lyroute-$LY_ROUTE_LAN_INTERFACE", plan.lanPrefix, plan.skipNAT,
+	)
+	if err != nil || !applied {
+		return nil, false
+	}
+	commands = append(commands, classifier...)
+	commands = append(commands, fmt.Sprintf("show ip fib table %d", tableID))
+	return commands, true
 }
 
 func vppABFPriority(priority int) int {
@@ -1281,7 +1543,11 @@ func securityACLCommands(acl trafficpolicy.SecurityACL, wanIngressInterfaces ...
 	if acl.ID == "sec-acl-default-deny-wan" && strings.TrimSpace(wanIngressInterface) != "" {
 		interfaceName = strings.TrimSpace(wanIngressInterface)
 	}
-	for _, direction := range securityDirections(acl.Match.Direction) {
+	directions := securityDirections(acl.Match.Direction)
+	if acl.ID == "sec-acl-default-deny-wan" && strings.TrimSpace(wanIngressInterface) != "" {
+		directions = []string{"input"}
+	}
+	for _, direction := range directions {
 		commands = append(commands, fmt.Sprintf("?set interface %s acl intfc %s ip4-table %d", direction, interfaceName, aclID))
 	}
 	commands = append(commands, fmt.Sprintf("show acl-plugin acl index %d", aclID), "show interface lyroute-$LY_ROUTE_LAN_INTERFACE")
@@ -1290,7 +1556,20 @@ func securityACLCommands(acl trafficpolicy.SecurityACL, wanIngressInterfaces ...
 
 func wanGroupCommands(group trafficpolicy.WANGroup) []string {
 	tableID := wanGroupTableID(group.ID)
-	commands := []string{fmt.Sprintf("?ip table add %d", tableID)}
+	// VPP's `ip route add` is additive. A PPPoE reconnect can replace a
+	// session interface while retaining the WAN-group FIB; appending the new
+	// path would leave stale paths in the load-balance object. VPP also keeps
+	// an implicit drop DPO for a table's exact default route. On the VPP build
+	// used by the appliance that DPO can win over a rebuilt 0/0 route after a
+	// reconnect, even though `show ip fib` displays the new paths. Use two
+	// covering /1 routes for the executable WAN default and clear both the old
+	// exact default and any previous /1 representation first.
+	commands := []string{
+		fmt.Sprintf("?ip table add %d", tableID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", tableID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/1", tableID),
+		fmt.Sprintf("?ip route del table %d 128.0.0.0/1", tableID),
+	}
 	if group.Mode != trafficpolicy.WANGroupPrimaryBackup {
 		commands = append(commands, fmt.Sprintf("?set ip flow-hash table %d src dst sport dport proto", tableID))
 	}
@@ -1306,7 +1585,9 @@ func wanGroupCommands(group trafficpolicy.WANGroup) []string {
 			weight = 1
 			preference = index
 		}
-		commands = append(commands, fmt.Sprintf("?ip route add table %d 0.0.0.0/0 via %s weight %d preference %d", tableID, via, weight, preference))
+		for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+			commands = append(commands, fmt.Sprintf("?ip route add table %d %s via %s weight %d preference %d", tableID, prefix, via, weight, preference))
+		}
 	}
 	commands = append(commands, fmt.Sprintf("show ip fib table %d", tableID))
 	return commands
@@ -1326,6 +1607,8 @@ func aclMatchCommands(aclID int, resource string, match trafficpolicy.Match, act
 	rules := []string{}
 	for _, source := range nonEmptyList(match.Sources, "0.0.0.0/0") {
 		for _, destination := range nonEmptyList(match.Destinations, "0.0.0.0/0") {
+			source = aclAddressValue(source)
+			destination = aclAddressValue(destination)
 			for _, protocol := range nonEmptyList(match.Protocols, "any") {
 				protocol = aclProtocolValue(protocol)
 				for _, sourcePort := range nonEmptyList(match.SourcePorts, "any") {
@@ -1337,6 +1620,77 @@ func aclMatchCommands(aclID int, resource string, match trafficpolicy.Match, act
 		}
 	}
 	return []string{fmt.Sprintf("?set acl-plugin acl index %d %s tag ly-route-%s", aclID, strings.Join(rules, ", "), safeTag(resource))}
+}
+
+func routePolicyACLCommands(aclID int, resource string, match trafficpolicy.Match, action string, options routePolicyCommandOptions) []string {
+	commands := aclMatchCommands(aclID, resource, match, action)
+	if action != "permit" || options.optimizedIPv4 || len(options.localDestinations) == 0 || !routePolicyHasIPv4CatchAll(match.Destinations) || len(commands) == 0 {
+		return commands
+	}
+	denies := make([]string, 0)
+	for _, source := range nonEmptyList(match.Sources, "0.0.0.0/0") {
+		for _, destination := range options.localDestinations {
+			for _, protocol := range nonEmptyList(match.Protocols, "any") {
+				for _, sourcePort := range nonEmptyList(match.SourcePorts, "any") {
+					for _, destPort := range nonEmptyList(match.DestPorts, "any") {
+						denies = append(denies, fmt.Sprintf("deny src %s dst %s proto %s sport %s dport %s", aclAddressValue(source), aclAddressValue(destination), aclProtocolValue(protocol), portRange(sourcePort), portRange(destPort)))
+					}
+				}
+			}
+		}
+	}
+	if len(denies) == 0 {
+		return commands
+	}
+	tagIndex := strings.LastIndex(commands[0], " tag ")
+	prefix := fmt.Sprintf("?set acl-plugin acl index %d ", aclID)
+	if tagIndex < 0 || !strings.HasPrefix(commands[0], prefix) {
+		return commands
+	}
+	// VPP ACLs are first-match. The local deny must precede the catch-all
+	// permit or packets to the gateway/LAN are still sent into NAT and ABF.
+	rules := commands[0][len(prefix):tagIndex]
+	commands[0] = prefix + strings.Join(denies, ", ") + ", " + rules + commands[0][tagIndex:]
+	return commands
+}
+
+func aclMatchCommandsWithFallback(aclID int, resource string, match trafficpolicy.Match, action string) []string {
+	commands := aclMatchCommands(aclID, resource, match, action)
+	if action != "permit" || len(commands) == 0 {
+		return commands
+	}
+	command := commands[0]
+	tagIndex := strings.LastIndex(command, " tag ")
+	if tagIndex < 0 {
+		return commands
+	}
+	// ACLs attached by a rate rule are evaluated by both IP feature arcs.
+	// A v4-only catch-all does not match IPv6 and VPP defaults an unmatched
+	// ACL packet to deny, which would turn an IPv4 rate rule into an IPv6
+	// outage. Keep nonmatching traffic explicitly permitted in both families.
+	fallbacks := []string{
+		"permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535",
+		"permit src ::/0 dst ::/0 proto 0 sport 0-65535 dport 0-65535",
+	}
+	missing := make([]string, 0, len(fallbacks))
+	for _, fallback := range fallbacks {
+		if !strings.Contains(command, fallback) {
+			missing = append(missing, fallback)
+		}
+	}
+	if len(missing) == 0 {
+		return commands
+	}
+	commands[0] = command[:tagIndex] + ", " + strings.Join(missing, ", ") + command[tagIndex:]
+	return commands
+}
+
+func aclAddressValue(address string) string {
+	address = strings.TrimSpace(address)
+	if address == "" || strings.EqualFold(address, "any") {
+		return "0.0.0.0/0"
+	}
+	return address
 }
 
 func aclProtocolValue(protocol string) string {

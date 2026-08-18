@@ -22,14 +22,14 @@ func (server *Server) currentSecurityGeneration(ctx context.Context, policy traf
 	if err != nil {
 		return vpp.SecurityGeneration{}, err
 	}
-	if !hasEnabledSecurityItems(ipmacItems) && !hasEnabledSecurityItems(threatItems) && !hasEnabledSecurityItems(attackItems) {
-		return vpp.SecurityGeneration{}, nil
-	}
 	runtimeACLs := make([]trafficpolicy.SecurityACL, 0, len(policy.SecurityACLs))
 	for _, acl := range policy.SecurityACLs {
 		if acl.ID != "sec-acl-default-deny-wan" {
 			runtimeACLs = append(runtimeACLs, acl)
 		}
+	}
+	if len(runtimeACLs) == 0 && !hasEnabledSecurityItems(ipmacItems) && !hasEnabledSecurityItems(threatItems) && !hasEnabledSecurityItems(attackItems) {
+		return vpp.SecurityGeneration{}, nil
 	}
 	lanInterface := ""
 	for _, assignment := range assignments {

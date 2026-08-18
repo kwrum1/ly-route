@@ -185,6 +185,13 @@ product_source_date_epoch() {
   fi
 }
 
+product_source_fingerprint() {
+  repo_root=$1
+  product_build_require_file "$repo_root/scripts/source-fingerprint.sh"
+  "$repo_root/scripts/source-fingerprint.sh" \
+    backend frontend packaging runtime scripts
+}
+
 write_product_artifact_manifest() (
   output=$1
   artifact_type=$2
@@ -193,10 +200,11 @@ write_product_artifact_manifest() (
   suite=$5
   arch=$6
   source_commit=$7
+  source_fingerprint=${LY_ROUTE_SOURCE_FINGERPRINT:-unknown}
   mkdir -p "$(dirname "$output")"
-  node - "$PRODUCT_BUILD_PROFILE" "$output" "$artifact_type" "$artifact_name" "$product" "$suite" "$arch" "$source_commit" <<'NODE'
+  node - "$PRODUCT_BUILD_PROFILE" "$output" "$artifact_type" "$artifact_name" "$product" "$suite" "$arch" "$source_commit" "$source_fingerprint" <<'NODE'
 const { readFileSync, writeFileSync } = require("node:fs");
-const [profilePath, outputPath, artifactType, artifactName, product, suite, arch, sourceCommit] = process.argv.slice(2);
+const [profilePath, outputPath, artifactType, artifactName, product, suite, arch, sourceCommit, sourceFingerprint] = process.argv.slice(2);
 const profile = JSON.parse(readFileSync(profilePath, "utf8"));
 const manifest = {
   schema_version: 1,
@@ -206,6 +214,7 @@ const manifest = {
   suite,
   arch,
   source_commit: sourceCommit,
+  source_fingerprint: sourceFingerprint,
   control_profile: "/etc/ly-route/product-manifest.json",
   frontend_bundle: "/opt/ly-route/admin",
   frontend_product: profile.frontend_product,

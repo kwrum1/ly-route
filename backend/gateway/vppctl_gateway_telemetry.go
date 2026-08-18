@@ -14,6 +14,7 @@ import (
 	"ly-route/backend/internal/httpapi"
 	"ly-route/backend/internal/persistence"
 	"ly-route/backend/internal/runtime/proxy"
+	serviceRuntime "ly-route/backend/internal/runtime/service"
 )
 
 type gatewayTelemetryConfigReader interface {
@@ -40,10 +41,11 @@ type vppTelemetryCounter struct {
 }
 
 type gatewayWANLink struct {
-	id          string
-	name        string
-	interfaceID string
-	pppoe       bool
+	id               string
+	name             string
+	interfaceID      string
+	pppoe            bool
+	sessionInterface string
 }
 
 type gatewayWANGroup struct {
@@ -95,9 +97,10 @@ func (collector *vppctlGatewayTelemetry) Collect(ctx context.Context) (httpapi.G
 	if err != nil {
 		return httpapi.GatewayTelemetrySnapshot{}, fmt.Errorf("read VPP neighbor telemetry: %w", err)
 	}
-	natOutput, err := collector.run(ctx, binary, "show", "nat44", "sessions")
-	if err != nil {
-		return httpapi.GatewayTelemetrySnapshot{}, fmt.Errorf("read VPP connection telemetry: %w", err)
+	natEDOutput, natEDErr := collector.run(ctx, binary, "show", "nat44", "sessions")
+	natEIOutput, natEIErr := collector.run(ctx, binary, "show", "nat44", "ei", "sessions")
+	if natEDErr != nil && natEIErr != nil {
+		return httpapi.GatewayTelemetrySnapshot{}, fmt.Errorf("read VPP connection telemetry: endpoint-dependent: %v; endpoint-independent: %w", natEDErr, natEIErr)
 	}
 
 	now := collector.now().UTC()
@@ -108,10 +111,12 @@ func (collector *vppctlGatewayTelemetry) Collect(ctx context.Context) (httpapi.G
 		return httpapi.GatewayTelemetrySnapshot{}, err
 	}
 	logical := collector.logicalEgressCounters(interfaces, deltas, links, groups, proxies)
+	connections := parseGatewayNATConnections(natEDOutput, now, lanPrefixes)
+	connections = append(connections, parseGatewayNATEISummaries(natEIOutput, now, lanPrefixes)...)
 	return httpapi.GatewayTelemetrySnapshot{
 		ObservedAt:      now,
 		LogicalEgresses: logical,
-		Connections:     parseGatewayNATConnections(natOutput, now, lanPrefixes),
+		Connections:     connections,
 		Neighbors:       parseGatewayNeighbors(neighborOutput, now, lanInterfaces),
 	}, nil
 }
@@ -183,7 +188,7 @@ func (collector *vppctlGatewayTelemetry) logicalEgressCounters(
 			if !found {
 				continue
 			}
-			name := "lyroute-" + member.interfaceID
+			name := gatewayWANDataInterface(member)
 			delta := deltas[name]
 			aggregate.download += delta.download
 			aggregate.upload += delta.upload
@@ -196,7 +201,7 @@ func (collector *vppctlGatewayTelemetry) logicalEgressCounters(
 		if _, grouped := groupMembers[link.id]; grouped {
 			continue
 		}
-		logicalDeltas[link.id] = deltas["lyroute-"+link.interfaceID]
+		logicalDeltas[link.id] = deltas[gatewayWANDataInterface(link)]
 		health[link.id] = gatewayWANLinkUp(link, interfaces)
 	}
 
@@ -257,9 +262,16 @@ func gatewayWANLinkUp(link gatewayWANLink, interfaces map[string]vppTelemetryCou
 		return false
 	}
 	if link.pppoe {
-		return interfaces["pppoe_session0"].linkUp
+		return interfaces[link.sessionInterface].linkUp
 	}
 	return true
+}
+
+func gatewayWANDataInterface(link gatewayWANLink) string {
+	if link.pppoe && strings.TrimSpace(link.sessionInterface) != "" {
+		return link.sessionInterface
+	}
+	return "lyroute-" + link.interfaceID
 }
 
 func firstHealthyWANMember(group gatewayWANGroup, links map[string]gatewayWANLink, interfaces map[string]vppTelemetryCounter) string {
@@ -309,7 +321,12 @@ func (collector *vppctlGatewayTelemetry) logicalEgressConfiguration(ctx context.
 		if ipv4, ok := payload["ipv4"].(map[string]any); ok {
 			mode = strings.ToLower(telemetryString(ipv4, "mode"))
 		}
-		links = append(links, gatewayWANLink{id: id, name: telemetryDefaultName(payload, id), interfaceID: interfaceID, pppoe: mode == "pppoe"})
+		isPPPoE := mode == "pppoe"
+		sessionInterface := ""
+		if isPPPoE {
+			sessionInterface = serviceRuntime.PPPoEInterfaceName(id)
+		}
+		links = append(links, gatewayWANLink{id: id, name: telemetryDefaultName(payload, id), interfaceID: interfaceID, pppoe: isPPPoE, sessionInterface: sessionInterface})
 	}
 
 	groupPayloads, err := collector.configPayloads(ctx, "wan_group")
@@ -440,6 +457,30 @@ func parseGatewayNATConnections(output string, observedAt time.Time, lanPrefixes
 	}
 	flush()
 	sort.Slice(result, func(left, right int) bool { return result[left].Bytes > result[right].Bytes })
+	return result
+}
+
+func parseGatewayNATEISummaries(output string, observedAt time.Time, lanPrefixes []netip.Prefix) []httpapi.GatewayConnection {
+	result := []httpapi.GatewayConnection{}
+	for _, raw := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(raw))
+		if len(fields) != 7 || fields[2] != "dynamic" || fields[3] != "translations," || fields[5] != "static" || fields[6] != "translations" {
+			continue
+		}
+		source := strings.TrimSuffix(fields[0], ":")
+		if !gatewayLANAddress(source, lanPrefixes) {
+			continue
+		}
+		dynamicCount, dynamicErr := strconv.Atoi(fields[1])
+		staticCount, staticErr := strconv.Atoi(fields[4])
+		if dynamicErr != nil || staticErr != nil || dynamicCount+staticCount == 0 {
+			continue
+		}
+		result = append(result, httpapi.GatewayConnection{
+			SourceIP: source, ConnectionCount: dynamicCount + staticCount, ObservedAt: observedAt,
+		})
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].ConnectionCount > result[right].ConnectionCount })
 	return result
 }
 

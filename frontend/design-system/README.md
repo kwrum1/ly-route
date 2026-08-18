@@ -1,6 +1,6 @@
 # Ly Route Design System
 
-This folder establishes the original visual foundation for the full-version controller UI. The preserved `panabit-real/admin/` files remain functional reference only; this system deliberately avoids Panabit assets, `layui`/`paui` classes, old table density, and old button or header styling.
+This folder establishes the original visual foundation for the full-version controller UI. External UI source dumps are not retained in the product repository; this system deliberately avoids Panabit assets, `layui`/`paui` classes, old table density, and old button or header styling.
 
 ## Aesthetic Direction
 

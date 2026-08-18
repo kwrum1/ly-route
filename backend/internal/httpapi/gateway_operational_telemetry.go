@@ -61,11 +61,15 @@ func (server *Server) gatewayTopConnections(ctx context.Context) ([]map[string]a
 	sort.SliceStable(connections, func(left, right int) bool { return connections[left].Bytes > connections[right].Bytes })
 	items := make([]map[string]any, 0, len(connections))
 	for _, connection := range connections {
+		connectionCount := connection.ConnectionCount
+		if connectionCount <= 0 {
+			connectionCount = 1
+		}
 		items = append(items, map[string]any{
 			"src_ip": connection.SourceIP, "source_ip": connection.SourceIP,
 			"dst_ip": connection.DestinationIP, "destination_ip": connection.DestinationIP,
 			"protocol": connection.Protocol, "src_port": connection.SourcePort,
-			"dst_port": connection.DestinationPort, "bytes": connection.Bytes,
+			"dst_port": connection.DestinationPort, "connection_count": connectionCount, "bytes": connection.Bytes,
 			"observed_at": connection.ObservedAt,
 		})
 	}

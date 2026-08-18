@@ -22,8 +22,11 @@ func TestCompileProxySubscriptionUsesConfiguredDirectNode(t *testing.T) {
 		"name":     "Direct node",
 		"enabled":  true,
 		"protocol": "vless",
-		"address":  "node.example",
-		"port":     443,
+		// This test verifies the configured direct-node binding. DNS hostname
+		// resolution has its own fixed-bootstrap boundary test in runtime/proxy;
+		// using an IP keeps this unit test deterministic and offline.
+		"address": "203.0.113.5",
+		"port":    443,
 		"settings": map[string]any{
 			"network":  "tcp",
 			"security": "reality",

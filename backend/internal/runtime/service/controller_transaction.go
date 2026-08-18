@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,13 +29,53 @@ func (controller FilesystemController) applyWithRecovery(ctx context.Context, se
 	if err != nil {
 		return fmt.Errorf("capture %s prior artifacts: %w", service, err)
 	}
+	recordSnapshot, err := controller.captureFileSnapshot(controller.applyRecordPath(service))
+	if err != nil {
+		return fmt.Errorf("capture %s prior apply record: %w", service, err)
+	}
+	recordSnapshot = controller.onlyConsistentApplyRecord(service, recordSnapshot)
+	// A failed apply restores the rendered files, but it must also restore the
+	// receipt that describes those files. Leaving a receipt for the failed
+	// generation makes the next status/readback pass report a phantom apply and
+	// causes every later transaction to retry the same stale state.
+	restoreFailedApply := func(applyErr error, reapplyService bool) error {
+		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		artifactErr := controller.restoreArtifacts(snapshot)
+		var serviceErr error
+		if artifactErr == nil && reapplyService {
+			serviceErr = controller.restoreServiceFromSnapshot(recoveryCtx, service, snapshot, artifacts)
+		}
+		var recordErr error
+		if artifactErr == nil && serviceErr == nil {
+			recordErr = controller.restoreFileSnapshot(recordSnapshot)
+		} else {
+			recordErr = os.Remove(controller.applyRecordPath(service))
+			if errors.Is(recordErr, os.ErrNotExist) {
+				recordErr = nil
+			}
+		}
+		cleanupErr := controller.removeTransactionMetadata(service)
+		return errors.Join(applyErr, artifactErr, serviceErr, recordErr, cleanupErr)
+	}
+	persistOnly := artifactsArePersistOnly(artifacts)
+	// Runtime reconciliation is also used for short-lived DNS classification
+	// updates. Do not bounce healthy daemons or replay an unchanged Linux
+	// handoff when their rendered generation is already active. PPPoE keeps its
+	// dedicated path below because it must also repair target enablement without
+	// tearing down a connected native session.
+	if service != PPPoE && !persistOnly && artifactsMatchSnapshot(controller, snapshot, artifacts) &&
+		(service != Kea || controller.serviceRuntimeIdentityMatches(service, artifacts)) {
+		if readbackErr := liveReadback(ctx, controller.Runner, service, artifacts); readbackErr == nil {
+			return controller.saveApplyRecord(service, artifacts, transactionIDFromContext(ctx))
+		}
+	}
 	if err := controller.saveRollbackSnapshot(service, snapshot); err != nil {
 		return fmt.Errorf("save %s rollback snapshot: %w", service, err)
 	}
 	if err := controller.writeArtifacts(service, artifacts); err != nil {
-		return errors.Join(err, controller.restoreArtifacts(snapshot))
+		return restoreFailedApply(err, false)
 	}
-	persistOnly := artifactsArePersistOnly(artifacts)
 	// An unchanged native PPPoE plan must not tear down a live session. A
 	// needless stop/start races the AC and makes policy routing observe a
 	// missing pppoe_session. Restart only after a plan change or loss of the
@@ -42,46 +83,41 @@ func (controller FilesystemController) applyWithRecovery(ctx context.Context, se
 	skipPPPoEApply := service == PPPoE && artifactsMatchSnapshot(controller, snapshot, artifacts) && nativePPPoEArtifactsReady(ctx, controller.Runner, artifacts)
 	if persistOnly {
 		if err := controller.verifyPersistedArtifacts(artifacts); err != nil {
-			return errors.Join(err, controller.restoreArtifacts(snapshot))
+			return restoreFailedApply(err, false)
 		}
 	} else {
 		if !skipPPPoEApply {
 			if err := controller.runApplyCommand(ctx, service, artifacts); err != nil {
-				restoreErr := controller.restoreArtifacts(snapshot)
-				if restoreErr == nil {
-					restoreErr = controller.restoreServiceFromSnapshot(ctx, service, snapshot, artifacts)
-				}
-				return errors.Join(err, restoreErr)
+				return restoreFailedApply(err, true)
 			}
 		} else {
 			// The peer can remain connected while its target unit is inactive
 			// (for example after a manual recovery). Activate the target without
 			// restarting the live native session so readback reports a healthy
 			// service and boot ordering is repaired.
+			for _, unit := range applyUnits(service, artifacts) {
+				if err := controller.Runner.Run(ctx, "systemctl", "enable", unit); err != nil {
+					return restoreFailedApply(err, false)
+				}
+			}
 			if err := controller.Runner.Run(ctx, "systemctl", "start", applyUnit(service)); err != nil {
-				return err
+				return restoreFailedApply(err, false)
 			}
 		}
 		if err := liveReadback(ctx, controller.Runner, service, artifacts); err != nil {
-			restoreErr := controller.restoreArtifacts(snapshot)
 			if service == PPPoE {
 				// A failed PPPoE readback must not leave a retrying or stale session.
 				// Stop all rendered peers and verify VPP has no residual session.
-				stopErr := controller.Stop(ctx, service, artifacts)
-				return errors.Join(fmt.Errorf("%s live readback: %w", service, err), restoreErr, stopErr)
+				stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				stopErr := controller.Stop(stopCtx, service, artifacts)
+				cancel()
+				return restoreFailedApply(errors.Join(fmt.Errorf("%s live readback: %w", service, err), stopErr), false)
 			}
-			if restoreErr == nil {
-				restoreErr = controller.restoreServiceFromSnapshot(ctx, service, snapshot, artifacts)
-			}
-			return errors.Join(fmt.Errorf("%s live readback: %w", service, err), restoreErr)
+			return restoreFailedApply(fmt.Errorf("%s live readback: %w", service, err), true)
 		}
 	}
 	if err := controller.saveApplyRecord(service, artifacts, transactionIDFromContext(ctx)); err != nil {
-		restoreErr := controller.restoreArtifacts(snapshot)
-		if restoreErr == nil && !persistOnly {
-			restoreErr = controller.restoreServiceFromSnapshot(ctx, service, snapshot, artifacts)
-		}
-		return errors.Join(err, restoreErr)
+		return restoreFailedApply(err, !persistOnly)
 	}
 	return nil
 }
@@ -90,28 +126,37 @@ func (controller FilesystemController) rollbackWithSnapshot(ctx context.Context,
 	if controller.Runner == nil {
 		return fmt.Errorf("%s rollback requires a daemon command runner", service)
 	}
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	cleanup := func() error {
+		var cleanupErrors []error
+		for _, path := range []string{controller.rollbackSnapshotPath(service), controller.applyRecordPath(service)} {
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				cleanupErrors = append(cleanupErrors, removeErr)
+			}
+		}
+		return errors.Join(cleanupErrors...)
+	}
 	snapshot, err := controller.loadRollbackSnapshot(service)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("load %s rollback snapshot: %w", service, err)
+		return errors.Join(fmt.Errorf("load %s rollback snapshot: %w", service, err), cleanup())
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		if err := controller.writeArtifacts(service, artifacts); err != nil {
-			return err
+			return errors.Join(err, cleanup())
 		}
 	} else if err := controller.restoreArtifacts(snapshot); err != nil {
-		return err
+		return errors.Join(err, cleanup())
 	}
 	if !artifactsArePersistOnly(artifacts) {
-		if err := controller.runApplyCommand(ctx, service, artifacts); err != nil {
-			return err
+		if err := controller.runApplyCommand(rollbackCtx, service, artifacts); err != nil {
+			// A rollback is not a committed generation. Even when the old
+			// daemon cannot be restarted, remove both metadata files so the
+			// next apply cannot mistake the failed rollback for live state.
+			return errors.Join(err, cleanup())
 		}
 	}
-	for _, path := range []string{controller.rollbackSnapshotPath(service), controller.applyRecordPath(service)} {
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return removeErr
-		}
-	}
-	return nil
+	return cleanup()
 }
 
 func (controller FilesystemController) verifyPersistedArtifacts(artifacts []RenderedArtifact) error {
@@ -156,10 +201,13 @@ func (controller FilesystemController) runApplyCommand(ctx context.Context, serv
 		if err := controller.Runner.Run(ctx, "systemctl", "start", applyUnit(service)); err != nil {
 			return err
 		}
-		// The native client is a long-running simple service. `start` does not
-		// reload a changed plan, while reload-or-restart can race target
-		// activation. The target is active above; restart each peer explicitly.
+		// Persist every configured peer under the enabled target. Starting an
+		// instance directly is not enough: systemd otherwise forgets the peer on
+		// reboot even though its configuration remains on disk.
 		for _, unit := range applyUnits(service, artifacts) {
+			if err := controller.Runner.Run(ctx, "systemctl", "enable", unit); err != nil {
+				return err
+			}
 			if err := controller.Runner.Run(ctx, "systemctl", "restart", unit); err != nil {
 				return err
 			}
@@ -218,6 +266,12 @@ func nativePPPoEArtifactsReady(ctx context.Context, runner CommandRunner, artifa
 		if !strings.HasPrefix(artifact.Path, "/etc/ly-route/pppoe/ly-route-") {
 			continue
 		}
+		instance := strings.TrimSuffix(filepath.Base(artifact.Path), ".json")
+		unit := "ly-route-pppoe@" + instance + ".service"
+		state, err := runner.Output(ctx, "systemctl", "is-active", unit)
+		if err != nil || strings.TrimSpace(state) != "active" {
+			return false
+		}
 		var plan struct {
 			StatusFile string `json:"status_file"`
 		}
@@ -275,8 +329,8 @@ func (controller FilesystemController) Stop(ctx context.Context, service Service
 	}
 	var stopErrors []error
 	for _, unit := range units {
-		if err := controller.Runner.Run(ctx, "systemctl", "stop", unit); err != nil {
-			stopErrors = append(stopErrors, fmt.Errorf("stop %s: %w", unit, err))
+		if err := controller.Runner.Run(ctx, "systemctl", "disable", "--now", unit); err != nil {
+			stopErrors = append(stopErrors, fmt.Errorf("disable %s: %w", unit, err))
 		}
 	}
 	if err := controller.Runner.Run(ctx, "systemctl", "stop", applyUnit(service)); err != nil {
@@ -349,37 +403,83 @@ func (controller FilesystemController) captureArtifacts(service ServiceName, art
 	}
 	snapshots := make([]artifactSnapshot, 0, len(paths))
 	for path := range paths {
-		info, err := os.Stat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			snapshots = append(snapshots, artifactSnapshot{Path: path})
-			continue
-		}
+		snapshot, err := controller.captureFileSnapshot(path)
 		if err != nil {
 			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func (controller FilesystemController) captureFileSnapshot(path string) (artifactSnapshot, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return artifactSnapshot{Path: path}, nil
+	}
+	if err != nil {
+		return artifactSnapshot{}, err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return artifactSnapshot{}, err
+	}
+	return artifactSnapshot{Path: path, Content: content, Mode: info.Mode().Perm(), Existed: true}, nil
+}
+
+func (controller FilesystemController) onlyConsistentApplyRecord(service ServiceName, snapshot artifactSnapshot) artifactSnapshot {
+	if !snapshot.Existed {
+		return snapshot
+	}
+	var record serviceApplyRecord
+	if err := json.Unmarshal(snapshot.Content, &record); err != nil || record.Service != service || len(record.Artifacts) == 0 {
+		return artifactSnapshot{Path: snapshot.Path}
+	}
+	for artifactPath, expectedHash := range record.Artifacts {
+		path, err := controller.resolvePath(artifactPath)
+		if err != nil {
+			return artifactSnapshot{Path: snapshot.Path}
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return artifactSnapshot{Path: snapshot.Path}
 		}
-		snapshots = append(snapshots, artifactSnapshot{Path: path, Content: content, Mode: info.Mode().Perm(), Existed: true})
+		digest := sha256.Sum256(content)
+		if fmt.Sprintf("%x", digest[:]) != expectedHash {
+			return artifactSnapshot{Path: snapshot.Path}
+		}
 	}
-	return snapshots, nil
+	return snapshot
 }
 
 func (controller FilesystemController) restoreArtifacts(snapshots []artifactSnapshot) error {
 	var restoreErrors []error
 	for _, snapshot := range snapshots {
-		if !snapshot.Existed {
-			if err := os.Remove(snapshot.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				restoreErrors = append(restoreErrors, err)
-			}
-			continue
-		}
-		if err := writeFileAtomically(snapshot.Path, snapshot.Content, snapshot.Mode); err != nil {
+		if err := controller.restoreFileSnapshot(snapshot); err != nil {
 			restoreErrors = append(restoreErrors, err)
 		}
 	}
 	return errors.Join(restoreErrors...)
+}
+
+func (controller FilesystemController) restoreFileSnapshot(snapshot artifactSnapshot) error {
+	if !snapshot.Existed {
+		if err := os.Remove(snapshot.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return writeFileAtomically(snapshot.Path, snapshot.Content, snapshot.Mode)
+}
+
+func (controller FilesystemController) removeTransactionMetadata(service ServiceName) error {
+	var removeErrors []error
+	for _, path := range []string{controller.rollbackSnapshotPath(service)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			removeErrors = append(removeErrors, err)
+		}
+	}
+	return errors.Join(removeErrors...)
 }
 
 func (controller FilesystemController) saveRollbackSnapshot(service ServiceName, snapshots []artifactSnapshot) error {

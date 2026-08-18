@@ -1,0 +1,14 @@
+[Unit]
+Description=Ly Route acceptance secondary PPPoE access concentrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/run/ly-route-pppoe-server-secondary.pid
+ExecStart=/usr/local/sbin/ly-route-acceptance-pppoe-secondary-start
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

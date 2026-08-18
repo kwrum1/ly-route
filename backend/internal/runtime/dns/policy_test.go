@@ -385,6 +385,19 @@ func TestRenderSmartDNSFixedWANUsesStableIPSetName(t *testing.T) {
 	}
 }
 
+func TestSmartDNSIPSetNameFitsLinuxLimitForLongRuleID(t *testing.T) {
+	name := SmartDNSIPSetName("acceptance-domestic-rule-with-a-long-name")
+	if len(name) > 31 {
+		t.Fatalf("IP set name length = %d, want <= 31: %q", len(name), name)
+	}
+	if name != SmartDNSIPSetName("acceptance-domestic-rule-with-a-long-name") {
+		t.Fatalf("IP set name is not stable: %q", name)
+	}
+	if name == SmartDNSIPSetName("acceptance-domestic-rule-with-a-long-name-2") {
+		t.Fatalf("long rule IDs produced colliding IP set names: %q", name)
+	}
+}
+
 func TestCompilePolicyRejectsMissingProxyEgressReference(t *testing.T) {
 	policy := NewPolicy(Reject(), []Rule{
 		{ID: "proxy-media", Domains: []string{"media.example"}, Outcome: Proxy("proxy-media")},

@@ -54,6 +54,11 @@ func (server *Server) compileProxySubscription(ctx context.Context, egress proxy
 			if len(runtimeNodes) != 1 {
 				return fmt.Sprintf("proxy node %q could not be prepared", node.ID)
 			}
+			resolved, resolveErr := proxy.ResolveNodeAddress(ctx, runtimeNodes[0])
+			if resolveErr != nil {
+				return resolveErr.Error()
+			}
+			runtimeNodes[0] = resolved
 			outbound, compileErr := proxy.CompileNodeOutbound(runtimeNodes[0])
 			if compileErr != nil {
 				return compileErr.Error()
@@ -111,6 +116,15 @@ func (server *Server) compileProxySubscription(ctx context.Context, egress proxy
 			Selection: proxy.SelectionMode(strings.TrimSpace(stringField(item, "selection"))),
 		}
 		runtimeNodes := prepareProxyNodeTLS(ctx, proxyNodes, subscription.NodeRefs)
+		resolvedNodes := make([]proxy.Node, 0, len(runtimeNodes))
+		for _, node := range runtimeNodes {
+			resolved, resolveErr := proxy.ResolveNodeAddress(ctx, node)
+			if resolveErr != nil {
+				continue
+			}
+			resolvedNodes = append(resolvedNodes, resolved)
+		}
+		runtimeNodes = resolvedNodes
 		var probes []proxy.NodeProbe
 		if subscription.Selection == proxy.SelectionFastest {
 			probes = probeProxyNodes(ctx, runtimeNodes, subscription.NodeRefs)

@@ -210,16 +210,107 @@ func SupplementalCleanupOperations(plan Plan, owner SupplementalOwner) ([]Operat
 	return cleanup, nil
 }
 
+// SupplementalReconciliationCleanupOperations returns cleanup operations for
+// DNS and proxy service networks that existed in the persisted plan but are
+// absent or materially changed in the desired plan. These resources are
+// declarative plan data, so reconciliation must not rebuild the prior native
+// path: its capability proofs can legitimately be expired by the next apply.
+func SupplementalReconciliationCleanupOperations(prior, desired Plan, owner SupplementalOwner) ([]Operation, error) {
+	priorOperations, err := supplementalServiceNetworkOperations(prior, owner)
+	if err != nil {
+		return nil, err
+	}
+	desiredOperations, err := supplementalServiceNetworkOperations(desired, owner)
+	if err != nil {
+		return nil, err
+	}
+	desiredIdentities := make(map[string]struct{}, len(desiredOperations))
+	for _, operation := range desiredOperations {
+		identity, identityErr := supplementalOperationIdentity(operation)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		desiredIdentities[identity] = struct{}{}
+	}
+	cleanup := make([]Operation, 0)
+	for _, operation := range priorOperations {
+		identity, identityErr := supplementalOperationIdentity(operation)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		if _, retained := desiredIdentities[identity]; retained {
+			continue
+		}
+		if attachment, ok := operation.Payload.(NativeAttachment); ok && attachment.Tier == DataplaneTierDPDK {
+			continue
+		}
+		commands, commandErr := supplementalCleanupCommands(operation)
+		if commandErr != nil {
+			return nil, commandErr
+		}
+		payload := operation.Payload
+		if management, ok := payload.(ManagementLCP); ok {
+			management.Enabled = false
+			payload = management
+		}
+		cleanup = append(cleanup, Operation{
+			Name:           operation.Name + ".reconcile-delete",
+			RequestID:      desired.RequestID,
+			Resource:       operation.Resource,
+			Payload:        payload,
+			VPPCtlCommands: commands,
+		})
+	}
+	return cleanup, nil
+}
+
+func supplementalServiceNetworkOperations(plan Plan, owner SupplementalOwner) ([]Operation, error) {
+	if owner != SupplementalRoutes {
+		return nil, nil
+	}
+	operations := make([]Operation, 0, len(plan.DNSServiceNetworks)+len(plan.Proxy.VPPSteering))
+	for _, network := range plan.DNSServiceNetworks {
+		if err := validateDNSServiceNetwork(network); err != nil {
+			return nil, err
+		}
+		operations = append(operations, Operation{
+			Name:           "vpp.dns-service.network",
+			RequestID:      plan.RequestID,
+			Resource:       network.UpstreamID,
+			Payload:        network,
+			VPPCtlCommands: dnsServiceNetworkCommands(network, plan.NAT.Behavior),
+		})
+	}
+	for _, steering := range plan.Proxy.VPPSteering {
+		operations = append(operations, Operation{
+			Name:           steering.TargetKind,
+			RequestID:      plan.RequestID,
+			Resource:       steering.EgressID,
+			Payload:        steering,
+			VPPCtlCommands: proxySteeringCommands(steering, plan.NAT.Behavior),
+		})
+	}
+	return operations, nil
+}
+
+func supplementalOperationIdentity(operation Operation) (string, error) {
+	hash, err := supplementalOperationHash(operation)
+	if err != nil {
+		return "", err
+	}
+	return operation.Name + "\x00" + operation.Resource + "\x00" + hash, nil
+}
+
 func supplementalCleanupCommands(operation Operation) ([]string, error) {
 	switch payload := operation.Payload.(type) {
 	case NativeAttachment:
 		switch payload.Hook {
+		case NativeHookAFPacket:
+			return []string{fmt.Sprintf("?delete host-interface name %s", payload.LinuxInterface), "show interface"}, nil
 		case NativeHookAFXDP:
 			return []string{fmt.Sprintf("?delete interface af_xdp %s", payload.VPPInterface), "show interface"}, nil
 		case NativeHookRDMA:
 			return []string{fmt.Sprintf("?delete interface rdma %s", payload.VPPInterface), "show interface"}, nil
-		case NativeHookVMXNET3:
-			return []string{fmt.Sprintf("?delete interface vmxnet3 %s", payload.VPPInterface), "show interface"}, nil
 		default:
 			return nil, &UnsupportedOperationError{Name: operation.Name, Resource: operation.Resource}
 		}

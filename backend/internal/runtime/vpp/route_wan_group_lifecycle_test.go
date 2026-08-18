@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -126,6 +127,61 @@ func TestGatewayRouteWANGroupDeleteExecutesAndConfirmsAbsence(t *testing.T) {
 	}
 	if len(result.Receipt.Operations) != 2 || !strings.Contains(strings.Join(client.operations[0].VPPCtlCommands, "\n"), "del") {
 		t.Fatalf("operations = %#v, want live deletes", client.operations)
+	}
+}
+
+func TestGatewayRouteWANGroupFullRebuildPreDeletesDesiredPolicies(t *testing.T) {
+	// A stale VPP object can outlive the persisted snapshot after an older
+	// apply/rollback. The desired policy ID must therefore be cleaned before
+	// replay, even when it is absent from the prior snapshot.
+	contextRoutes := []trafficpolicy.RoutePolicy{
+		{ID: "route-10", Priority: 10, Action: "route", Egress: "wan-primary"},
+		{ID: "route-100", Priority: 100, Action: "route", Egress: "wan-primary"},
+	}
+	client := &routeWANLifecycleClient{replies: map[string]Reply{
+		"vpp.route-policy.snapshot": {Payload: RoutePolicyReadback{Policies: contextRoutes}},
+	}}
+	plan := RouteWANGroupPlan{
+		TransactionID:      "txn-route-rebuild-cleanup",
+		RoutePolicyContext: contextRoutes,
+		Routes:             []trafficpolicy.RoutePolicy{{ID: "route-10", Priority: 10, Action: "route", Egress: "wan-primary"}},
+	}
+
+	if _, err := (Adapter{Client: client}).ApplyRouteWANGroup(context.Background(), plan, Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.operations) == 0 || client.operations[0].Name != "vpp.route-policy.pre-delete" {
+		t.Fatalf("operations = %#v, want pre-delete phase first", client.operations)
+	}
+	seen := map[string]bool{}
+	for _, operation := range client.operations {
+		if operation.Name != "vpp.route-policy.pre-delete" {
+			break
+		}
+		seen[operation.Resource] = true
+	}
+	for _, id := range []string{"route-10", "route-100"} {
+		if !seen[id] {
+			t.Fatalf("pre-delete operations = %#v, want %s", client.operations, id)
+		}
+	}
+}
+
+func TestRouteSnapshotAfterRetiredDeleteIncludesUnchangedDesiredPolicies(t *testing.T) {
+	active := trafficpolicy.RoutePolicy{ID: "route-active", Action: "route", Egress: "wan0"}
+	request := routeWANGroupSnapshotRequestForPlan(RouteWANGroupPlan{
+		TransactionID:      "txn-retired-readback",
+		RoutePolicyContext: []trafficpolicy.RoutePolicy{active},
+		DeleteRoutes:       []string{"route-disabled"},
+	})
+	if !reflect.DeepEqual(request.RoutePolicies, []string{"route-active"}) {
+		t.Fatalf("route readback IDs = %#v", request.RoutePolicies)
+	}
+	if !reflect.DeepEqual(request.AbsentRoutePolicies, []string{"route-disabled"}) {
+		t.Fatalf("absent route IDs = %#v", request.AbsentRoutePolicies)
+	}
+	if !request.AllowMissing {
+		t.Fatal("retired-route delete readback must allow an unchanged policy queued for dependency repair")
 	}
 }
 

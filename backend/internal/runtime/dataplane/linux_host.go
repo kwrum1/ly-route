@@ -78,14 +78,10 @@ func (host *LinuxHost) ConfigureDPDK(ctx context.Context, path vpp.NativePath, s
 	if err != nil {
 		return err
 	}
-	return host.configurePCI(ctx, path, snapshot, true, driver)
+	return host.configurePCI(ctx, path, snapshot, driver)
 }
 
-func (host *LinuxHost) ConfigureNativePCI(ctx context.Context, path vpp.NativePath, snapshot Snapshot) error {
-	return host.configurePCI(ctx, path, snapshot, false, "vfio-pci")
-}
-
-func (host *LinuxHost) configurePCI(ctx context.Context, path vpp.NativePath, snapshot Snapshot, renderDPDK bool, targetDriver string) error {
+func (host *LinuxHost) configurePCI(ctx context.Context, path vpp.NativePath, snapshot Snapshot, targetDriver string) error {
 	module := targetDriver
 	if targetDriver == "vfio-pci" {
 		module = "vfio-pci"
@@ -118,9 +114,6 @@ func (host *LinuxHost) configurePCI(ctx context.Context, path vpp.NativePath, sn
 				return err
 			}
 		}
-	}
-	if !renderDPDK {
-		return nil
 	}
 	config, err := RenderDPDKStartup(snapshot.StartupConfig, path.Attachments)
 	if err != nil {
@@ -175,62 +168,6 @@ func (host *LinuxHost) waitForDPDKReadback(ctx context.Context, attachment vpp.N
 		case <-ticker.C:
 		}
 	}
-}
-
-func (host *LinuxHost) VerifyNativePCI(ctx context.Context, path vpp.NativePath) error {
-	if _, err := host.run(ctx, "systemctl", "is-active", "--quiet", "vpp.service"); err != nil {
-		return err
-	}
-	for _, attachment := range path.Attachments {
-		if attachment.Hook != vpp.NativeHookVMXNET3 {
-			continue
-		}
-		driver, err := filepath.EvalSymlinks(host.sysfs(filepath.Join("bus/pci/devices", attachment.PCIAddress, "driver")))
-		if err != nil || filepath.Base(driver) != "vfio-pci" {
-			return fmt.Errorf("PCI device %s is not bound to vfio-pci", attachment.PCIAddress)
-		}
-		_, _ = host.run(ctx, host.vppctl(), "create", "interface", "vmxnet3", attachment.PCIAddress)
-		vmxnet3Output, err := host.run(ctx, host.vppctl(), "show", "vmxnet3")
-		if err != nil {
-			return fmt.Errorf("VPP VMXNET3 readback failed: %w", err)
-		}
-		actual := parseVMXNET3Interface(string(vmxnet3Output), attachment.PCIAddress)
-		if actual == "" {
-			return fmt.Errorf("VPP VMXNET3 interface for PCI %s was not found", attachment.PCIAddress)
-		}
-		if actual != attachment.VPPInterface {
-			if _, err := host.run(ctx, host.vppctl(), "set", "interface", "name", actual, attachment.VPPInterface); err != nil {
-				return fmt.Errorf("rename VPP VMXNET3 interface %s to %s: %w", actual, attachment.VPPInterface, err)
-			}
-		}
-		if _, err := host.run(ctx, host.vppctl(), "set", "interface", "state", attachment.VPPInterface, "up"); err != nil {
-			return err
-		}
-		output, err := host.run(ctx, host.vppctl(), "show", "hardware-interfaces", attachment.VPPInterface)
-		if err != nil || !strings.Contains(string(output), attachment.VPPInterface) || !strings.Contains(string(output), attachment.PCIAddress) {
-			return fmt.Errorf("VPP VMXNET3 hardware readback missing interface %s PCI %s", attachment.VPPInterface, attachment.PCIAddress)
-		}
-		output, err = host.run(ctx, host.vppctl(), "show", "interface", attachment.VPPInterface)
-		if err != nil || !strings.Contains(string(output), attachment.VPPInterface) {
-			return fmt.Errorf("VPP interface readback missing %s", attachment.VPPInterface)
-		}
-	}
-	return nil
-}
-
-func parseVMXNET3Interface(output, pci string) string {
-	current := ""
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == "Interface:" {
-			current = fields[1]
-			continue
-		}
-		if len(fields) >= 3 && fields[0] == "PCI" && fields[1] == "Address:" && fields[2] == pci {
-			return current
-		}
-	}
-	return ""
 }
 
 func (host *LinuxHost) VerifySmartQoS(ctx context.Context, path vpp.NativePath) error {
@@ -391,11 +328,6 @@ func (host *LinuxHost) deviceState(attachment vpp.NativeAttachment) (DeviceState
 	if attachment.Mode == vpp.NativeModeDPDKUIO {
 		if attachment.IOMMUGroup != "none" {
 			return DeviceState{}, fmt.Errorf("interface %s has invalid UIO isolation identity", name)
-		}
-	} else if attachment.IOMMUGroup == "noiommu" {
-		enabled, readErr := os.ReadFile(host.sysfs("module/vfio/parameters/enable_unsafe_noiommu_mode"))
-		if readErr != nil || strings.TrimSpace(string(enabled)) != "Y" {
-			return DeviceState{}, fmt.Errorf("interface %s requires explicit VFIO no-IOMMU mode", name)
 		}
 	} else if err != nil || filepath.Base(iommu) != attachment.IOMMUGroup {
 		return DeviceState{}, fmt.Errorf("interface %s IOMMU group changed since capability proof", name)

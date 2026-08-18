@@ -13,10 +13,13 @@ import (
 type NAT44Readback struct {
 	StaticMappings []nat.StaticMapping `json:"static_mappings"`
 	PortMappings   []nat.PortMapping   `json:"port_mappings"`
+	Behavior       nat.Behavior        `json:"behavior,omitempty"`
 }
 
 type NAT44Plan struct {
 	TransactionID          string
+	Behavior               nat.Behavior
+	IngressVPPInterface    string
 	StaticMappings         []nat.StaticMapping
 	PortMappings           []nat.PortMapping
 	ReadbackStaticMappings []nat.StaticMapping
@@ -65,6 +68,9 @@ func (a Adapter) ApplyNAT44(ctx context.Context, plan NAT44Plan, prior Snapshot,
 		return NAT44ApplyResult{}, fmt.Errorf("%w: open NAT44 channel: %v", ErrVPPUnavailable, err)
 	}
 	defer channel.Close()
+	if ingress, ok := channel.(interface{ setNATReturnGuardIngress(string) }); ok {
+		ingress.setNATReturnGuardIngress(plan.IngressVPPInterface)
+	}
 	for _, operation := range operations {
 		if _, err := doOperation(ctx, channel, operation); err != nil {
 			return NAT44ApplyResult{}, a.nat44Failure(ctx, channel, plan.TransactionID, operation.Name, err, prior, rollbackPlan)
@@ -73,6 +79,12 @@ func (a Adapter) ApplyNAT44(ctx context.Context, plan NAT44Plan, prior Snapshot,
 	readback, err := a.snapshotOnChannel(ctx, channel, nat44SnapshotRequestForPlan(plan))
 	if err != nil {
 		return NAT44ApplyResult{}, a.nat44Failure(ctx, channel, plan.TransactionID, "readback", err, prior, rollbackPlan)
+	}
+	if readback.NAT.Behavior == "" {
+		readback.NAT.Behavior = plan.Behavior
+	}
+	if plan.Behavior != "" && readback.NAT.Behavior != plan.Behavior {
+		return NAT44ApplyResult{}, a.nat44Failure(ctx, channel, plan.TransactionID, "readback", fmt.Errorf("NAT behavior readback = %q, want %q", readback.NAT.Behavior, plan.Behavior), prior, rollbackPlan)
 	}
 	if err := verifyNAT44Readback(readback.NAT, plan); err != nil {
 		return NAT44ApplyResult{}, a.nat44Failure(ctx, channel, plan.TransactionID, "readback", err, prior, rollbackPlan)
@@ -87,31 +99,47 @@ func BuildNAT44Operations(plan NAT44Plan) ([]Operation, error) {
 	}
 	operations := make([]Operation, 0, len(plan.StaticMappings)+len(plan.PortMappings)+len(plan.DeleteStaticMappings)+len(plan.DeletePortMappings))
 	for _, mapping := range plan.StaticMappings {
-		operations = append(operations, Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natStaticMappingCommands(mapping)})
+		operations = append(operations, Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: resolveNATIngressCommands(natStaticMappingCommandsForBehavior(plan.Behavior, mapping), plan.IngressVPPInterface)})
 	}
 	for _, mapping := range plan.PortMappings {
-		operations = append(operations, Operation{Name: "vpp.nat44-ed.port-map", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natPortMappingCommands(mapping)})
+		operations = append(operations, Operation{Name: "vpp.nat44-ed.port-map", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: resolveNATIngressCommands(natPortMappingCommandsForBehavior(plan.Behavior, mapping), plan.IngressVPPInterface)})
 	}
 	for _, id := range plan.DeleteStaticMappings {
 		mapping, found := staticMappingByID(append(plan.ReadbackStaticMappings, plan.StaticMappings...), id)
 		if !found {
 			return nil, fmt.Errorf("%w: prior NAT static mapping %q is required for deletion", ErrSnapshotIncomplete, id)
 		}
-		operations = append(operations, Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: transactionID, Resource: id, Payload: mapping, VPPCtlCommands: deleteNATStaticCommands(mapping)})
+		operations = append(operations, Operation{Name: "vpp.nat44-ed.static-mapping", RequestID: transactionID, Resource: id, Payload: mapping, VPPCtlCommands: resolveNATIngressCommands(deleteNATStaticCommandsForBehavior(plan.Behavior, mapping), plan.IngressVPPInterface)})
 	}
 	for _, id := range plan.DeletePortMappings {
 		mapping, found := portMappingByID(append(plan.ReadbackPortMappings, plan.PortMappings...), id)
 		if !found {
 			return nil, fmt.Errorf("%w: prior NAT port mapping %q is required for deletion", ErrSnapshotIncomplete, id)
 		}
-		operations = append(operations, Operation{Name: "vpp.nat44-ed.port-map", RequestID: transactionID, Resource: id, Payload: mapping, VPPCtlCommands: deleteNATPortCommands(mapping)})
+		operations = append(operations, Operation{Name: "vpp.nat44-ed.port-map", RequestID: transactionID, Resource: id, Payload: mapping, VPPCtlCommands: resolveNATIngressCommands(deleteNATPortCommandsForBehavior(plan.Behavior, mapping), plan.IngressVPPInterface)})
 	}
 	return operations, nil
 }
 
+// NAT mapping command helpers are shared with the static product plan and use
+// a symbolic LAN interface. Runtime gateway application already resolves that
+// interface from the active LAN assignment, so never send the symbolic value
+// literally to vppctl.
+func resolveNATIngressCommands(commands []string, ingress string) []string {
+	ingress = strings.TrimSpace(ingress)
+	if ingress == "" {
+		return append([]string(nil), commands...)
+	}
+	resolved := make([]string, len(commands))
+	for index, command := range commands {
+		resolved[index] = strings.ReplaceAll(command, "lyroute-$LY_ROUTE_LAN_INTERFACE", ingress)
+	}
+	return resolved
+}
+
 func (a Adapter) nat44Failure(ctx context.Context, channel Channel, transactionID, operation string, cause error, prior Snapshot, plan NAT44Plan) error {
 	rollbackErr := errors.Join(cleanupNAT44(ctx, channel, transactionID, plan), applyNAT44Snapshot(ctx, channel, transactionID, prior))
-	readback, err := a.snapshotOnChannel(ctx, channel, nat44SnapshotRequest(transactionID, prior.NAT))
+	readback, err := a.snapshotOnChannel(ctx, channel, nat44SnapshotRequest(transactionID, prior.NAT, plan.IngressVPPInterface))
 	if err != nil {
 		rollbackErr = errors.Join(rollbackErr, err)
 	} else if !reflect.DeepEqual(readback.NAT, prior.NAT) {
@@ -127,12 +155,12 @@ func (a Adapter) nat44Failure(ctx context.Context, channel Channel, transactionI
 func cleanupNAT44(ctx context.Context, channel Channel, transactionID string, plan NAT44Plan) error {
 	var cleanup []error
 	for _, mapping := range plan.PortMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback-delete", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: deleteNATPortCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback-delete", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: resolveNATIngressCommands(deleteNATPortCommandsForBehavior(plan.Behavior, mapping), plan.IngressVPPInterface)}); err != nil {
 			cleanup = append(cleanup, err)
 		}
 	}
 	for _, mapping := range plan.StaticMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback-delete", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: deleteNATStaticCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback-delete", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: resolveNATIngressCommands(deleteNATStaticCommandsForBehavior(plan.Behavior, mapping), plan.IngressVPPInterface)}); err != nil {
 			cleanup = append(cleanup, err)
 		}
 	}
@@ -142,20 +170,23 @@ func cleanupNAT44(ctx context.Context, channel Channel, transactionID string, pl
 func applyNAT44Snapshot(ctx context.Context, channel Channel, transactionID string, snapshot Snapshot) error {
 	var replay []error
 	for _, mapping := range snapshot.NAT.StaticMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natStaticMappingCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.static-mapping.rollback", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natStaticMappingCommandsForBehavior(snapshot.NAT.Behavior, mapping)}); err != nil {
 			replay = append(replay, err)
 		}
 	}
 	for _, mapping := range snapshot.NAT.PortMappings {
-		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natPortMappingCommands(mapping)}); err != nil {
+		if _, err := doOperation(ctx, channel, Operation{Name: "vpp.nat44-ed.port-map.rollback", RequestID: transactionID, Resource: mapping.ID, Payload: mapping, VPPCtlCommands: natPortMappingCommandsForBehavior(snapshot.NAT.Behavior, mapping)}); err != nil {
 			replay = append(replay, err)
 		}
 	}
 	return errors.Join(replay...)
 }
 
-func nat44SnapshotRequest(transactionID string, config nat.CompiledConfig) SnapshotRequest {
-	request := SnapshotRequest{TransactionID: transactionID, Capabilities: []SnapshotCapability{SnapshotCapabilityNAT44}, VerifyNATReturnGuards: len(config.StaticMappings)+len(config.PortMappings) > 0}
+func nat44SnapshotRequest(transactionID string, config nat.CompiledConfig, ingress ...string) SnapshotRequest {
+	request := SnapshotRequest{TransactionID: transactionID, NATBehavior: config.Behavior, Capabilities: []SnapshotCapability{SnapshotCapabilityNAT44}, VerifyNATReturnGuards: len(config.StaticMappings)+len(config.PortMappings) > 0}
+	if len(ingress) > 0 {
+		request.NATIngressVPPInterface = strings.TrimSpace(ingress[0])
+	}
 	for _, mapping := range config.StaticMappings {
 		request.NATStaticMappings = append(request.NATStaticMappings, mapping.ID)
 	}
@@ -172,7 +203,7 @@ func nat44SnapshotRequestForPlan(plan NAT44Plan) SnapshotRequest {
 	staticMappings = appendUniqueMappings(staticMappings, plan.ReadbackStaticMappings)
 	portMappings := append([]nat.PortMapping(nil), plan.PortMappings...)
 	portMappings = appendUniqueMappings(portMappings, plan.ReadbackPortMappings)
-	request := nat44SnapshotRequest(plan.TransactionID, nat.CompiledConfig{StaticMappings: staticMappings, PortMappings: portMappings})
+	request := nat44SnapshotRequest(plan.TransactionID, nat.CompiledConfig{StaticMappings: staticMappings, PortMappings: portMappings, Behavior: plan.Behavior}, plan.IngressVPPInterface)
 	request.NATStaticMappings = withoutIDs(request.NATStaticMappings, plan.DeleteStaticMappings)
 	request.NATPortMappings = withoutIDs(request.NATPortMappings, plan.DeletePortMappings)
 	request.AbsentNATStatic = append([]string(nil), plan.DeleteStaticMappings...)

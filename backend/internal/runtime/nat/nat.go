@@ -28,9 +28,85 @@ type PortMapping struct {
 	ReturnPathGuard bool   `json:"return_path_guard,omitempty"`
 }
 
+// Behavior selects the NAT44 connection-tracking semantics for the gateway.
+// Endpoint-dependent is the safe default used by NAT44-ED. Full-cone uses
+// VPP's endpoint-independent NAT44-EI plugin and is a global gateway mode;
+// the two VPP plugins are never mixed in one running plan.
+type Behavior string
+
+const (
+	BehaviorEndpointDependent Behavior = "endpoint_dependent"
+	BehaviorFullCone          Behavior = "full_cone"
+)
+
 type CompiledConfig struct {
 	StaticMappings []StaticMapping `json:"static_mappings,omitempty"`
 	PortMappings   []PortMapping   `json:"port_mappings,omitempty"`
+	Behavior       Behavior        `json:"behavior,omitempty"`
+}
+
+// ResolveBehavior reads accepted API aliases from all NAT-related resources.
+// Missing values use the endpoint-dependent default. Explicit conflicting
+// values are rejected because VPP cannot safely run NAT44-ED and NAT44-EI on
+// the same gateway at the same time.
+func ResolveBehavior(itemSets ...[]map[string]any) (Behavior, error) {
+	behavior := BehaviorEndpointDependent
+	configured := false
+	for _, items := range itemSets {
+		for _, item := range items {
+			if !enabled(item) {
+				continue
+			}
+			candidate, explicit, err := requestedBehavior(item)
+			if err != nil {
+				return "", err
+			}
+			if !explicit {
+				continue
+			}
+			if configured && candidate != behavior {
+				return "", fmt.Errorf("conflicting NAT behaviors: %q and %q cannot be active together", behavior, candidate)
+			}
+			behavior, configured = candidate, true
+		}
+	}
+	return behavior, nil
+}
+
+func requestedBehavior(item map[string]any) (Behavior, bool, error) {
+	for _, key := range []string{"full_cone", "full_cone_nat", "endpoint_independent"} {
+		if value, ok := item[key]; ok && truthy(value) {
+			return BehaviorFullCone, true, nil
+		}
+	}
+	for _, key := range []string{"nat_behavior", "nat_mode"} {
+		value := strings.TrimSpace(strings.ToLower(fmt.Sprint(item[key])))
+		if value == "" || value == "<nil>" {
+			continue
+		}
+		normalized := strings.ReplaceAll(strings.ReplaceAll(value, "-", "_"), " ", "_")
+		switch normalized {
+		case "full_cone", "fullcone", "endpoint_independent", "endpoint_independent_nat", "cone":
+			return BehaviorFullCone, true, nil
+		case "endpoint_dependent", "endpoint_dependent_nat", "nat44_ed", "ed", "default":
+			return BehaviorEndpointDependent, true, nil
+		default:
+			return "", false, fmt.Errorf("unsupported NAT behavior %q; use endpoint_dependent or full_cone", value)
+		}
+	}
+	return BehaviorEndpointDependent, false, nil
+}
+
+func truthy(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		value := strings.ToLower(strings.TrimSpace(typed))
+		return value == "true" || value == "1" || value == "enabled" || value == "yes"
+	default:
+		return false
+	}
 }
 
 func BindWANInterfaces(config *CompiledConfig, bindings map[string]string) error {
@@ -81,10 +157,21 @@ func CompileConfigWithWANs(staticItems, portMapItems, wanItems []map[string]any)
 		if err != nil {
 			return CompiledConfig{}, err
 		}
+		if mapping.WANInterface != "" {
+			// Static mappings created through the router UI are bound to a WAN,
+			// not to a transient DHCP or PPPoE lease. Keep their public address
+			// in sync with the live WAN for the same reconnect behavior as port
+			// mappings. A stale address creates a VPP mapping that cannot receive
+			// replies on the current WAN session.
+			if liveAddress := strings.TrimSpace(wanAddresses[mapping.WANInterface]); liveAddress != "" {
+				mapping.ExternalAddress = liveAddress
+			}
+		}
 		staticMappings = append(staticMappings, mapping)
 	}
 
 	portMappings := make([]PortMapping, 0, len(portMapItems))
+	validatedPortMappings := make([]PortMapping, 0, len(portMapItems))
 	for _, item := range portMapItems {
 		if !enabled(item) {
 			continue
@@ -93,10 +180,41 @@ func CompileConfigWithWANs(staticItems, portMapItems, wanItems []map[string]any)
 		if err != nil {
 			return CompiledConfig{}, err
 		}
+		validatedPortMappings = append(validatedPortMappings, mapping)
+		// A port map bound to a dynamic WAN is valid before the WAN has a
+		// lease. Do not let it block PPPoE startup; it is installed on the
+		// next reconcile after the WAN address is available.
+		if mapping.ExternalAddress == "" {
+			continue
+		}
 		portMappings = append(portMappings, mapping)
 	}
+	if err := validatePortMappingUniqueness(validatedPortMappings); err != nil {
+		return CompiledConfig{}, err
+	}
 
-	return CompiledConfig{StaticMappings: staticMappings, PortMappings: portMappings}, nil
+	behavior, err := ResolveBehavior(staticItems, portMapItems, wanItems)
+	if err != nil {
+		return CompiledConfig{}, err
+	}
+	return CompiledConfig{StaticMappings: staticMappings, PortMappings: portMappings, Behavior: behavior}, nil
+}
+
+// validatePortMappingUniqueness enforces the VPP NAT44 static mapping
+// contract. NAT44-EI and the gateway's NAT44-ED adapter both identify a
+// mapping by protocol plus internal endpoint, so changing only the public
+// port cannot create a second mapping for the same LAN service. Rejecting it
+// during compilation keeps a bad desired state from reaching runtime apply.
+func validatePortMappingUniqueness(mappings []PortMapping) error {
+	seen := make(map[string]PortMapping, len(mappings))
+	for _, mapping := range mappings {
+		key := strings.Join([]string{mapping.Protocol, mapping.InternalHost, strconv.Itoa(mapping.InternalPort)}, "/")
+		if previous, exists := seen[key]; exists {
+			return fmt.Errorf("port_map %q conflicts with %q: %s %s:%d is already mapped; VPP supports one mapping per internal endpoint", mapping.ID, previous.ID, mapping.Protocol, mapping.InternalHost, mapping.InternalPort)
+		}
+		seen[key] = mapping
+	}
+	return nil
 }
 
 func compileStaticMapping(item map[string]any) (StaticMapping, error) {
@@ -155,14 +273,19 @@ func compilePortMapping(item map[string]any, wanAddresses map[string]string) (Po
 	if mapping.Protocol == "" {
 		mapping.Protocol = "tcp"
 	}
-	if mapping.ExternalAddress == "" && mapping.WANInterface != "" {
-		mapping.ExternalAddress = wanAddresses[mapping.WANInterface]
+	if mapping.WANInterface != "" {
+		// Port mappings created from the router UI are bound to a WAN, not to a
+		// transient PPPoE lease. Prefer the live WAN address on every compile so
+		// reconnects cannot leave a stale public address in VPP.
+		if liveAddress := strings.TrimSpace(wanAddresses[mapping.WANInterface]); liveAddress != "" {
+			mapping.ExternalAddress = liveAddress
+		}
 	}
 	if err := requireID(id, "port_map"); err != nil {
 		return PortMapping{}, err
 	}
-	if mapping.ExternalAddress == "" {
-		return PortMapping{}, fmt.Errorf("port_map %q requires external_address until WAN acquired address resolution is implemented", id)
+	if mapping.ExternalAddress == "" && mapping.WANInterface == "" {
+		return PortMapping{}, fmt.Errorf("port_map %q requires an acquired WAN address or external_address", id)
 	}
 	if err := optionalToken(mapping.ExternalAddress, "port_map", id, "external_address"); err != nil {
 		return PortMapping{}, err

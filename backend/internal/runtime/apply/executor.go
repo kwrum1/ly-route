@@ -37,6 +37,10 @@ type Clock func() time.Time
 
 type Executor struct {
 	Store              *persistence.Store
+	// BeforeGateway runs the small set of host-side handoff artifacts that
+	// must exist before VPP validates service-chain next hops.  The gateway
+	// graph itself is still committed atomically immediately afterwards.
+	BeforeGateway      StepFunc
 	Apply              StepFunc
 	Receipt            ReceiptFunc
 	HealthCheck        StepFunc
@@ -149,6 +153,11 @@ func (e Executor) Run(ctx context.Context, request Request) (Result, error) {
 		return e.persistAuditFailure(ctx, events.events, err)
 	}
 	plan := Plan{Request: request, CompiledProxy: compiledProxy, CompiledFlow: compiledFlow, SnapshotHash: snapshotHash, Previous: previous, GatewayPlan: request.GatewayPlan}
+	if e.BeforeGateway != nil {
+		if err := e.BeforeGateway(ctx, plan); err != nil {
+			return e.fail(ctx, plan, events, snapshotHash, PhaseApply, err)
+		}
+	}
 	gatewayResult, err := e.gateway(ctx, plan)
 	if err != nil {
 		return e.fail(ctx, plan, events, snapshotHash, PhaseApply, err)

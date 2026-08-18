@@ -4,6 +4,7 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
+#include <vlib/handoff.h>
 
 #define LY_SQ_FLOW_COUNT 1024
 #define LY_SQ_HOST_COUNT 256
@@ -15,6 +16,11 @@
 #define LY_SQ_INVALID_INDEX ((u32) ~0)
 #define LY_SQ_HASH_SEED 0x6c797371
 #define LY_SQ_FEATURE_CONFIG_MAGIC 0x6c797366
+#define LY_SQ_RATE_RULE_COUNT 256
+#define LY_SQ_RATE_BUCKET_COUNT 256
+#define LY_SQ_RATE_RULE_ID_SIZE 64
+#define LY_SQ_RATE_DIRECTION_INPUT 1
+#define LY_SQ_RATE_DIRECTION_OUTPUT 2
 
 /* The output feature runs after a tunnel has selected its logical interface.
  * Carry the physical interface selected by the control plane in the feature
@@ -92,6 +98,39 @@ typedef struct
 
 typedef struct
 {
+  char id[LY_SQ_RATE_RULE_ID_SIZE];
+  u64 rate_bytes_per_second;
+  u64 burst_bytes;
+  f64 tokens;
+  f64 last_refill;
+  clib_spinlock_t lock;
+  u8 enabled;
+} ly_sq_rate_bucket_t;
+
+typedef struct
+{
+  char id[LY_SQ_RATE_RULE_ID_SIZE];
+  u32 sw_if_index;
+  u32 bucket_index;
+  ip4_address_t source;
+  ip4_address_t destination;
+  u8 source_prefix_len;
+  u8 destination_prefix_len;
+  u8 protocol;
+  u8 direction;
+  u16 source_port_first;
+  u16 source_port_last;
+  u16 destination_port_first;
+  u16 destination_port_last;
+  u64 matched_packets;
+  u64 matched_bytes;
+  u64 conform_packets;
+  u64 dropped_packets;
+  u8 enabled;
+} ly_sq_rate_rule_t;
+
+typedef struct
+{
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
   u16 arc_index;
@@ -100,14 +139,20 @@ typedef struct
   ly_sq_scheduler_t **schedulers_by_thread;
   u8 *enabled_by_sw_if_index;
   u64 *rate_by_sw_if_index;
+  ly_sq_rate_rule_t rate_rules[LY_SQ_RATE_RULE_COUNT];
+  u32 rate_rule_count;
+  ly_sq_rate_bucket_t rate_buckets[LY_SQ_RATE_BUCKET_COUNT];
 } ly_sq_main_t;
 
 extern ly_sq_main_t ly_sq_main;
 extern vlib_node_registration_t ly_sq_feature_node;
 extern vlib_node_registration_t ly_sq_enqueue_node;
 extern vlib_node_registration_t ly_sq_scheduler_node;
+extern vlib_node_registration_t ly_sq_rate_input_node;
+extern vlib_node_registration_t ly_sq_rate_output_node;
 
 int ly_sq_enable_disable (u32 sw_if_index, u64 rate_kbps,
                           ly_sq_host_isolation_t host_isolation, int enable);
+int ly_sq_rate_feature_needed (u32 sw_if_index, u8 direction);
 
 #endif

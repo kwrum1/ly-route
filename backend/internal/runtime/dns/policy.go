@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -65,6 +66,7 @@ type Rule struct {
 }
 
 type Policy struct {
+	Name   string  `json:"name,omitempty"`
 	Engine string  `json:"engine"`
 	Miss   Outcome `json:"miss"`
 	Rules  []Rule  `json:"rules"`
@@ -382,10 +384,21 @@ func renderSmartDNSRule(order int, ruleID string, sourcePrefixes, domains, suffi
 	return rule
 }
 
-// SmartDNSIPSetName returns the kernel set name used as the DNS-to-dataplane
-// handoff for a fixed-WAN DNS rule. Rule IDs are already validated as tokens.
+// SmartDNSIPSetName returns a Linux ipset-compatible name for the
+// DNS-to-dataplane handoff. Linux limits ipset names to 31 characters, so the
+// stable digest keeps long user-authored rule IDs distinct without leaking a
+// platform limit into the UI.
 func SmartDNSIPSetName(ruleID string) string {
-	return "lyroute_dns_" + strings.ReplaceAll(strings.TrimSpace(ruleID), ".", "_")
+	normalized := strings.ReplaceAll(strings.TrimSpace(ruleID), ".", "_")
+	const prefix = "lyroute_dns_"
+	const maxLength = 31
+	if len(prefix)+len(normalized) <= maxLength {
+		return prefix + normalized
+	}
+	digest := sha256.Sum256([]byte(normalized))
+	const suffixLength = 8
+	keep := maxLength - len(prefix) - 1 - suffixLength
+	return prefix + normalized[:keep] + "_" + fmt.Sprintf("%x", digest[:4])
 }
 
 func validatedProxyEgressIDs(proxyEgresses []proxy.Egress) (map[string]struct{}, error) {

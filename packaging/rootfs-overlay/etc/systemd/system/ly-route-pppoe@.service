@@ -1,22 +1,24 @@
 [Unit]
 Description=Ly Route native VPP PPPoE peer %i
-After=network-online.target vpp.service
+After=network-online.target vpp.service ly-route-vpp-underlay.service
 Wants=network-online.target
-Requires=vpp.service
-PartOf=ly-route-pppoe.target
+Requires=vpp.service ly-route-vpp-underlay.service
+BindsTo=vpp.service
+PartOf=vpp.service ly-route-pppoe.target
 
 [Service]
 Type=simple
 ExecStart=/usr/lib/ly-route/ly-route-pppoe-client -config /etc/ly-route/pppoe/%i.json
 Restart=on-failure
 RestartSec=3s
-RuntimeDirectory=ly-route/pppoe
-RuntimeDirectoryMode=0750
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/run/ly-route/pppoe
+# PPPoE instances publish separate status files beneath this shared directory.
+# Do not declare it as RuntimeDirectory: systemd otherwise lets one restarted
+# instance clean the directory while another WAN is still connected.
+ReadWritePaths=/run/ly-route
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
