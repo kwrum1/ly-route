@@ -34,7 +34,7 @@ done
 [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || { printf 'invalid artifact name: %s\n' "$name" >&2; exit 2; }
 
 fingerprint=$("$repo_root/scripts/source-fingerprint.sh" "${scopes[@]}")
-commit=$(git rev-parse HEAD)
+commit=$(git -c "safe.directory=$repo_root" rev-parse HEAD)
 scope_csv=$(IFS=,; printf '%s' "${scopes[*]}")
 artifact_root="$repo_root/dist/hotfix/$name"
 target_dir="$artifact_root/$fingerprint"

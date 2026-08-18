@@ -172,7 +172,7 @@ product_source_commit() {
   if [ -n "${GITHUB_SHA:-}" ]; then
     printf '%s' "$GITHUB_SHA"
   else
-    git -C "$repo_root" rev-parse --short=12 HEAD 2>/dev/null || printf unknown
+    git -c "safe.directory=$repo_root" -C "$repo_root" rev-parse --short=12 HEAD 2>/dev/null || printf unknown
   fi
 }
 
@@ -181,7 +181,7 @@ product_source_date_epoch() {
     case "$SOURCE_DATE_EPOCH" in *[!0-9]*) product_build_fail "SOURCE_DATE_EPOCH must be a non-negative integer" ;; esac
     printf '%s' "$SOURCE_DATE_EPOCH"
   else
-    git -C "$repo_root" log -1 --format=%ct 2>/dev/null || printf 0
+    git -c "safe.directory=$repo_root" -C "$repo_root" log -1 --format=%ct 2>/dev/null || printf 0
   fi
 }
 

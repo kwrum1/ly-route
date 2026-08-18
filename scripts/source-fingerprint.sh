@@ -41,7 +41,7 @@ while IFS= read -r -d '' file; do
     kind=deleted
   fi
   printf '%s\0%s\0%s\0' "$kind" "$file" "$digest" >>"$manifest"
-done < <(git ls-files -z --cached --others --exclude-standard -- "${scopes[@]}" | LC_ALL=C sort -z)
+done < <(git -c "safe.directory=$repo_root" ls-files -z --cached --others --exclude-standard -- "${scopes[@]}" | LC_ALL=C sort -z)
 
 if ((count == 0)); then
   printf 'no source files found in scopes: %s\n' "${scopes[*]}" >&2
