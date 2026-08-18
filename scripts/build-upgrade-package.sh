@@ -81,6 +81,13 @@ selected_vpp_deb=
 if [ -z "$vpp_apply_binary" ]; then
   runtime_debs_dir=${LY_ROUTE_EXTRA_DEBS_DIR:-$repo_root/runtime-debs}
   [ -d "$runtime_debs_dir" ] || product_build_fail "Runtime deb directory does not exist: $runtime_debs_dir"
+  runtime_stamp="$runtime_debs_dir/.ly-route-source-fingerprint"
+  [ -f "$runtime_stamp" ] || product_build_fail "Runtime package directory has no source fingerprint: $runtime_debs_dir"
+  actual_runtime_fingerprint=$(cat "$runtime_stamp")
+  [ "$actual_runtime_fingerprint" = "$LY_ROUTE_SOURCE_FINGERPRINT" ] ||
+    product_build_fail "Runtime package directory is stale: expected $LY_ROUTE_SOURCE_FINGERPRINT, got $actual_runtime_fingerprint"
+  [ ! -e "$runtime_debs_dir/.ly-route-build-in-progress" ] ||
+    product_build_fail "Runtime package directory contains an incomplete build marker: $runtime_debs_dir"
   command -v dpkg-deb >/dev/null 2>&1 || product_build_fail "dpkg-deb is required to inspect runtime packages"
   for package_path in "$runtime_debs_dir"/ly-route-vpp-apply_*.deb; do
     [ -f "$package_path" ] || continue
