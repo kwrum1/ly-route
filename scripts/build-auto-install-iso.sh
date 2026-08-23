@@ -235,7 +235,7 @@ probe_interface() {
   # hardware preflight only; first boot runtime-check.sh performs the actual
   # VPP attachment proof before any data interface is enabled.
   if [ "$driver" = vmxnet3 ]; then
-    native='{"hook":"af_packet","mode":"linux_packet_socket","tier":"vpp_native","verified":"installer_acceptance","native":true,"high_performance":false,"acceptance_only":true,"kernel_driver":"vmxnet3"}'
+    native='{"hook":"tap_bridge","mode":"linux_bridge","tier":"vpp_native","verified":"installer_acceptance","native":true,"high_performance":false,"acceptance_only":true,"kernel_driver":"vmxnet3"}'
   elif [ -e "/sys/class/net/$name/queues/rx-0" ] && [ "$driver" != none ] &&
        grep -q '^CONFIG_XDP_SOCKETS=y$' "/boot/config-$(uname -r)" 2>/dev/null; then
     native='{"hook":"af_xdp","mode":"zero_copy","tier":"vpp_native","verified":"hardware_preflight"}'
@@ -249,7 +249,7 @@ probe_interface() {
     dpdk="{\"hook\":\"dpdk\",\"mode\":\"$dpdk_mode\",\"tier\":\"vpp_dpdk\",\"verified\":\"hardware_preflight\"}"
   fi
   candidates=$(printf '%s' "$native${native:+,}$dpdk")
-  if [ "$driver" = vmxnet3 ] && [ -n "$native" ]; then selected=$native; state=ready; reason=VMXNET3-AF_PACKET-acceptance
+  if [ "$driver" = vmxnet3 ] && [ -n "$native" ]; then selected=$native; state=ready; reason=VMXNET3-TAP-bridge-acceptance
   elif [ -n "$native" ]; then selected=$native; state=ready; reason=VPP-native-preflight
   elif [ -n "$dpdk" ]; then selected=$dpdk; state=ready; reason=DPDK-preflight
   else reason='no verified VPP-native or DPDK prerequisites'; fi
@@ -328,14 +328,14 @@ PY
 
 say 'Data-interface capability preflight (management excluded)'
 data_rows=() data_state=ready
-vmxnet3_afpacket_acceptance=false
+vmxnet3_tap_bridge_acceptance=false
 while IFS= read -r row; do
   [ -n "$row" ] || continue
   name=$(printf '%s' "$row" | cut -d'|' -f1)
   [ "$name" = "$management_name" ] && continue
   probed=$(probe_interface "$row" "$name" "$(candidate_driver "$name")")
   data_rows+=("$probed")
-  [ "$(printf '%s' "$row" | cut -d'|' -f5)" = vmxnet3 ] && vmxnet3_afpacket_acceptance=true
+  [ "$(printf '%s' "$row" | cut -d'|' -f5)" = vmxnet3 ] && vmxnet3_tap_bridge_acceptance=true
   state=$(printf '%s' "$probed" | cut -d'|' -f6)
   [ "$state" = ready ] || data_state=locked
 done < <(list_nics)
@@ -435,17 +435,17 @@ LY_ROUTE_INSTALLER_NETWORK=/etc/ly-route/installed-network.json
 LY_ROUTE_MANAGEMENT_FALLBACK_CIDR=$management_ip
 LY_ROUTE_MANAGEMENT_FALLBACK_GATEWAY=$management_gateway
 LY_ROUTE_MANAGEMENT_INTERFACE=$management_name
-LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=$vmxnet3_afpacket_acceptance
+LY_ROUTE_VMXNET3_TAP_BRIDGE_ACCEPTANCE=$vmxnet3_tap_bridge_acceptance
 EOF
 chmod 0600 /mnt/etc/ly-route/installer-network.env
 runtime_env=/mnt/etc/ly-route/runtime.env
 runtime_env_tmp="$runtime_env.tmp.$$"
 if [ -f "$runtime_env" ]; then
-  grep -v '^LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=' "$runtime_env" > "$runtime_env_tmp" || true
+  grep -v -E '^LY_ROUTE_VMXNET3_(AF_PACKET|TAP_BRIDGE)_ACCEPTANCE=' "$runtime_env" > "$runtime_env_tmp" || true
 else
   : > "$runtime_env_tmp"
 fi
-printf 'LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=%s\n' "$vmxnet3_afpacket_acceptance" >> "$runtime_env_tmp"
+printf 'LY_ROUTE_VMXNET3_TAP_BRIDGE_ACCEPTANCE=%s\n' "$vmxnet3_tap_bridge_acceptance" >> "$runtime_env_tmp"
 chmod 0644 "$runtime_env_tmp"
 mv -f "$runtime_env_tmp" "$runtime_env"
 umount /mnt

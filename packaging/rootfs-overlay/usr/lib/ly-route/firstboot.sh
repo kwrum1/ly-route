@@ -166,7 +166,7 @@ EOF
   done
   # This applies only to the installer-selected VMXNET3 acceptance fallback.
   # Physical NICs remain on the native-first/DPDK path and are not modified.
-  if [ "${LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE:-false}" = true ] &&
+  if [ "${LY_ROUTE_VMXNET3_TAP_BRIDGE_ACCEPTANCE:-false}" = true ] &&
      [ "$(basename "$(readlink -f "/sys/class/net/$lan_if/device/driver" 2>/dev/null || true)")" = vmxnet3 ]; then
     ip link set dev "$lan_if" promisc on 2>/dev/null || true
   fi
@@ -251,6 +251,36 @@ PY
   # that target. Do not hold the complete dataplane boot transaction here.
   systemctl restart --no-block kea-dhcp4-server.service 2>/dev/null || true
 
+  if [ "${LY_ROUTE_VMXNET3_TAP_BRIDGE_ACCEPTANCE:-false}" = true ]; then
+    python3 - "$installed_network" <<'PY' | while IFS='|' read -r name bridge host; do
+import hashlib
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    document = json.load(source)
+for item in document.get("data_interfaces", []):
+    selected = item.get("selected")
+    name = str(item.get("name", "")).strip()
+    if not name or not isinstance(selected, dict):
+        continue
+    if selected.get("hook") != "tap_bridge" or selected.get("mode") != "linux_bridge":
+        continue
+    token = hashlib.sha256(name.lower().encode("utf-8")).hexdigest()[:8]
+    print("|".join((name, "lrbr-" + token, "lrh-" + token)))
+PY
+      ip link add "$bridge" type bridge 2>/dev/null || true
+      ip link set "$bridge" up
+      ip addr flush dev "$name"
+      ip link set "$name" master "$bridge"
+      ip link set "$name" up
+      if ip link show "$host" >/dev/null 2>&1; then
+        ip link set "$host" master "$bridge"
+        ip link set "$host" up
+      fi
+    done
+  fi
+
   # The installer records stable NIC identities before first boot. Render the
   # initial native attach operations once so VPP receives the selected data
   # interfaces even before the control API has produced a full plan.
@@ -277,7 +307,15 @@ for item in document.get("data_interfaces", []):
     hook = str(selected.get("hook", "")).strip()
     mode = str(selected.get("mode", "")).strip()
     vpp_name = "lyroute-" + name
-    if hook == "af_packet" and mode == "linux_packet_socket":
+    if hook == "tap_bridge" and mode == "linux_bridge":
+        token = __import__("hashlib").sha256(name.lower().encode("utf-8")).hexdigest()[:8]
+        commands = [
+            "?create tap if-name " + vpp_name + " host-if-name lrh-" + token + " host-bridge lrbr-" + token + " no-gso",
+            "set interface state " + vpp_name + " up",
+            "show hardware-interfaces " + vpp_name,
+            "show interface " + vpp_name,
+        ]
+    elif hook == "af_packet" and mode == "linux_packet_socket":
         commands = [
             "?create host-interface name " + name,
             "?set interface name host-" + name + " " + vpp_name,

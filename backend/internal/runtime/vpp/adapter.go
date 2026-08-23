@@ -716,6 +716,14 @@ func DataplaneAttachOperation(requestID string, attachment NativeAttachment) Ope
 			fmt.Sprintf("show hardware-interfaces %s", attachment.VPPInterface),
 			fmt.Sprintf("show interface %s", attachment.VPPInterface),
 		)
+	case attachment.Hook == NativeHookTapBridge && attachment.Mode == NativeModeTapBridge:
+		bridge, hostInterface := tapBridgeInterfaceNames(attachment.LinuxInterface)
+		commands = []string{
+			fmt.Sprintf("?create tap if-name %s host-if-name %s host-bridge %s no-gso", attachment.VPPInterface, hostInterface, bridge),
+			fmt.Sprintf("set interface state %s up", attachment.VPPInterface),
+			fmt.Sprintf("show hardware-interfaces %s", attachment.VPPInterface),
+			fmt.Sprintf("show interface %s", attachment.VPPInterface),
+		}
 	case attachment.Hook == NativeHookAFXDP && attachment.Mode == NativeModeZeroCopy:
 		commands = []string{
 			fmt.Sprintf("?create interface af_xdp host-if %s name %s zero-copy", attachment.LinuxInterface, attachment.VPPInterface),

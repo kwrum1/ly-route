@@ -8,6 +8,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=-/etc/ly-route/appliance.env
+EnvironmentFile=-/etc/ly-route/installer-network.env
+EnvironmentFile=-/etc/ly-route/runtime.env
 ExecStart=/usr/lib/ly-route/firstboot.sh
 RemainAfterExit=yes
 

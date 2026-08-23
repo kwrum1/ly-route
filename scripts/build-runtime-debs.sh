@@ -501,6 +501,11 @@ def run_vpp_exec(vppctl, commands):
         except FileNotFoundError:
             pass
 
+def vpp_cli_failed(result):
+    combined = (result.stdout + "\n" + result.stderr).lower()
+    markers = ("cli line error", "unknown input", "unknown interface", "parse error")
+    return result.returncode != 0 or any(marker in combined for marker in markers)
+
 def command_without_optional_prefix(command):
     command = command.strip()
     return command[1:].strip() if command.startswith("?") else command
@@ -920,7 +925,7 @@ def install_pre_nat_routes(vppctl, operations, receipt):
         fail_with_receipt(f"failed to configure VPP pre-NAT interface: {configured.stderr.strip()}")
     for command in rules:
         result = run_vppctl(vppctl, command)
-        if result.returncode != 0:
+        if vpp_cli_failed(result):
             fail_with_receipt(f"failed to install VPP pre-NAT route: {result.stderr.strip()}")
     receipt["pre_nat_routes"] = len(rules)
 
@@ -1145,7 +1150,7 @@ for index, operation in enumerate(operations):
         result = subprocess.run([vppctl] + argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
-        if result.returncode != 0:
+        if vpp_cli_failed(result):
             if ignore_failure:
                 entry["results"].append({"command": receipt_command, "status": "ignored-failure", "stdout": receipt_text(stdout), "stderr": receipt_text(stderr)})
                 continue

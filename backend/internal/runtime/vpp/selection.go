@@ -17,6 +17,7 @@ type NativeHook string
 const (
 	NativeHookAFXDP    NativeHook = "af_xdp"
 	NativeHookAFPacket NativeHook = "af_packet"
+	NativeHookTapBridge NativeHook = "tap_bridge"
 	NativeHookRDMA     NativeHook = "rdma"
 	NativeHookDPDK     NativeHook = "dpdk"
 )
@@ -28,6 +29,7 @@ const (
 	NativeModeRDMADV   NativeMode = "rdma_dv"
 	NativeModeCopy     NativeMode = "copy"
 	NativeModeAFPacket NativeMode = "linux_packet_socket"
+	NativeModeTapBridge NativeMode = "linux_bridge"
 	NativeModeDPDKVFIO NativeMode = "vfio_pci"
 	NativeModeDPDKUIO  NativeMode = "uio_pci_generic"
 )
@@ -320,7 +322,10 @@ func LoadNativePathRequestWithSharedManagement(path, management string, interfac
 }
 
 func acceptanceAFPacketProof(enabled bool, proof CapabilityProof) bool {
-	return enabled && proof.AcceptanceOnly && proof.Hook == NativeHookAFPacket && proof.Mode == NativeModeAFPacket && strings.EqualFold(strings.TrimSpace(proof.KernelDriver), "vmxnet3")
+	return enabled && proof.AcceptanceOnly &&
+		((proof.Hook == NativeHookAFPacket && proof.Mode == NativeModeAFPacket) ||
+			(proof.Hook == NativeHookTapBridge && proof.Mode == NativeModeTapBridge)) &&
+		strings.EqualFold(strings.TrimSpace(proof.KernelDriver), "vmxnet3")
 }
 
 func interfaceNameSafe(name string) bool {

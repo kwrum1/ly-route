@@ -17,6 +17,7 @@ case "$*" in
   'show abf policy 16469') printf '%s\n' 'abf:[0]: policy:16469 acl:2' ' path-list:[1] locks:1 flags:shared' '  path:[2] pl-index:1 ip4 weight=1 pref=0 deag:' '   fib-index:3' ;;
   'set acl-plugin acl index 2 permit src 0.0.0.0/0 dst 0.0.0.0/0 proto 0 sport 0-65535 dport 0-65535 tag ly-route-route_10') ;;
   'abf policy add id 16469 acl 2 via ip4-lookup-in-table 42') echo 'duplicate ABF add reached VPP' >&2; exit 99 ;;
+  'set interface state missing0 up') printf '%s\n' "set interface state: unknown interface 'missing0 up'" ;;
   *) ;;
 esac
 EOF
@@ -43,4 +44,17 @@ if grep -q '^abf policy add ' "$tmp/vppctl.log"; then
   exit 1
 fi
 grep -q '"status": "already-applied"' "$tmp/receipt.json"
+
+cat >"$tmp/invalid-operations.json" <<'EOF'
+{"operations":[{"Name":"vpp.dataplane.attach","Resource":"missing0","VPPCtlCommands":["set interface state missing0 up"]}]}
+EOF
+if PATH="$tmp/bin:$PATH" \
+  LY_ROUTE_TEST_VPPCTL_LOG="$tmp/vppctl.log" \
+  LY_ROUTE_VPP_COMMAND_MAP="$tmp/missing-command-map.json" \
+  LY_ROUTE_VPP_RECEIPT="$tmp/invalid-receipt.json" \
+  "$tmp/root/usr/lib/ly-route/vpp-apply" "$tmp/invalid-operations.json"; then
+  echo 'vpp-apply accepted a VPP CLI error with exit status zero' >&2
+  exit 1
+fi
+grep -q '"status": "failed"' "$tmp/invalid-receipt.json"
 echo 'vpp-apply ABF replay is idempotent'
