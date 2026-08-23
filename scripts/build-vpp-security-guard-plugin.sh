@@ -11,9 +11,11 @@ infra_dev=$(find "$debs" -maxdepth 1 -type f -name 'libvppinfra-dev_*.deb' -prin
 mkdir -p "$out" "$sysroot"
 dpkg-deb -x "$vpp_dev" "$sysroot"
 dpkg-deb -x "$infra_dev" "$sysroot"
+vpp_cmake_dir=$(find "$sysroot/usr/lib" -type d -path '*/cmake/vpp' -print -quit)
+[ -d "$vpp_cmake_dir" ] || { echo "VPP CMake package directory not found in $vpp_dev" >&2; exit 1; }
 cmake -S "$repo_root/runtime/vpp-security-guard" -B "$out/cmake" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DVPP_DIR="$sysroot/usr/lib/x86_64-linux-gnu/cmake/vpp" \
+  -DVPP_DIR="$vpp_cmake_dir" \
   -DVPP_INCLUDE_DIR="$sysroot/usr/include" \
   -DVPP_APIGEN="$sysroot/usr/bin/vppapigen" \
   -DVPP_VAPI_C_GEN="$sysroot/usr/bin/vapi_c_gen.py" \
