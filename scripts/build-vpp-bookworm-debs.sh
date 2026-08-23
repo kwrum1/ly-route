@@ -3,6 +3,7 @@ set -euo pipefail
 
 source_dir=${LY_ROUTE_VPP_SRC:?LY_ROUTE_VPP_SRC is required}
 output_dir=${LY_ROUTE_RUNTIME_DEBS_DIR:?LY_ROUTE_RUNTIME_DEBS_DIR is required}
+dev_output_dir=${LY_ROUTE_VPP_DEV_DEBS_DIR:-$output_dir}
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 mirror=${LY_ROUTE_MIRROR:-https://deb.debian.org/debian}
 pip_index=${LY_ROUTE_PIP_INDEX_URL:-https://pypi.org/simple}
@@ -45,7 +46,7 @@ if [ -d "$download_cache" ]; then
   cp -a "$download_cache/." "$rootfs/root/Downloads/"
 fi
 
-mkdir -p "$rootfs/src/vpp" "$output_dir"
+mkdir -p "$rootfs/src/vpp" "$output_dir" "$dev_output_dir"
 mount --bind /dev "$rootfs/dev"
 mount --bind /dev/pts "$rootfs/dev/pts"
 mount -t proc proc "$rootfs/proc"
@@ -87,6 +88,10 @@ LY_ROUTE_VPP_MAKE_ARGS="$make_args" PIP_INDEX_URL="$pip_index" PIP_DEFAULT_TIMEO
 found=0
 while IFS= read -r package; do
   cp "$package" "$output_dir/"
+  package_name=$(dpkg-deb -f "$package" Package)
+  case "$package_name" in
+    vpp-dev|libvppinfra-dev) cp "$package" "$dev_output_dir/" ;;
+  esac
   found=1
 done < <(find "$rootfs/src/vpp" -type f -name '*.deb' \
   \( -path '*/build-root/*.deb' -o -path '*/build-root/packages/*.deb' -o -path '*/build-root/install-vpp-native/*.deb' \))

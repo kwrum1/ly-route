@@ -92,12 +92,16 @@ jobs:
           test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
       - name: Build x86 runtime packages
         run: |
-          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR env \
+          mkdir -p vpp-dev-debs
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR env \
             LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
             LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
+            LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
             LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
-          sudo chown -R "$USER:$USER" runtime-debs vpp-master
-          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          sudo chown -R "$USER:$USER" runtime-debs vpp-dev-debs vpp-master
+          test -f vpp-dev-debs/vpp-dev_*.deb
+          test -f vpp-dev-debs/libvppinfra-dev_*.deb
+          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
           sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
@@ -167,12 +171,16 @@ jobs:
           test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
       - name: Build ARM64 runtime packages
         run: |
-          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR env \
+          mkdir -p vpp-dev-debs
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR env \
             LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
             LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
+            LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
             LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
-          sudo chown -R "$USER:$USER" runtime-debs vpp-master
-          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          sudo chown -R "$USER:$USER" runtime-debs vpp-dev-debs vpp-master
+          test -f vpp-dev-debs/vpp-dev_*.deb
+          test -f vpp-dev-debs/libvppinfra-dev_*.deb
+          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
           sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
