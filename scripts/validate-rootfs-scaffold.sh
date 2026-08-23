@@ -255,7 +255,8 @@ if ! grep -q '^runtime-debs:' "$repo_root/Makefile"; then
   exit 1
 fi
 
-if ! grep -q 'build-runtime-debs.sh vpp-apply' "$repo_root/.github/workflows/gateway-release.yml"; then
+if ! grep -q 'vpp-apply' "$repo_root/.github/workflows/gateway-release.yml" ||
+   ! grep -q 'build-runtime-debs.sh' "$repo_root/.github/workflows/gateway-release.yml"; then
   echo "rootfs image workflow does not build the local runtime adapter package" >&2
   exit 1
 fi
@@ -384,7 +385,8 @@ if ! grep -q 'ly-route-pppoe.target' "$repo_root/scripts/build-rootfs.sh" ||
   exit 1
 fi
 
-if ! grep -q 'build-runtime-debs.sh vpp-pppoe-client' "$repo_root/.github/workflows/gateway-release.yml"; then
+if ! grep -q 'vpp-pppoe-client' "$repo_root/.github/workflows/gateway-release.yml" ||
+   ! grep -q 'build-runtime-debs.sh' "$repo_root/.github/workflows/gateway-release.yml"; then
   echo "gateway release workflow does not build the native PPPoE VPP plugin" >&2
   exit 1
 fi
