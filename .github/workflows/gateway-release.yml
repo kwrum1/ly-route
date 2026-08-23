@@ -99,17 +99,27 @@ jobs:
           git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" '+refs/tags/v25.10:refs/tags/v25.10'
           git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
           test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
+      - name: Build pinned x86 VPP packages
+        if: steps.vpp-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p vpp-base-debs vpp-dev-debs
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR env \
+            LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
+            LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/vpp-base-debs" \
+            LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
+            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
+          sudo chown -R "$USER:$USER" vpp-base-debs vpp-dev-debs vpp-master
+      - name: Save x86 VPP package cache
+        if: steps.vpp-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            vpp-base-debs
+            vpp-dev-debs
+          key: vpp-bookworm-amd64-${{ env.LY_ROUTE_VPP_COMMIT }}-${{ hashFiles('scripts/build-vpp-bookworm-debs.sh', 'packaging/vpp-patches/**') }}
       - name: Build x86 runtime packages
         run: |
-          mkdir -p runtime-debs vpp-base-debs vpp-dev-debs
-          if [ "${{ steps.vpp-cache.outputs.cache-hit }}" != true ]; then
-            sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR env \
-              LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
-              LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/vpp-base-debs" \
-              LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
-              LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
-            sudo chown -R "$USER:$USER" vpp-base-debs vpp-dev-debs vpp-master
-          fi
+          mkdir -p runtime-debs
           cp vpp-base-debs/*.deb runtime-debs/
           test -n "$(find vpp-dev-debs -maxdepth 1 -name 'vpp-dev_*.deb' -print -quit)"
           test -n "$(find vpp-dev-debs -maxdepth 1 -name 'libvppinfra-dev_*.deb' -print -quit)"
@@ -192,17 +202,27 @@ jobs:
           git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" '+refs/tags/v25.10:refs/tags/v25.10'
           git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
           test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
+      - name: Build pinned ARM VPP packages
+        if: steps.vpp-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p vpp-base-debs vpp-dev-debs
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR env \
+            LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
+            LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/vpp-base-debs" \
+            LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
+            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
+          sudo chown -R "$USER:$USER" vpp-base-debs vpp-dev-debs vpp-master
+      - name: Save ARM VPP package cache
+        if: steps.vpp-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            vpp-base-debs
+            vpp-dev-debs
+          key: vpp-bookworm-arm64-${{ env.LY_ROUTE_VPP_COMMIT }}-${{ hashFiles('scripts/build-vpp-bookworm-debs.sh', 'packaging/vpp-patches/**') }}
       - name: Build ARM64 runtime packages
         run: |
-          mkdir -p runtime-debs vpp-base-debs vpp-dev-debs
-          if [ "${{ steps.vpp-cache.outputs.cache-hit }}" != true ]; then
-            sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR env \
-              LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
-              LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/vpp-base-debs" \
-              LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
-              LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
-            sudo chown -R "$USER:$USER" vpp-base-debs vpp-dev-debs vpp-master
-          fi
+          mkdir -p runtime-debs
           cp vpp-base-debs/*.deb runtime-debs/
           test -n "$(find vpp-dev-debs -maxdepth 1 -name 'vpp-dev_*.deb' -print -quit)"
           test -n "$(find vpp-dev-debs -maxdepth 1 -name 'libvppinfra-dev_*.deb' -print -quit)"

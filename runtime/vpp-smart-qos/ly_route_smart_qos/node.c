@@ -689,7 +689,7 @@ VLIB_NODE_FN (ly_sq_feature_node) (vlib_main_t *vm,
       u32 n_handoff = handoff - handoffs;
       u32 n_enqueued = vlib_buffer_enqueue_to_thread (
         vm, node, sqm->frame_queue_index, handoffs, handoff_threads,
-        n_handoff);
+        n_handoff, 0);
       if (n_enqueued < n_handoff)
         vlib_node_increment_counter (vm, node->node_index,
                                      LY_SQ_ERROR_OVERFLOW_DROP,
