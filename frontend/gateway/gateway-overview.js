@@ -1,5 +1,5 @@
 (function initializeGatewayOverview() {
-  const palette = ["#1683ff", "#7468f2", "#17b26a", "#d58b18", "#e5484d", "#2ba7a0", "#a65bd6", "#65758b"];
+  const palette = ["#1677c8", "#19a078", "#e19a2b", "#795fd2", "#d75b65", "#168ca5", "#607d9b", "#bb5f91"];
   const windows = [["realtime", "实时"], ["5m", "5分钟"], ["1h", "1小时"], ["24h", "24小时"]];
 
   function formatRate(value) {
@@ -7,11 +7,13 @@
     if (rate >= 1_000_000_000) return `${(rate / 1_000_000_000).toFixed(2)} Gbps`;
     if (rate >= 1_000_000) return `${(rate / 1_000_000).toFixed(2)} Mbps`;
     if (rate >= 1_000) return `${(rate / 1_000).toFixed(2)} Kbps`;
+    if (rate > 0 && rate < 10) return `${rate.toFixed(rate < 1 ? 2 : 1)} bps`;
     return `${Math.round(rate)} bps`;
   }
 
   function formatBytes(value) {
     const bytes = Number(value) || 0;
+    if (bytes >= 1_099_511_627_776) return `${(bytes / 1_099_511_627_776).toFixed(2)} TiB`;
     if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(2)} GiB`;
     if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(2)} MiB`;
     if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(2)} KiB`;
@@ -19,17 +21,60 @@
   }
 
   function formatTime(value) {
-    if (!value) return "无成功采样";
+    if (!value) return "--";
     const date = new Date(value);
     return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  function formatAxisTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.valueOf()) ? String(value || "") : date.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
   function latest(series) {
     return series.samples?.[series.samples.length - 1] || null;
   }
 
+  function rateAt(series, timestamp, direction) {
+    const sample = series.samples?.find((item) => item.timestamp === timestamp);
+    if (!sample) return null;
+    if (direction === "total") return Number(sample.download_bps || 0) + Number(sample.upload_bps || 0);
+    return Number(sample[`${direction}_bps`] || 0);
+  }
+
+  function kindLabel(kind) {
+    return ({ direct_wan: "WAN", wan_group: "WAN 群组", proxy: "代理 WAN" })[kind] || "WAN";
+  }
+
+  function egressName(item, index, names) {
+    const source = String(item?.name || item?.id || "").trim();
+    const resourceName = names?.get(String(item?.id || ""));
+    if (resourceName) return resourceName;
+    return source || `${kindLabel(item?.kind)} ${index + 1}`;
+  }
+
+  function egressNames(resources) {
+    const payloadItems = (payload) => Array.isArray(payload) ? payload : Array.isArray(payload?.items) ? payload.items : Array.isArray(payload?.data) ? payload.data : [];
+    const entries = [resources?.wanLinks, resources?.wanGroups, resources?.proxyEgresses].flatMap(payloadItems).map((item) => [String(item?.id || ""), String(item?.name || item?.display_name || item?.id || "")]).filter(([id, name]) => id && name);
+    return new Map(entries);
+  }
+
+  function configuredSeries(series, resources) {
+    const items = (payload) => Array.isArray(payload) ? payload : Array.isArray(payload?.items) ? payload.items : Array.isArray(payload?.data) ? payload.data : [];
+    const groups = items(resources?.wanGroups).filter((item) => item.deleted !== true);
+    const groupedWANs = new Set(groups.flatMap((item) => item.members || item.wan_members || []).map((member) => String(typeof member === "object" ? member.id || member.name || "" : member)));
+    const valid = new Set(groups.map((item) => String(item.id || item.name || "")).filter(Boolean));
+    items(resources?.wanLinks).filter((item) => item.deleted !== true && !groupedWANs.has(String(item.id || item.name || ""))).forEach((item) => valid.add(String(item.id || item.name || "")));
+    items(resources?.proxyEgresses).filter((item) => item.deleted !== true && String(item.id || "") !== "proxy-egress-default").forEach((item) => valid.add(String(item.id || item.name || "")));
+    return series.filter((item) => valid.has(String(item.id || "")));
+  }
+
   function visibleSeries(options) {
     return (options.trend?.series?.logical_egresses || []).filter((series) => !options.hidden.has(series.id));
+  }
+
+  function measuredSeries(series) {
+    return series.filter((item) => Array.isArray(item.samples) && item.samples.length > 0);
   }
 
   function currentTotals(series) {
@@ -41,156 +86,91 @@
     }, { download: 0, upload: 0 });
   }
 
-  function rateAt(series, timestamp, field) {
-    const sample = series.samples?.find((item) => item.timestamp === timestamp);
-    return sample ? Number(sample[field] || 0) : null;
+  function niceMaximum(value) {
+    const maximum = Number(value) || 0;
+    if (maximum <= 0) return 1;
+    const magnitude = 10 ** Math.floor(Math.log10(maximum));
+    const normalized = maximum / magnitude;
+    const step = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+    return step * magnitude;
   }
 
-  function segments(points) {
-    const output = [];
-    let active = [];
-    for (const point of points) {
-      if (point) active.push(point);
-      else if (active.length) {
-        output.push(active);
-        active = [];
-      }
-    }
-    if (active.length) output.push(active);
-    return output;
-  }
-
-  function areaPath(points) {
-    return `${points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)},${point.outer.toFixed(2)}`).join(" ")} ${[...points].reverse().map((point) => `L${point.x.toFixed(2)},${point.inner.toFixed(2)}`).join(" ")} Z`;
-  }
-
-  function chartModel(series) {
+  function lineModel(series, direction) {
     const timestamps = [...new Set(series.flatMap((item) => (item.samples || []).map((sample) => sample.timestamp)))].sort();
-    const totals = timestamps.map((timestamp) => ({
-      download: series.reduce((sum, item) => sum + (rateAt(item, timestamp, "download_bps") || 0), 0),
-      upload: series.reduce((sum, item) => sum + (rateAt(item, timestamp, "upload_bps") || 0), 0),
-      complete: series.every((item) => rateAt(item, timestamp, "download_bps") !== null && rateAt(item, timestamp, "upload_bps") !== null),
-    }));
-    const maximum = Math.max(1, ...totals.flatMap((item) => [item.download, item.upload]));
-    return { timestamps, totals, maximum };
-  }
-
-  function renderAreas(series, model, colors) {
-    const width = 1000;
-    const zero = 120;
-    const scale = 100 / model.maximum;
-    return series.flatMap((item, seriesIndex) => ["download", "upload"].flatMap((direction) => {
-      const field = `${direction}_bps`;
-      const sign = direction === "download" ? -1 : 1;
-      const points = model.timestamps.map((timestamp, timeIndex) => {
-        const value = rateAt(item, timestamp, field);
-        if (value === null) return null;
-        const lower = series.slice(0, seriesIndex).reduce((sum, prior) => sum + (rateAt(prior, timestamp, field) || 0), 0);
-        const x = model.timestamps.length === 1 ? width / 2 : timeIndex * width / (model.timestamps.length - 1);
-        return { x, inner: zero + sign * lower * scale, outer: zero + sign * (lower + value) * scale };
-      });
-      return segments(points).filter((segment) => segment.length > 1).map((segment) => `<path data-egress-series="${item.id}-${direction}" d="${areaPath(segment)}" fill="${colors.get(item.id)}" fill-opacity="${direction === "download" ? ".72" : ".42"}"></path>`);
-    })).join("");
-  }
-
-  function contourPath(model, direction) {
-    const sign = direction === "download" ? -1 : 1;
-    const scale = 100 / model.maximum;
-    const points = model.timestamps.map((timestamp, index) => model.totals[index].complete ? {
-      x: model.timestamps.length === 1 ? 500 : index * 1000 / (model.timestamps.length - 1),
-      y: 120 + sign * model.totals[index][direction] * scale,
-    } : null);
-    return segments(points).filter((segment) => segment.length > 1).map((segment) => `<path class="traffic-total-contour" d="${segment.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ")}"></path>`).join("");
-  }
-
-  function kindLabel(kind) {
-    return ({ direct_wan: "直连 WAN", wan_group: "WAN 群组", proxy: "代理出口" })[kind] || kind;
-  }
-
-  function tooltipHtml(options, timestamp) {
-    const series = visibleSeries(options);
-    const total = series.reduce((sum, item) => sum + (rateAt(item, timestamp, "download_bps") || 0) + (rateAt(item, timestamp, "upload_bps") || 0), 0);
-    return `<strong>${options.escape(formatTime(timestamp))}</strong>${series.map((item) => {
-      const sample = item.samples?.find((candidate) => candidate.timestamp === timestamp);
-      const throughput = Number(sample?.download_bps || 0) + Number(sample?.upload_bps || 0);
-      const bytes = Number(sample?.download_bytes || 0) + Number(sample?.upload_bytes || 0);
-      return `<section><b><i style="background:${options.colors.get(item.id)}"></i>${options.escape(item.name)}</b><span>逻辑出口：${options.escape(kindLabel(item.kind))}</span><span>上传速率：${formatRate(sample?.upload_bps)}</span><span>下载速率：${formatRate(sample?.download_bps)}</span><span>区间字节：${formatBytes(bytes)}</span><span>占总流量：${total ? Math.round(throughput / total * 100) : 0}%</span><span>健康状态：${options.escape(sample?.health || item.health || "unknown")}</span>${item.underlay_wan_id ? `<span>底层 WAN：${options.escape(item.underlay_wan_id)}</span>` : ""}${item.active_member ? `<span>活动成员：${options.escape(item.active_member)}</span><span>最近切换：${options.escape(formatTime(item.last_switch_at))}</span><span>切换原因：${options.escape(item.switch_reason || "未返回")}</span>` : ""}</section>`;
-    }).join("")}`;
-  }
-
-  function stateNotice(options, series) {
-    if (options.loading) return '<p class="traffic-state is-loading">正在加载流量采样…</p>';
-    if (options.error) return '<p class="traffic-state is-offline">流量采集离线，显示上次确认数据</p>';
-    if (options.trend?.state === "unavailable") return '<p class="traffic-state is-empty"><strong>尚无流量采样</strong><span>流量采集服务暂未启用，完成部署后将自动显示数据。</span></p>';
-    if (!series.length) return '<p class="traffic-state is-empty"><strong>当前窗口暂无流量</strong><span>没有可显示的逻辑出口采样。</span></p>';
-    if (options.trend?.state === "stale" || options.trend?.degraded) {
-      const lastSample = series.map((item) => item.last_sample_at).filter(Boolean).sort().at(-1);
-      return `<p class="traffic-state is-stale"><strong>数据已陈旧</strong><span>最后成功采样 ${options.escape(formatTime(lastSample))}</span></p>`;
-    }
-    return '<p class="traffic-state is-fresh">实时采样正常</p>';
-  }
-
-  function directionalModel(series, direction) {
-    const timestamps = [...new Set(series.flatMap((item) => (item.samples || []).map((sample) => sample.timestamp)))].sort();
-    const values = timestamps.map((timestamp) => series.map((item) => rateAt(item, timestamp, `${direction}_bps`) || 0));
-    const maximum = Math.max(0, ...values.map((row) => row.reduce((sum, value) => sum + value, 0)));
+    const values = series.map((item) => timestamps.map((timestamp) => rateAt(item, timestamp, direction)));
+    const maximum = niceMaximum(Math.max(0, ...values.flatMap((row) => row.filter((value) => value !== null))));
     return { timestamps, values, maximum };
   }
 
-  function directionalChart(series, direction, colors, escape) {
-    const model = directionalModel(series, direction);
-    const width = 1000;
-    const height = 220;
-    const scaleMaximum = model.maximum || 1;
-    const areas = model.timestamps.length > 1 ? series.map((item, seriesIndex) => {
-      const points = model.timestamps.map((_, timeIndex) => {
-        const value = model.values[timeIndex][seriesIndex] || 0;
-        const lower = model.values[timeIndex].slice(0, seriesIndex).reduce((sum, itemValue) => sum + itemValue, 0);
-        const x = timeIndex * width / (model.timestamps.length - 1);
-        return { x, y: height - (lower + value) * (height - 10) / scaleMaximum, lowerY: height - lower * (height - 10) / scaleMaximum };
-      });
-      const path = `${points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ")} ${[...points].reverse().map((point) => `L${point.x.toFixed(2)},${point.lowerY.toFixed(2)}`).join(" ")} Z`;
-      return `<path class="traffic-pa-area" d="${path}" fill="${colors.get(item.id)}" fill-opacity=".82"></path>`;
-    }).join("") : "";
-    const grid = [0, 25, 50, 75, 100].map((ratio) => {
-      const y = height - ratio * (height - 10) / 100;
-      return `<line x1="0" y1="${y}" x2="${width}" y2="${y}" class="traffic-pa-grid-line"></line><text x="0" y="${Math.max(12, y - 5)}" class="traffic-pa-axis-label">${formatRate(model.maximum * ratio / 100)}</text>`;
+  function pointSegments(points) {
+    const segments = [];
+    let current = [];
+    points.forEach((point) => {
+      if (point) current.push(point);
+      else if (current.length) {
+        segments.push(current);
+        current = [];
+      }
+    });
+    if (current.length) segments.push(current);
+    return segments;
+  }
+
+  function renderRateChart(series, direction, colors, escape, options = {}) {
+    const model = lineModel(series, direction);
+    const plot = { left: 70, right: 950, top: 16, bottom: 184 };
+    const width = plot.right - plot.left;
+    const height = plot.bottom - plot.top;
+    const xAt = (index) => model.timestamps.length <= 1 ? plot.right : plot.left + index * width / (model.timestamps.length - 1);
+    const yAt = (value) => plot.bottom - (Number(value) || 0) * height / model.maximum;
+    const grid = [0, .25, .5, .75, 1].map((ratio) => {
+      const y = plot.bottom - ratio * height;
+      return `<line x1="${plot.left}" y1="${y}" x2="${plot.right}" y2="${y}" class="router-chart-grid"></line><text x="${plot.left - 12}" y="${y + 4}" class="router-chart-y-label">${formatRate(model.maximum * ratio)}</text>`;
     }).join("");
-    const labels = model.timestamps.length ? [model.timestamps[0], model.timestamps[Math.floor(model.timestamps.length / 2)], model.timestamps.at(-1)].filter((value, index, list) => value && list.indexOf(value) === index).map((timestamp) => `<span>${escape(formatTime(timestamp))}</span>`).join("") : "";
-    return `<div class="traffic-pa-chart"><svg viewBox="0 0 1000 220" preserveAspectRatio="none" role="img" aria-label="${direction === "upload" ? "上行" : "下行"}流量趋势">${grid}${areas}</svg><div class="traffic-pa-xlabels">${labels}</div>${!areas ? '<div class="traffic-pa-empty">暂无流量采样</div>' : ""}</div>`;
+    const paths = series.map((item, seriesIndex) => {
+      const color = colors.get(item.id) || palette[seriesIndex % palette.length];
+      const points = model.values[seriesIndex].map((value, index) => value === null ? null : ({ x: xAt(index), y: yAt(value) }));
+      return pointSegments(points).map((segment) => {
+        const line = segment.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ");
+        const area = segment.length > 1 ? `${line} L${segment.at(-1).x.toFixed(2)},${plot.bottom} L${segment[0].x.toFixed(2)},${plot.bottom} Z` : "";
+        const dot = segment.length === 1 ? `<circle cx="${segment[0].x}" cy="${segment[0].y}" r="3.5" fill="${color}"></circle>` : "";
+        return `${area ? `<path d="${area}" fill="${color}" class="router-chart-area"></path>` : ""}<path d="${line}" fill="none" stroke="${color}" class="router-chart-line"></path>${dot}`;
+      }).join("");
+    }).join("");
+    const xLabels = model.timestamps.length ? [0, Math.floor((model.timestamps.length - 1) / 2), model.timestamps.length - 1]
+      .filter((index, position, values) => values.indexOf(index) === position)
+      .map((index) => `<text x="${xAt(index)}" y="216" class="router-chart-x-label" text-anchor="${model.timestamps.length === 1 ? "end" : index === 0 ? "start" : index === model.timestamps.length - 1 ? "end" : "middle"}">${escape(formatAxisTime(model.timestamps[index]))}</text>`).join("") : "";
+    const hitTargets = model.timestamps.map((timestamp, index) => {
+      const span = model.timestamps.length <= 1 ? width : width / (model.timestamps.length - 1);
+      const x = Math.max(plot.left, xAt(index) - span / 2);
+      return `<rect x="${x}" y="${plot.top}" width="${Math.min(span, plot.right - x)}" height="${height}" class="router-chart-hit" tabindex="0" data-chart-point="${index}" data-chart-direction="${direction}" aria-label="${escape(formatTime(timestamp))}"></rect>`;
+    }).join("");
+    const hasSamples = model.values.some((row) => row.some((value) => value !== null));
+    options.models[direction] = model;
+    return `<div class="router-rate-chart ${options.className || ""}" data-rate-chart="${direction}"><svg viewBox="0 0 1000 226" preserveAspectRatio="none" role="img" aria-label="${escape(options.label || "流量趋势")}">${grid}${paths}${xLabels}${hitTargets}</svg>${hasSamples ? "" : '<div class="router-chart-empty">暂无流量记录</div>'}<div class="traffic-chart-tooltip" role="tooltip" hidden></div></div>`;
   }
 
-  function renderTraffic(options) {
-    const allSeries = options.trend?.series?.logical_egresses || [];
+  function tooltipHtml(options, direction, timestamp) {
     const series = visibleSeries(options);
-    const totals = currentTotals(series);
-    const colors = new Map([...allSeries].sort((left, right) => left.id.localeCompare(right.id)).map((item, index) => [item.id, palette[index % palette.length]]));
-    const activeConnections = Number(options.dashboard.sessions || options.dashboard.connections || 0);
-    const onlineUsers = Number(options.dashboard.online_users || 0);
-    return `<div class="traffic-pa-page"><section class="traffic-pa-kpis"><article><span>上行</span><strong>${formatRate(totals.upload)}</strong></article><article><span>下行</span><strong>${formatRate(totals.download)}</strong></article><article><span>活动连接</span><strong>${activeConnections}</strong></article><article><span>在线用户</span><strong>${onlineUsers}</strong></article><article><span>WAN 出口</span><strong>${allSeries.length}</strong></article></section><section class="traffic-pa-toolbar"><div><h2>流量趋势</h2><p>上行与下行流量趋势</p></div><div class="traffic-windows">${windows.map(([value, label]) => `<button type="button" data-traffic-window="${value}" aria-pressed="${options.window === value}">${label}</button>`).join("")}</div></section><section class="traffic-pa-chart-card"><header><h3>上行趋势</h3><div class="traffic-pa-chart-meta">当前 ${formatRate(totals.upload)}</div></header>${directionalChart(series, "upload", colors, options.escape)}</section><section class="traffic-pa-chart-card"><header><h3>下行趋势</h3><div class="traffic-pa-chart-meta">当前 ${formatRate(totals.download)}</div></header>${directionalChart(series, "download", colors, options.escape)}</section></div>`;
+    const total = series.reduce((sum, item) => sum + (rateAt(item, timestamp, direction) || 0), 0);
+    const title = direction === "upload" ? "上行" : direction === "download" ? "下行" : "上下行总和";
+    return `<strong>${options.escape(formatTime(timestamp))}</strong><span class="traffic-tooltip-total">${title} ${formatRate(total)}</span>${series.map((item, index) => `<span><i style="background:${options.colors.get(item.id)}"></i><b>${options.escape(egressName(item, index, options.egressNames))}</b><em>${formatRate(rateAt(item, timestamp, direction))}</em></span>`).join("")}`;
   }
 
-  function wireTraffic(root, options, actions) {
-    root.querySelector("[data-traffic-refresh]")?.addEventListener("click", actions.refresh);
-    root.querySelectorAll("[data-traffic-window]").forEach((button) => button.addEventListener("click", () => actions.window(button.dataset.trafficWindow)));
-    root.querySelectorAll("[data-egress-legend]").forEach((button) => button.addEventListener("click", () => actions.toggle(button.dataset.egressLegend)));
-    const tooltip = root.querySelector("[role='tooltip']");
-    root.querySelectorAll("[data-chart-point]").forEach((point) => point.addEventListener("mouseenter", () => {
-      tooltip.innerHTML = tooltipHtml(options, options.model.timestamps[Number(point.dataset.chartPoint)]);
-      tooltip.hidden = false;
-    }));
-    root.querySelector(".traffic-chart")?.addEventListener("mouseleave", () => { if (tooltip) tooltip.hidden = true; });
+  function renderLegend(series, colors, escape, hidden, interactive = false, names = new Map()) {
+    if (!series.length) return '<span class="router-legend-empty">暂无 WAN 出口</span>';
+    return series.map((item, index) => {
+      const content = `<i style="background:${colors.get(item.id)}"></i><span>${escape(egressName(item, index, names))}</span><em>${escape(kindLabel(item.kind))}</em>`;
+      if (!interactive) return `<span class="router-chart-legend-item">${content}</span>`;
+      return `<button type="button" class="router-chart-legend-item" data-egress-legend="${escape(item.id)}" aria-pressed="${!hidden.has(item.id)}">${content}</button>`;
+    }).join("");
   }
 
   function usage(label, value) {
     const percent = Number.isFinite(Number(value)) ? Math.max(0, Math.min(100, Math.round(Number(value)))) : null;
     const level = percent === null ? "unknown" : percent >= 85 ? "high" : percent >= 65 ? "medium" : "normal";
-    const levelLabel = { normal: "运行平稳", medium: "负载适中", high: "负载较高", unknown: "采样中" }[level];
-    return `<article class="system-metric-card is-${level}">
-      <header><div><span class="system-metric-icon">${label === "CPU使用率" ? "CPU" : "MEM"}</span><strong>${label}</strong></div><b>${percent === null ? "--" : `${percent}%`}</b></header>
-      <div class="system-meter" role="progressbar" aria-label="${label}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent === null ? 0 : percent}"><i style="width:${percent || 0}%"></i><span></span></div>
-      <footer><span>${levelLabel}</span><small>${percent === null ? "正在获取本机数据" : `已使用 ${percent}%`}</small></footer>
-    </article>`;
+    const state = percent === null ? "正在读取" : level === "high" ? "负载较高" : level === "medium" ? "负载适中" : "运行平稳";
+    return `<article class="system-metric-card is-${level}"><header><strong>${label}</strong><b>${percent === null ? "--" : `${percent}%`}</b></header><div class="system-meter" role="progressbar" aria-label="${label}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent || 0}"><i style="width:${percent || 0}%"></i></div><footer><span>${state}</span></footer></article>`;
   }
 
   function uptimeLabel(value) {
@@ -204,60 +184,89 @@
     return `${minutes}分钟`;
   }
 
-  function onlineIPv4Count(payload) {
-    const items = Array.isArray(payload) ? payload : Array.isArray(payload?.items) ? payload.items : Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.data?.items) ? payload.data.items : [];
-    return items.filter((item) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(item.ip || item.address || item.user || "").trim())).length;
+  function payloadItems(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray(payload?.items)) return payload.items;
+    if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload?.data?.items)) return payload.data.items;
+    return [];
   }
 
-  function wanTrendModel(trend) {
-    const series = trend?.series?.logical_egresses || [];
-    const timestamps = [...new Set(series.flatMap((item) => (item.samples || []).map((sample) => sample.timestamp)))].sort();
-    const totals = timestamps.map((timestamp) => series.map((item) => {
-      const sample = item.samples?.find((candidate) => candidate.timestamp === timestamp);
-      return Number(sample?.download_bps || 0) + Number(sample?.upload_bps || 0);
-    }));
-    const maximum = Math.max(1, ...totals.map((row) => row.reduce((sum, value) => sum + value, 0)));
-    return { series, timestamps, totals, maximum };
+  function onlineIPv4Count(payload) {
+    return payloadItems(payload).filter((item) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(String(item.ip || item.ip_address || item.address || item.user || "").trim())).length;
+  }
+
+  function summarySystem(payload) {
+    const root = payload?.data && !Array.isArray(payload.data) ? payload.data : payload || {};
+    return root.system || root.data?.system || root.data || root;
   }
 
   function renderWanTrend(options) {
-    const model = wanTrendModel(options.trafficTrend);
-    const colors = new Map(model.series.map((item, index) => [item.id, palette[(index * 3 + 1) % palette.length]]));
-    const width = 1000;
-    const height = 248;
-    const chart = model.timestamps.length > 1 ? model.series.map((item, seriesIndex) => {
-      const points = model.timestamps.map((timestamp, timeIndex) => {
-        const value = model.totals[timeIndex][seriesIndex] || 0;
-        const lower = model.series.slice(0, seriesIndex).reduce((sum, _, priorIndex) => sum + (model.totals[timeIndex][priorIndex] || 0), 0);
-        const x = timeIndex * width / (model.timestamps.length - 1);
-        return { x, y: height - (lower + value) * (height - 12) / model.maximum, lowerY: height - lower * (height - 12) / model.maximum };
-      });
-      const path = `${points.map((point, index) => `${index ? "L" : "M"}${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" ")} ${[...points].reverse().map((point) => `L${point.x.toFixed(2)},${point.lowerY.toFixed(2)}`).join(" ")} Z`;
-      return `<path class="system-wan-area" d="${path}" fill="${colors.get(item.id)}" fill-opacity=".78"></path>`;
-    }).join("") : "";
-    const peak = model.timestamps.length ? model.maximum : 0;
-    const current = model.totals.at(-1)?.reduce((sum, value) => sum + value, 0) || 0;
-    const average = model.totals.length ? model.totals.reduce((sum, row) => sum + row.reduce((rowSum, value) => rowSum + value, 0), 0) / model.totals.length : 0;
-    const grid = [0, 25, 50, 75, 100].map((ratio) => {
-      const y = height - ratio * (height - 12) / 100;
-      return `<line x1="0" y1="${y}" x2="${width}" y2="${y}" class="system-wan-grid-line"></line><text x="0" y="${Math.max(12, y - 5)}" class="system-wan-axis-label">${formatRate(peak * ratio / 100)}</text>`;
-    }).join("");
-    const legend = model.series.map((item) => `<span class="system-wan-legend-item"><i style="background:${colors.get(item.id)}"></i>${options.escape(item.name || item.id)}</span>`).join("");
-    return `<section class="system-panel system-traffic-panel"><header class="system-panel-head"><div><h3>WAN 流量趋势</h3><p>单 WAN、WAN 组和代理 WAN 的实时流量</p></div><div class="system-traffic-summary"><span>当前 ${formatRate(current)}</span><span>峰值 ${formatRate(peak)}</span><span>平均 ${formatRate(average)}</span></div></header><div class="system-wan-legend">${legend || '<span class="system-wan-empty">暂无 WAN 流量采样</span>'}</div><div class="system-wan-chart"><svg viewBox="0 0 1000 248" preserveAspectRatio="none" role="img" aria-label="WAN 流量趋势">${grid}${chart}</svg>${!chart ? '<div class="system-wan-chart-empty">暂无流量采样</div>' : ''}</div></section>`;
+    const allSeries = configuredSeries(options.trafficTrend?.series?.logical_egresses || [], options.resources);
+    const series = allSeries;
+    const colors = new Map(allSeries.map((item, index) => [item.id, palette[index % palette.length]]));
+    const names = egressNames(options.resources);
+    const models = {};
+    const totals = currentTotals(series);
+    const current = totals.upload + totals.download;
+    const samples = series.flatMap((item) => item.samples || []);
+    const peak = samples.length ? Math.max(...samples.map((sample) => Number(sample.download_bps || 0) + Number(sample.upload_bps || 0))) : 0;
+    const chartOptions = { models, className: "system-wan-chart", label: "WAN 上下行总流量趋势" };
+    return `<section class="system-panel system-traffic-panel"><header class="system-panel-head"><div><h3>WAN 流量趋势</h3><p>出口上下行总流量</p></div><div class="system-traffic-summary"><span><small>当前</small><b>${formatRate(current)}</b></span><span><small>峰值</small><b>${formatRate(peak)}</b></span></div></header><div class="router-chart-legend">${renderLegend(series, colors, options.escape, new Set(), false, names)}</div>${renderRateChart(series, "total", colors, options.escape, chartOptions)}</section>`;
   }
 
   function renderSystem(options) {
-    const system = options.summary?.system || {};
-    const platform = system.platform || "--";
-    const systemTime = system.system_time ? formatTime(system.system_time) : "--";
-    const facts = [["运行时长", uptimeLabel(system.uptime_seconds), "设备已连续运行"], ["在线用户", `${onlineIPv4Count(options.onlineUsers)} 个`, "当前 IP 数"], ["系统时间", systemTime, "设备本地时间"], ["硬件平台", platform, "设备运行平台"]];
-    return `<div class="system-overview">
-      <section class="system-overview-hero"><div class="system-hero-copy"><span class="system-eyebrow">ROUTER SYSTEM</span><h2>设备运行概况</h2><p>查看设备资源、运行时长、在线用户和系统时间。</p></div></section>
-      <section class="system-panel system-resource-panel"><header class="system-panel-head"><div><h3>资源使用</h3><p>当前设备运行负载</p></div></header><div class="system-resource-grid">${usage("CPU使用率", system.cpu_busy_percent)}${usage("内存使用率", system.memory_used_percent)}</div></section>
-      <section class="system-panel system-info-panel"><header class="system-panel-head"><div><h3>设备信息</h3><p>当前系统基础信息</p></div><span class="system-panel-mark">系统</span></header><div class="system-fact-grid">${facts.map(([label, value, hint]) => `<div class="system-fact"><span>${label}</span><strong>${options.escape(String(value))}</strong><small>${hint}</small></div>`).join("")}</div></section>
-      ${renderWanTrend(options)}
-    </div>`;
+    const system = { ...summarySystem(options.summary), ...(options.runtime?.system || options.runtime?.data?.system || {}) };
+    const load = system.load_average || {};
+    const loadText = [load["1m"], load["5m"], load["15m"]].every((item) => Number.isFinite(Number(item))) ? `${Number(load["1m"]).toFixed(2)} / ${Number(load["5m"]).toFixed(2)} / ${Number(load["15m"]).toFixed(2)}` : "--";
+    const facts = [
+      ["运行时长", uptimeLabel(system.uptime_seconds ?? system.uptime ?? system.runtime_seconds)],
+      ["当前 IP 数", String(onlineIPv4Count(options.onlineUsers))],
+      ["系统时间", formatTime(system.system_time || new Date().toISOString())],
+      ["硬件平台", system.platform || system.hardware_platform || system.device_model || "--"]
+    ];
+    return `<div class="system-overview"><div class="system-overview-layout"><section class="system-panel system-resource-panel"><header class="system-panel-head"><div><h3>资源使用</h3><p>负载均值 ${options.escape(loadText)}</p></div></header><div class="system-resource-grid">${usage("CPU 使用率", system.cpu_busy_percent)}${usage("内存使用率", system.memory_used_percent)}</div></section><section class="system-panel system-info-panel"><header class="system-panel-head"><div><h3>设备信息</h3><p>本机运行信息</p></div></header><div class="system-fact-grid">${facts.map(([label, value]) => `<div class="system-fact"><span>${label}</span><strong>${options.escape(value)}</strong></div>`).join("")}</div></section></div>${renderWanTrend(options)}</div>`;
   }
 
-  window.LyRouteGatewayOverview = Object.freeze({ renderSystem, renderTraffic, wireTraffic });
+  function renderTraffic(options) {
+    const allSeries = configuredSeries(options.trend?.series?.logical_egresses || [], options.resources);
+    const series = allSeries.filter((item) => !options.hidden.has(item.id));
+    const totals = currentTotals(series);
+    const colors = new Map(allSeries.map((item, index) => [item.id, palette[index % palette.length]]));
+    const names = egressNames(options.resources);
+    const models = {};
+    const dashboard = options.dashboard?.data || options.dashboard || {};
+    options.colors = colors;
+    options.models = models;
+    options.egressNames = names;
+    return `<div class="traffic-pa-page"><section class="traffic-pa-kpis"><article><span>当前上行</span><strong>${formatRate(totals.upload)}</strong><em>发送速率</em></article><article><span>当前下行</span><strong>${formatRate(totals.download)}</strong><em>接收速率</em></article><article><span>活动连接</span><strong>${Number(dashboard.sessions || dashboard.connections || 0)}</strong><em>最近 5 秒</em></article><article><span>在线用户</span><strong>${onlineIPv4Count(options.onlineUsers)}</strong><em>IPv4 用户</em></article><article><span>WAN 出口</span><strong>${series.length}</strong><em>逻辑出口</em></article></section><section class="traffic-pa-toolbar"><div class="traffic-pa-legend">${renderLegend(series, colors, options.escape, options.hidden, true, names)}</div><div class="traffic-windows" aria-label="时间范围">${windows.map(([value, label]) => `<button type="button" data-traffic-window="${value}" aria-pressed="${options.window === value}">${label}</button>`).join("")}</div></section><section class="traffic-chart-grid"><section class="traffic-pa-chart-card"><header><div><h3>上行趋势</h3><span>出口发送流量</span></div><strong>${formatRate(totals.upload)}</strong></header>${renderRateChart(series, "upload", colors, options.escape, { models, label: "上行流量趋势" })}</section><section class="traffic-pa-chart-card"><header><div><h3>下行趋势</h3><span>出口接收流量</span></div><strong>${formatRate(totals.download)}</strong></header>${renderRateChart(series, "download", colors, options.escape, { models, label: "下行流量趋势" })}</section></section></div>`;
+  }
+
+  function wireTraffic(root, options, actions) {
+    root.querySelectorAll("[data-traffic-window]").forEach((button) => button.addEventListener("click", () => actions.window(button.dataset.trafficWindow)));
+    root.querySelectorAll("[data-egress-legend]").forEach((button) => button.addEventListener("click", () => actions.toggle(button.dataset.egressLegend)));
+    root.querySelectorAll("[data-chart-point]").forEach((target) => {
+      const show = (event) => {
+        const chart = target.closest("[data-rate-chart]");
+        const tooltip = chart?.querySelector(".traffic-chart-tooltip");
+        const direction = target.dataset.chartDirection;
+        const timestamp = options.models?.[direction]?.timestamps?.[Number(target.dataset.chartPoint)];
+        if (!tooltip || !timestamp) return;
+        tooltip.innerHTML = tooltipHtml(options, direction, timestamp);
+        tooltip.hidden = false;
+        if (event instanceof MouseEvent) {
+          const bounds = chart.getBoundingClientRect();
+          tooltip.style.left = `${Math.max(12, Math.min(bounds.width - 236, event.clientX - bounds.left + 12))}px`;
+          tooltip.style.top = `${Math.max(10, event.clientY - bounds.top - 88)}px`;
+        }
+      };
+      target.addEventListener("mouseenter", show);
+      target.addEventListener("mousemove", show);
+      target.addEventListener("focus", show);
+      target.addEventListener("mouseleave", () => { const tooltip = target.closest("[data-rate-chart]")?.querySelector(".traffic-chart-tooltip"); if (tooltip) tooltip.hidden = true; });
+      target.addEventListener("blur", () => { const tooltip = target.closest("[data-rate-chart]")?.querySelector(".traffic-chart-tooltip"); if (tooltip) tooltip.hidden = true; });
+    });
+  }
+
+  window.LyRouteGatewayOverview = Object.freeze({ renderSystem, renderTraffic, wireTraffic, formatRate, formatBytes });
 }());
