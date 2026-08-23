@@ -364,7 +364,9 @@ verify_gateway_vpp_plugins() {
       product_build_fail "gateway rootfs is missing required runtime file: $runtime_file"
   done
   for unit in $LY_ROUTE_GATEWAY_RUNTIME_UNITS; do
-    [ -e "$target/lib/systemd/system/$unit" ] || [ -e "$target/usr/lib/systemd/system/$unit" ] ||
+    [ -e "$target/etc/systemd/system/$unit" ] ||
+      [ -e "$target/lib/systemd/system/$unit" ] ||
+      [ -e "$target/usr/lib/systemd/system/$unit" ] ||
       product_build_fail "gateway rootfs is missing required runtime unit: $unit"
   done
 }
