@@ -18,6 +18,17 @@ func TestSubscriptionFetcherAddressGate(t *testing.T) {
 	}
 }
 
+func TestSubscriptionFetcherAllowsPrivateFixtureOnlyWhenExplicitlyEnabled(t *testing.T) {
+	privateAddress := netip.MustParseAddr("10.1.18.100")
+	if allowedSubscriptionAddress(privateAddress) {
+		t.Fatal("private fixture endpoint was allowed without the explicit test switch")
+	}
+	t.Setenv("LY_ROUTE_ALLOW_PRIVATE_SUBSCRIPTION_ENDPOINTS", "1")
+	if !allowedSubscriptionAddress(privateAddress) {
+		t.Fatal("private fixture endpoint was rejected with the explicit test switch")
+	}
+}
+
 func TestSubscriptionFetcherRequiresHTTPSAndNoUserinfo(t *testing.T) {
 	for _, endpoint := range []string{"http://example.com/sub", "https://user@example.com/sub", "not-a-url"} {
 		if _, err := validateSubscriptionEndpoint(context.Background(), endpoint); err == nil {

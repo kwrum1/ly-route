@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -13,6 +14,8 @@ import (
 )
 
 const MaxSubscriptionBytes = 4 << 20
+
+var errUnsupportedNodeScheme = errors.New("unsupported node scheme")
 
 func ParseSubscription(content []byte) ([]Node, error) {
 	if len(content) == 0 || len(content) > MaxSubscriptionBytes {
@@ -33,6 +36,9 @@ func ParseSubscription(content []byte) ([]Node, error) {
 	for index, line := range lines {
 		node, err := ParseNodeURI(strings.TrimSpace(line))
 		if err != nil {
+			if errors.Is(err, errUnsupportedNodeScheme) {
+				continue
+			}
 			return nil, fmt.Errorf("%w: node %d: %v", ErrInvalidSubscription, index+1, err)
 		}
 		if seen[node.ID] {
@@ -64,7 +70,7 @@ func ParseNodeURI(raw string) (Node, error) {
 	case "ss":
 		return parseShadowsocksURI(trimmed)
 	default:
-		return Node{}, fmt.Errorf("unsupported node scheme %q", parsed.Scheme)
+		return Node{}, fmt.Errorf("%w %q", errUnsupportedNodeScheme, parsed.Scheme)
 	}
 }
 
@@ -85,6 +91,7 @@ func parseVLESSURI(raw string, parsed *url.URL) (Node, error) {
 	if query.Get("security") == "reality" {
 		reality := map[string]any{}
 		copyQuerySetting(reality, query, "pbk", "publicKey")
+		copyQuerySetting(reality, query, "pqv", "mldsa65Verify")
 		copyQuerySetting(reality, query, "fp", "fingerprint")
 		copyQuerySetting(reality, query, "sni", "serverName")
 		copyQuerySetting(reality, query, "sid", "shortId")

@@ -1,6 +1,9 @@
 package dataplane
 
 import (
+	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -65,4 +68,51 @@ func TestHardwareReadbackContainsDPDKPaddedPCIFunction(t *testing.T) {
 	if hardwareReadbackContainsPCI(readback, "0000:13:00.0") {
 		t.Fatal("accepted a different PCI identity")
 	}
+}
+
+func TestLinuxHostRebindsOnlyActiveKea(t *testing.T) {
+	t.Run("active", func(t *testing.T) {
+		// Given
+		runner := &recordingRunner{}
+		host := &LinuxHost{Runner: runner}
+
+		// When
+		err := host.RebindKea(context.Background())
+
+		// Then
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"systemctl is-active --quiet kea-dhcp4-server.service", "systemctl restart kea-dhcp4-server.service"}; !reflect.DeepEqual(runner.commands, want) {
+			t.Fatalf("commands=%v, want=%v", runner.commands, want)
+		}
+	})
+
+	t.Run("inactive", func(t *testing.T) {
+		// Given
+		runner := &recordingRunner{failures: map[string]error{"systemctl is-active --quiet kea-dhcp4-server.service": errors.New("inactive")}}
+		host := &LinuxHost{Runner: runner}
+
+		// When
+		err := host.RebindKea(context.Background())
+
+		// Then
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"systemctl is-active --quiet kea-dhcp4-server.service"}; !reflect.DeepEqual(runner.commands, want) {
+			t.Fatalf("commands=%v, want=%v", runner.commands, want)
+		}
+	})
+}
+
+type recordingRunner struct {
+	commands []string
+	failures map[string]error
+}
+
+func (runner *recordingRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
+	runner.commands = append(runner.commands, command)
+	return nil, runner.failures[command]
 }

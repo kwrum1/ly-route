@@ -1,6 +1,7 @@
 package vpp
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -8,6 +9,29 @@ import (
 
 	"ly-route/backend/internal/runtime/nat"
 )
+
+func TestRemoveNATReturnGuardAcceptsNoABFAttachments(t *testing.T) {
+	t.Setenv("LY_ROUTE_LAN_VPP_INTERFACE", "lyroute-ens34")
+	guard := natReturnGuardForPortMapping(nat.PortMapping{
+		ID:              "first-port-map",
+		ExternalAddress: "10.67.0.12",
+		InternalHost:    "192.168.50.200",
+		InternalPort:    8080,
+		Protocol:        "tcp",
+	})
+	policyCommand := fmt.Sprintf("show abf policy %d", guard.policyID())
+	responses := map[string]fakeVPPResponse{
+		guard.preNATBypassDeleteCommand(): {stdout: "deleted\n"},
+		policyCommand:                     {stdout: "Invalid policy\n"},
+		"show ip fib summary":             {stdout: "IPv4 unicast:\n"},
+		"show acl-plugin acl":             {stdout: ""},
+		"show abf attach lyroute-ens34":   {retval: 1},
+	}
+	channel := vppctlChannel{binary: writeFakeVPPCTL(t, responses)}
+	if _, err := channel.removeNATReturnGuard(context.Background(), Operation{RequestID: "txn-first-port-map", Resource: guard.resource}, guard); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestNATReturnGuardUsesExternalAddressAndOriginalWANPath(t *testing.T) {
 	guard := natReturnGuardForPortMapping(nat.PortMapping{

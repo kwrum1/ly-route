@@ -275,6 +275,8 @@ func deleteRoutePolicyCommands(id string) []string {
 		fmt.Sprintf("?abf attach ip4 del policy %d lyroute-$LY_ROUTE_LAN_INTERFACE", policyID),
 		fmt.Sprintf("?abf policy del id %d", policyID),
 		fmt.Sprintf("?delete acl-plugin acl index %d", aclID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/1", tableID),
+		fmt.Sprintf("?ip route del table %d 128.0.0.0/1", tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/32", tableID),
 		fmt.Sprintf("?ip table del %d", tableID),

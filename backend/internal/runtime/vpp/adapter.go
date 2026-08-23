@@ -1556,14 +1556,6 @@ func securityACLCommands(acl trafficpolicy.SecurityACL, wanIngressInterfaces ...
 
 func wanGroupCommands(group trafficpolicy.WANGroup) []string {
 	tableID := wanGroupTableID(group.ID)
-	// VPP's `ip route add` is additive. A PPPoE reconnect can replace a
-	// session interface while retaining the WAN-group FIB; appending the new
-	// path would leave stale paths in the load-balance object. VPP also keeps
-	// an implicit drop DPO for a table's exact default route. On the VPP build
-	// used by the appliance that DPO can win over a rebuilt 0/0 route after a
-	// reconnect, even though `show ip fib` displays the new paths. Use two
-	// covering /1 routes for the executable WAN default and clear both the old
-	// exact default and any previous /1 representation first.
 	commands := []string{
 		fmt.Sprintf("?ip table add %d", tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", tableID),
@@ -1573,21 +1565,23 @@ func wanGroupCommands(group trafficpolicy.WANGroup) []string {
 	if group.Mode != trafficpolicy.WANGroupPrimaryBackup {
 		commands = append(commands, fmt.Sprintf("?set ip flow-hash table %d src dst sport dport proto", tableID))
 	}
-	for index, member := range group.Members {
-		path := group.Paths[member]
-		via := routePathVia(path.VPPInterface, path.NextHop, member)
-		weight := group.Weights[member]
-		if weight < 1 {
-			weight = 1
+	for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		command := fmt.Sprintf("?ip route add %s table %d", prefix, tableID)
+		for index, member := range group.Members {
+			path := group.Paths[member]
+			via := routePathVia(path.VPPInterface, path.NextHop, member)
+			weight := group.Weights[member]
+			if weight < 1 {
+				weight = 1
+			}
+			preference := 0
+			if group.Mode == trafficpolicy.WANGroupPrimaryBackup {
+				weight = 1
+				preference = index
+			}
+			command += fmt.Sprintf(" via %s weight %d preference %d", via, weight, preference)
 		}
-		preference := 0
-		if group.Mode == trafficpolicy.WANGroupPrimaryBackup {
-			weight = 1
-			preference = index
-		}
-		for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-			commands = append(commands, fmt.Sprintf("?ip route add table %d %s via %s weight %d preference %d", tableID, prefix, via, weight, preference))
-		}
+		commands = append(commands, command)
 	}
 	commands = append(commands, fmt.Sprintf("show ip fib table %d", tableID))
 	return commands
@@ -1762,10 +1756,13 @@ func routePathVia(vppInterface, nextHop, fallback string) string {
 	if via == "" {
 		return strings.TrimSpace(nextHop)
 	}
+	if strings.HasPrefix(strings.ToLower(via), "pppoe_session") || strings.HasPrefix(strings.ToLower(via), "pppoe-runtime:") {
+		return via
+	}
 	if nextHop = strings.TrimSpace(nextHop); nextHop != "" {
 		return nextHop + " " + via
 	}
-	if strings.HasPrefix(strings.ToLower(via), "pppoe_session") {
+	if strings.HasPrefix(strings.ToLower(via), "pppoe_session") || strings.HasPrefix(strings.ToLower(via), "pppoe-runtime:") {
 		return "ip4-lookup-in-table 0"
 	}
 	return via

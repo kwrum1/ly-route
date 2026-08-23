@@ -40,17 +40,22 @@ type LogicalEgressCounter struct {
 type GatewayConnection struct {
 	SourceIP        string    `json:"src_ip"`
 	DestinationIP   string    `json:"dst_ip"`
+	TranslatedIP    string    `json:"translated_ip,omitempty"`
 	Protocol        string    `json:"protocol"`
 	SourcePort      int       `json:"src_port"`
 	DestinationPort int       `json:"dst_port"`
+	TranslatedPort  int       `json:"translated_port,omitempty"`
 	ConnectionCount int       `json:"connection_count,omitempty"`
 	Bytes           int64     `json:"bytes"`
+	AgeSeconds      float64   `json:"age_seconds,omitempty"`
+	SessionKind     string    `json:"session_kind,omitempty"`
 	ObservedAt      time.Time `json:"observed_at"`
 }
 
 type GatewayNeighbor struct {
 	IP            string    `json:"ip"`
 	MAC           string    `json:"mac"`
+	FirstSeen     time.Time `json:"first_seen,omitempty"`
 	LastSeen      time.Time `json:"last_seen"`
 	DownloadBytes int64     `json:"download_bytes"`
 	UploadBytes   int64     `json:"upload_bytes"`

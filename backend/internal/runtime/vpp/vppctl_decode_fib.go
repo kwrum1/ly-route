@@ -8,6 +8,14 @@ import (
 )
 
 func parseFIBResult(results []VPPCTLCommandResult, tableID int) ([]fibPath, error) {
+	return parseFIBResultMode(results, tableID, false)
+}
+
+func parseWANGroupFIBResult(results []VPPCTLCommandResult, tableID int) ([]fibPath, error) {
+	return parseFIBResultMode(results, tableID, true)
+}
+
+func parseFIBResultMode(results []VPPCTLCommandResult, tableID int, preferCoveringDefault bool) ([]fibPath, error) {
 	output, err := commandOutput(results, fmt.Sprintf("show ip fib table %d", tableID))
 	if err != nil {
 		return nil, err
@@ -31,6 +39,11 @@ func parseFIBResult(results []VPPCTLCommandResult, tableID int) ([]fibPath, erro
 				activePrefix = line
 			default:
 				activePrefix = ""
+			}
+			if activePrefix != "" {
+				if _, exists := sections[activePrefix]; !exists {
+					sections[activePrefix] = nil
+				}
 			}
 			pendingWeight, pendingPreference = 1, 0
 			continue
@@ -74,12 +87,14 @@ func parseFIBResult(results []VPPCTLCommandResult, tableID int) ([]fibPath, erro
 			return nil, snapshotDecodeError("unknown FIB path grammar %q in %q", line, output)
 		}
 	}
-	paths := append([]fibPath(nil), sections["0.0.0.0/1"]...)
-	paths = append(paths, sections["128.0.0.0/1"]...)
-	if len(paths) > 0 {
-		return uniqueFIBPaths(paths), nil
+	if preferCoveringDefault {
+		paths := append([]fibPath(nil), sections["0.0.0.0/1"]...)
+		paths = append(paths, sections["128.0.0.0/1"]...)
+		if paths = uniqueFIBPaths(paths); len(paths) > 0 {
+			return paths, nil
+		}
 	}
-	paths = append(paths, sections["0.0.0.0/0"]...)
+	paths := append([]fibPath(nil), sections["0.0.0.0/0"]...)
 	// A VPP 25.10 load-balance DPO may include an implicit lookup back to the
 	// main table after its configured forwarding buckets.  It is the miss
 	// fallback, not another configured WAN member.  Preserve a sole table-0

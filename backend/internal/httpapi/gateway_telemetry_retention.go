@@ -7,10 +7,10 @@ import (
 )
 
 const (
-	gatewayLogicalEgressSampleLimit = 288
+	gatewayLogicalEgressSampleLimit = 17_280
 	gatewayLogicalEgressSeriesLimit = 1024
 	gatewayConnectionRecordLimit    = 10_000
-	gatewayTrafficSampleInterval    = 5 * time.Minute
+	gatewayTrafficSampleInterval    = 5 * time.Second
 )
 
 func appendLogicalEgressSample(samples []LogicalEgressSample, counter LogicalEgressCounter, observedAt time.Time) []LogicalEgressSample {

@@ -58,6 +58,9 @@ built_at=$built_at
 builder=$(hostname)
 EOF
 
+if [[ -e $artifact_root && ! -d $artifact_root ]]; then
+  rm -f -- "$artifact_root"
+fi
 mkdir -p "$artifact_root"
 rm -rf "$target_dir"
 mv "$stage_dir" "$target_dir"

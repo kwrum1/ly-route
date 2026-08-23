@@ -27,6 +27,25 @@ func TestRuntimeStateIgnoresOptionalComponentsThatAreNotConfigured(t *testing.T)
 	}
 }
 
+func TestRuntimeStatusReportsInvalidDesiredPlanAsDegraded(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-runtime-invalid-dependency?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	payload := []byte(`{"id":"proxy-a","semantic_type":"proxy_egress","display_list":"wan","runtime_profile":"xray-tproxy-outbound","capture_path":"invalid","engine":"xray","handoff":"vpp_to_service","listener_mode":"vpp-service"}`)
+	if err := store.SaveConfig(ctx, persistence.ConfigDocument{ResourceType: "proxy_egress", ResourceID: "proxy-a", Payload: payload, UpdatedAt: fixedClock()()}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := request(t, New(WithStore(store), WithClock(fixedClock())), http.MethodGet, "/api/v1/runtime/status")
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"degraded"`) || !strings.Contains(response.Body.String(), "capture_path") {
+		t.Fatalf("runtime status = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestAppliedRuntimeDoesNotDegradeOnlyBecauseCommitEvidenceAges(t *testing.T) {
 	now := fixedClock()()
 	clock := now

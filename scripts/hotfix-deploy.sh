@@ -80,10 +80,31 @@ remote_manifest_tmp="${remote_tmp}.manifest"
 remote_backup="${remote_file}.pre-hotfix"
 remote_manifest_dir=/var/lib/ly-route/hotfix-manifests
 
+scp_command=(scp)
+ssh_command=(ssh)
+askpass_file=
+if [[ -n ${LY_HOTFIX_PASSWORD:-} ]]; then
+  command -v setsid >/dev/null 2>&1 || { printf '%s\n' 'LY_HOTFIX_PASSWORD requires setsid' >&2; exit 2; }
+  askpass_file=$(mktemp)
+  trap 'rm -f "$askpass_file"' EXIT
+  cat >"$askpass_file" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$LY_HOTFIX_PASSWORD"
+EOF
+  chmod 0700 "$askpass_file"
+  export SSH_ASKPASS="$askpass_file" SSH_ASKPASS_REQUIRE=force DISPLAY=:0
+  scp_command=(setsid -w scp)
+  ssh_command=(setsid -w ssh)
+elif [[ -n ${SSHPASS:-} ]]; then
+  command -v sshpass >/dev/null 2>&1 || { printf '%s\n' 'SSHPASS is set but sshpass is unavailable' >&2; exit 2; }
+  scp_command=(sshpass -e scp)
+  ssh_command=(sshpass -e ssh)
+fi
+
 printf 'Deploying sealed artifact %s -> %s:%s\n' "$local_file" "$host" "$remote_file"
-scp "$local_file" "$host:$remote_tmp"
-scp "$manifest" "$host:$remote_manifest_tmp"
-ssh "$host" "set -eu
+"${scp_command[@]}" "$local_file" "$host:$remote_tmp"
+"${scp_command[@]}" "$manifest" "$host:$remote_manifest_tmp"
+"${ssh_command[@]}" "$host" "set -eu
 test -f '$remote_file' && cp -a '$remote_file' '$remote_backup' || true
 install -m 0755 '$remote_tmp' '$remote_file'
 remote_sha=\$(sha256sum '$remote_file' | awk '{print \$1}')

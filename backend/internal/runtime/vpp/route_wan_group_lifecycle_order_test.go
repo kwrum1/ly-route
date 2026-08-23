@@ -2,11 +2,31 @@ package vpp
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"ly-route/backend/internal/runtime/trafficpolicy"
 )
+
+func TestResolveRuntimePPPoERoutePolicyUsesCurrentSession(t *testing.T) {
+	statusDir := t.TempDir()
+	t.Setenv("LY_ROUTE_PPPOE_RUNTIME_STATUS_DIR", statusDir)
+	if err := os.WriteFile(filepath.Join(statusDir, "wan-primary.json"), []byte(`{"interface":"pppoe_session1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := trafficpolicy.RoutePolicy{
+		ID: "route-60", Path: &trafficpolicy.WANPath{VPPInterface: "pppoe-runtime:wan-primary", NextHop: "10.67.0.1"},
+	}
+	resolved, err := resolveRuntimePPPoERoutePolicy(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Path == nil || resolved.Path.VPPInterface != "pppoe_session1" || candidate.Path.VPPInterface != "pppoe-runtime:wan-primary" {
+		t.Fatalf("resolved=%#v original=%#v", resolved.Path, candidate.Path)
+	}
+}
 
 func TestBuildRouteWANGroupOperationsDeletesChainedPoliciesSafely(t *testing.T) {
 	routes := []trafficpolicy.RoutePolicy{
@@ -145,8 +165,32 @@ func TestFibPathMatchesResolvedPointToPointNextHop(t *testing.T) {
 	if !fibPathMatchesExpected("0.0.0.0 pppoe_session0: mtu:9000 next:6 flags:[features]", "10.67.0.1 pppoe_session0") {
 		t.Fatal("resolved PPPoE FIB path should match the configured point-to-point interface")
 	}
+	if !fibPathMatchesExpected("0.0.0.0 pppoe_session0: mtu:9000 next:6 flags:[features]", "pppoe_session0") {
+		t.Fatal("resolved PPPoE FIB path should match an interface-only runtime target")
+	}
 	if fibPathMatchesExpected("0.0.0.0 lyroute-ens33", "10.67.0.1 pppoe_session0") {
 		t.Fatal("FIB path with a different interface must not match")
+	}
+}
+
+func TestFibPathsResolveWeightedWANGroup(t *testing.T) {
+	group := trafficpolicy.WANGroup{
+		ID: "dual", Mode: trafficpolicy.WANGroupWeighted,
+		Members: []string{"primary", "backup"},
+		Paths: map[string]trafficpolicy.WANPath{
+			"primary": {VPPInterface: "pppoe_session1", NextHop: "10.67.0.1"},
+			"backup":  {VPPInterface: "pppoe_session0", NextHop: "10.68.0.1"},
+		},
+	}
+	paths := []fibPath{
+		{via: "0.0.0.0 pppoe_session1: mtu:9000 next:6 flags:[]"},
+		{via: "0.0.0.0 pppoe_session0: mtu:9000 next:6 flags:[]"},
+	}
+	if !fibPathsResolveWANGroup(paths, group) {
+		t.Fatal("recursive FIB member paths should match the weighted WAN group")
+	}
+	if fibPathsResolveWANGroup(paths[:1], group) {
+		t.Fatal("incomplete weighted WAN group member paths were accepted")
 	}
 }
 

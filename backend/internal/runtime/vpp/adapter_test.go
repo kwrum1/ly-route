@@ -313,7 +313,7 @@ func TestWANGroupCommandsReplaceStaleDefaultRouteBeforeAddingMembers(t *testing.
 	joined := strings.Join(commands, "\n")
 	addIndex := strings.Index(joined, "ip table add")
 	deleteIndex := strings.Index(joined, "ip route del table")
-	memberIndex := strings.Index(joined, "ip route add table")
+	memberIndex := strings.Index(joined, "ip route add 0.0.0.0/1 table")
 	if addIndex < 0 || deleteIndex < 0 || memberIndex < 0 || !(addIndex < deleteIndex && deleteIndex < memberIndex) {
 		t.Fatalf("WAN-group commands do not replace the old default route first: %s", joined)
 	}
@@ -321,8 +321,9 @@ func TestWANGroupCommandsReplaceStaleDefaultRouteBeforeAddingMembers(t *testing.
 		if !strings.Contains(joined, "ip route del table "+fmt.Sprint(wanGroupTableID("reconnect"))+" "+prefix) {
 			t.Fatalf("WAN-group commands do not clear stale %s: %s", prefix, joined)
 		}
-		if strings.Count(joined, "ip route add table "+fmt.Sprint(wanGroupTableID("reconnect"))+" "+prefix) != 2 {
-			t.Fatalf("WAN-group commands should install two %s paths: %s", prefix, joined)
+		command := "ip route add " + prefix + " table " + fmt.Sprint(wanGroupTableID("reconnect"))
+		if strings.Count(joined, command) != 1 || !strings.Contains(joined, command+" via wan0 weight 1 preference 0 via wan1 weight 1 preference 0") {
+			t.Fatalf("WAN-group command should atomically install both %s paths: %s", prefix, joined)
 		}
 	}
 }

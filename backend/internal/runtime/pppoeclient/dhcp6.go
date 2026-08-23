@@ -29,6 +29,8 @@ const (
 
 var allDHCP6Servers = netip.MustParseAddr("ff02::1:2")
 
+const delegatedPrefixRetryInterval = 30 * time.Second
+
 type DelegatedPrefixLease struct {
 	Prefix            netip.Prefix
 	PreferredLifetime uint32
@@ -154,15 +156,30 @@ func (client *Client) ServeWithDelegatedPrefix(ctx context.Context, session Sess
 	return client.serveWithDelegatedPrefix(ctx, session, lease, update)
 }
 
+func (client *Client) ServeWithDelegatedPrefixRecovery(ctx context.Context, session Session, lease DelegatedPrefixLease, update func(context.Context, DelegatedPrefixLease) error) error {
+	if !session.IPv6Ready {
+		return errors.New("DHCPv6-PD recovery requires an active IPv6CP session")
+	}
+	return client.serveWithDelegatedPrefix(ctx, session, lease, update)
+}
+
 func (client *Client) serveWithDelegatedPrefix(ctx context.Context, session Session, lease DelegatedPrefixLease, update func(context.Context, DelegatedPrefixLease) error) error {
 	nextRenew := time.Time{}
 	if lease.valid() {
 		nextRenew = lease.renewAt()
+	} else if session.IPv6Ready {
+		nextRenew = time.Now()
 	}
 	for {
 		if !nextRenew.IsZero() && !time.Now().Before(nextRenew) {
-			rebind := !time.Now().Before(lease.rebindAt())
-			updated, err := client.renewDelegatedPrefix(ctx, session, lease, rebind)
+			var updated DelegatedPrefixLease
+			var err error
+			if lease.valid() {
+				rebind := !time.Now().Before(lease.rebindAt())
+				updated, err = client.renewDelegatedPrefix(ctx, session, lease, rebind)
+			} else {
+				updated, err = client.AcquireDelegatedPrefix(ctx, session)
+			}
 			if err == nil {
 				if update != nil {
 					if err := update(ctx, updated); err != nil {
@@ -172,10 +189,10 @@ func (client *Client) serveWithDelegatedPrefix(ctx context.Context, session Sess
 				lease = updated
 				nextRenew = lease.renewAt()
 			} else {
-				if !time.Now().Before(lease.expiresAt()) {
+				if lease.valid() && !time.Now().Before(lease.expiresAt()) {
 					return fmt.Errorf("DHCPv6-PD lease expired: %w", err)
 				}
-				nextRenew = time.Now().Add(30 * time.Second)
+				nextRenew = time.Now().Add(delegatedPrefixRetryInterval)
 			}
 			continue
 		}

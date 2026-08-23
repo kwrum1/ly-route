@@ -22,6 +22,8 @@ type preNATPortRange struct {
 // WAN or proxy table.
 const lanDHCPBroadcastPreNATRuleID = 65000
 
+const lanLocalPreNATRuleID = 64999
+
 // preNATRoutePolicyCommands reads the data-LAN prefix directly from VPP. The
 // control API's LAN_CIDR value belongs to the management plane and is not a
 // reliable source when management and data ports are configured separately.
@@ -97,6 +99,8 @@ func buildPreNATRoutePolicyCommandsForTable(policy trafficpolicy.RoutePolicy, po
 		fmt.Sprintf("set ly-route pre-nat-route interface %s lan-prefix %s", ingress, lanPrefix),
 		fmt.Sprintf("?set ly-route pre-nat-route del id %d", lanDHCPBroadcastPreNATRuleID),
 		fmt.Sprintf("set ly-route pre-nat-route add id %d priority 0 source 0.0.0.0/0 destination 0.0.0.0/0 protocol udp sport 68-68 dport 67-67 bypass", lanDHCPBroadcastPreNATRuleID),
+		fmt.Sprintf("?set ly-route pre-nat-route del id %d", lanLocalPreNATRuleID),
+		fmt.Sprintf("set ly-route pre-nat-route add id %d priority 1 source %s destination %s protocol any sport 0-65535 dport 0-65535 bypass", lanLocalPreNATRuleID, lanPrefix, lanPrefix),
 		fmt.Sprintf("set ly-route pre-nat-route del id %d", policyID),
 	}
 	additions := make([]string, 0, len(sources)*len(destinations)*len(protocols)*len(sourcePorts)*len(destinationPorts))

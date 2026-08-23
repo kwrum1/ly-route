@@ -290,7 +290,7 @@ func (channel vppctlChannel) removeNATReturnGuard(ctx context.Context, operation
 		}
 		detached, detachErr := channel.runServiceChainCommands(ctx, operation,
 			fmt.Sprintf("abf attach ip4 del policy %d %s", guard.policyID(), ingress),
-			"show abf attach "+ingress)
+			"?show abf attach "+ingress)
 		results = append(results, detached...)
 		if detachErr != nil {
 			return results, detachErr
@@ -317,7 +317,7 @@ func (channel vppctlChannel) removeNATReturnGuard(ctx context.Context, operation
 			return results, deleteErr
 		}
 	}
-	verified, err := channel.runServiceChainCommands(ctx, operation, policyCommand, "show acl-plugin acl", "show abf attach "+ingress)
+	verified, err := channel.runServiceChainCommands(ctx, operation, policyCommand, "show acl-plugin acl", "?show abf attach "+ingress)
 	results = append(results, verified...)
 	if err != nil {
 		return results, err

@@ -13,15 +13,30 @@ func decodeVPPCTLRoutes(request SnapshotRequest, results []VPPCTLCommandResult) 
 	if err != nil {
 		return RoutePolicyReadback{}, err
 	}
+	observedCandidates := make(map[string]trafficpolicy.RoutePolicy, len(request.Candidates.RoutePolicies))
+	resolvedPolicies := make([]trafficpolicy.RoutePolicy, 0, len(request.Candidates.RoutePolicies))
+	for _, policy := range request.Candidates.RoutePolicies {
+		resolved, err := resolveRuntimePPPoERoutePolicy(policy)
+		if err != nil {
+			return RoutePolicyReadback{}, err
+		}
+		resolvedPolicies = append(resolvedPolicies, resolved)
+		observedCandidates[resolved.ID] = resolved
+	}
 	groups := make(map[string]trafficpolicy.WANGroup, len(request.Candidates.WANGroups))
 	for _, group := range request.Candidates.WANGroups {
-		groups[group.ID] = group
+		resolved, err := resolveRuntimePPPoEWANGroup(group)
+		if err != nil {
+			return RoutePolicyReadback{}, err
+		}
+		groups[resolved.ID] = resolved
 	}
-	routeOptions := buildRoutePolicyCommandOptions(request.Candidates.RoutePolicies, groups)
-	addRoutePolicyLocalDestinationPrefixes(routeOptions, request.Candidates.RoutePolicies, request.LocalDestinations)
+	routeOptions := buildRoutePolicyCommandOptions(resolvedPolicies, groups)
+	addRoutePolicyLocalDestinationPrefixes(routeOptions, resolvedPolicies, request.LocalDestinations)
 	policies := make([]trafficpolicy.RoutePolicy, 0, len(request.RoutePolicies))
 	for _, id := range request.RoutePolicies {
-		candidate := candidates[strings.TrimSpace(id)]
+		desiredCandidate := candidates[strings.TrimSpace(id)]
+		candidate := observedCandidates[strings.TrimSpace(id)]
 		policyID := stableID("route-abf:"+candidate.ID, 10000, 8999)
 		tableID := stableID("route-table:"+candidate.ID, 50000, 49999)
 		if radixPlan, radix := compileRoutePolicyRadixPlan(candidate, groups, routeOptions[candidate.ID]); radix {
@@ -44,13 +59,17 @@ func decodeVPPCTLRoutes(request SnapshotRequest, results []VPPCTLCommandResult) 
 				return RoutePolicyReadback{}, pathErr
 			}
 			expected := routePolicyFIBVia(radixPlan.routeTarget)
-			if len(paths) != 1 || !fibPathMatchesExpected(paths[0].via, expected) {
+			pathMatches := len(paths) == 1 && fibPathMatchesExpected(paths[0].via, expected)
+			if group, grouped := groups[candidate.Egress]; grouped {
+				pathMatches = pathMatches || fibPathsResolveWANGroup(paths, group)
+			}
+			if !pathMatches {
 				if request.AllowMissing {
 					continue
 				}
 				return RoutePolicyReadback{}, snapshotDecodeError("route policy %q radix FIB path does not match candidate: observed=%v expected=%q target=%q", candidate.ID, paths, expected, radixPlan.routeTarget)
 			}
-			policies = append(policies, candidate)
+			policies = append(policies, desiredCandidate)
 			continue
 		}
 		policyOutput, policyErr := vppctlOutputAllowEmpty(results, fmt.Sprintf("show abf policy %d", policyID))
@@ -137,7 +156,11 @@ func decodeVPPCTLRoutes(request SnapshotRequest, results []VPPCTLCommandResult) 
 			}
 		} else if option, optimized := routeOptions[candidate.ID]; optimized && option.optimizedIPv4 {
 			expected := routePolicyFIBVia(option.defaultVia)
-			if len(paths) == 0 || !fibPathsContain(paths, expected) {
+			pathMatches := len(paths) > 0 && fibPathsContain(paths, expected)
+			if group, grouped := groups[candidate.Egress]; grouped {
+				pathMatches = fibPathsResolveWANGroup(paths, group)
+			}
+			if !pathMatches {
 				if request.AllowMissing {
 					continue
 				}
@@ -149,7 +172,7 @@ func decodeVPPCTLRoutes(request SnapshotRequest, results []VPPCTLCommandResult) 
 			}
 			return RoutePolicyReadback{}, snapshotDecodeError("route policy %q FIB path does not match candidate", candidate.ID)
 		}
-		policies = append(policies, candidate)
+		policies = append(policies, desiredCandidate)
 	}
 	for _, id := range request.AbsentRoutePolicies {
 		if err := verifyRoutePolicyAbsence(results, strings.TrimSpace(id)); err != nil {
@@ -157,6 +180,20 @@ func decodeVPPCTLRoutes(request SnapshotRequest, results []VPPCTLCommandResult) 
 		}
 	}
 	return RoutePolicyReadback{Policies: policies}, nil
+}
+
+func resolveRuntimePPPoERoutePolicy(candidate trafficpolicy.RoutePolicy) (trafficpolicy.RoutePolicy, error) {
+	if candidate.Path == nil {
+		return candidate, nil
+	}
+	path := *candidate.Path
+	resolved, err := resolveRuntimePPPoEInterface(path.VPPInterface)
+	if err != nil {
+		return trafficpolicy.RoutePolicy{}, fmt.Errorf("resolve route policy %q: %w", candidate.ID, err)
+	}
+	path.VPPInterface = resolved
+	candidate.Path = &path
+	return candidate, nil
 }
 
 // VPP resolves a point-to-point next hop to a zero-address adjacency in the
@@ -172,12 +209,18 @@ func fibPathMatchesExpected(actual, expected string) bool {
 	}
 	actualFields := strings.Fields(actual)
 	expectedFields := strings.Fields(expected)
-	if len(actualFields) < 2 || len(expectedFields) != 2 || actualFields[0] != "0.0.0.0" {
+	if len(actualFields) < 2 || actualFields[0] != "0.0.0.0" {
 		return false
 	}
 	// The compact forwarding chain appends `: mtu:...` to the interface
 	// token, unlike the configured path-list output.
 	actualInterface := strings.TrimRight(actualFields[1], ":,")
+	if len(expectedFields) == 1 {
+		return actualInterface == expectedFields[0]
+	}
+	if len(expectedFields) != 2 {
+		return false
+	}
 	return actualInterface == expectedFields[1]
 }
 
@@ -197,4 +240,24 @@ func fibPathsContain(paths []fibPath, expected string) bool {
 		}
 	}
 	return false
+}
+
+func fibPathsResolveWANGroup(paths []fibPath, group trafficpolicy.WANGroup) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	matchedMembers := 0
+	for _, member := range group.Members {
+		expected := group.Paths[member]
+		for _, path := range paths {
+			if activeWANPathMatches(path, expected, member) {
+				matchedMembers++
+				break
+			}
+		}
+	}
+	if group.Mode == trafficpolicy.WANGroupPrimaryBackup {
+		return len(paths) == 1 && matchedMembers == 1
+	}
+	return len(paths) == len(group.Members) && matchedMembers == len(group.Members)
 }

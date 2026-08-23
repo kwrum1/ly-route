@@ -17,6 +17,8 @@ import (
 	serviceRuntime "ly-route/backend/internal/runtime/service"
 )
 
+const gatewayActiveSessionSeconds = 5
+
 type gatewayTelemetryConfigReader interface {
 	Configs(context.Context, string) ([]persistence.ConfigDocument, error)
 }
@@ -97,8 +99,10 @@ func (collector *vppctlGatewayTelemetry) Collect(ctx context.Context) (httpapi.G
 	if err != nil {
 		return httpapi.GatewayTelemetrySnapshot{}, fmt.Errorf("read VPP neighbor telemetry: %w", err)
 	}
+	pppoeOutput, _ := collector.run(ctx, binary, "show", "pppoe", "session")
 	natEDOutput, natEDErr := collector.run(ctx, binary, "show", "nat44", "sessions")
-	natEIOutput, natEIErr := collector.run(ctx, binary, "show", "nat44", "ei", "sessions")
+	natEIOutput, natEIErr := collector.run(ctx, binary, "show", "nat44", "ei", "sessions", "detail")
+	clockOutput, clockErr := collector.run(ctx, binary, "show", "clock")
 	if natEDErr != nil && natEIErr != nil {
 		return httpapi.GatewayTelemetrySnapshot{}, fmt.Errorf("read VPP connection telemetry: endpoint-dependent: %v; endpoint-independent: %w", natEDErr, natEIErr)
 	}
@@ -110,15 +114,54 @@ func (collector *vppctlGatewayTelemetry) Collect(ctx context.Context) (httpapi.G
 	if err != nil {
 		return httpapi.GatewayTelemetrySnapshot{}, err
 	}
+	links = bindPPPoESessionInterfaces(links, interfaceOutput, pppoeOutput)
 	logical := collector.logicalEgressCounters(interfaces, deltas, links, groups, proxies)
 	connections := parseGatewayNATConnections(natEDOutput, now, lanPrefixes)
-	connections = append(connections, parseGatewayNATEISummaries(natEIOutput, now, lanPrefixes)...)
+	if natEIErr == nil && clockErr == nil {
+		connections = append(connections, parseGatewayNATEIActiveSessions(natEIOutput, parseVPPClock(clockOutput), now, lanPrefixes)...)
+	}
 	return httpapi.GatewayTelemetrySnapshot{
 		ObservedAt:      now,
 		LogicalEgresses: logical,
 		Connections:     connections,
 		Neighbors:       parseGatewayNeighbors(neighborOutput, now, lanInterfaces),
 	}, nil
+}
+
+func bindPPPoESessionInterfaces(links []gatewayWANLink, interfaceOutput, sessionOutput string) []gatewayWANLink {
+	indexToName := map[int]string{}
+	for _, raw := range strings.Split(interfaceOutput, "\n") {
+		fields := strings.Fields(raw)
+		if len(fields) < 3 {
+			continue
+		}
+		index, err := strconv.Atoi(fields[1])
+		if err == nil {
+			indexToName[index] = fields[0]
+		}
+	}
+	physicalToSession := map[string]string{}
+	for _, raw := range strings.Split(sessionOutput, "\n") {
+		fields := strings.Fields(strings.TrimSpace(raw))
+		var sessionIndex, physicalIndex int
+		for index, field := range fields {
+			if field == "sw-if-index" && index+1 < len(fields) {
+				sessionIndex, _ = strconv.Atoi(fields[index+1])
+			}
+			if field == "encap-if-index" && index+1 < len(fields) {
+				physicalIndex, _ = strconv.Atoi(fields[index+1])
+			}
+		}
+		if indexToName[sessionIndex] != "" && indexToName[physicalIndex] != "" {
+			physicalToSession[indexToName[physicalIndex]] = indexToName[sessionIndex]
+		}
+	}
+	for index := range links {
+		if session := physicalToSession["lyroute-"+links[index].interfaceID]; session != "" {
+			links[index].sessionInterface = session
+		}
+	}
+	return links
 }
 
 func indexVPPInterfaceTelemetry(items []map[string]any) map[string]vppTelemetryCounter {
@@ -482,6 +525,71 @@ func parseGatewayNATEISummaries(output string, observedAt time.Time, lanPrefixes
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].ConnectionCount > result[right].ConnectionCount })
 	return result
+}
+
+func parseVPPClock(output string) float64 {
+	fields := strings.Fields(output)
+	for index := range fields {
+		if index > 0 && fields[index-1] == "now" {
+			value, err := strconv.ParseFloat(strings.TrimSuffix(fields[index], ","), 64)
+			if err == nil {
+				return value
+			}
+		}
+	}
+	return 0
+}
+
+func parseGatewayNATEIActiveSessions(output string, clock float64, observedAt time.Time, lanPrefixes []netip.Prefix) []httpapi.GatewayConnection {
+	items := []httpapi.GatewayConnection{}
+	current := httpapi.GatewayConnection{}
+	lastHeard := float64(-1)
+	flush := func() {
+		age := clock - lastHeard
+		if current.SourceIP != "" && lastHeard >= 0 && age >= 0 && age <= gatewayActiveSessionSeconds && gatewayLANAddress(current.SourceIP, lanPrefixes) {
+			current.AgeSeconds = age
+			current.ObservedAt = observedAt
+			current.ConnectionCount = 1
+			current.SessionKind = "full_cone_mapping"
+			items = append(items, current)
+		}
+		current = httpapi.GatewayConnection{}
+		lastHeard = -1
+	}
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		fields := strings.Fields(line)
+		if len(fields) >= 8 && fields[0] == "i2o" && fields[2] == "proto" && fields[4] == "port" {
+			flush()
+			current.SourceIP = fields[1]
+			current.Protocol = strings.ToLower(fields[3])
+			current.SourcePort, _ = strconv.Atoi(fields[5])
+			continue
+		}
+		if current.SourceIP == "" {
+			continue
+		}
+		if len(fields) >= 8 && fields[0] == "o2i" && fields[2] == "proto" && fields[4] == "port" {
+			current.TranslatedIP = fields[1]
+			current.TranslatedPort, _ = strconv.Atoi(fields[5])
+			continue
+		}
+		if strings.HasPrefix(line, "last heard ") {
+			lastHeard, _ = strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, "last heard ")), 64)
+			continue
+		}
+		if len(fields) == 6 && fields[0] == "total" && fields[1] == "pkts" && fields[3] == "total" && fields[4] == "bytes" {
+			current.Bytes, _ = strconv.ParseInt(fields[5], 10, 64)
+		}
+	}
+	flush()
+	sort.Slice(items, func(left, right int) bool {
+		if items[left].SourceIP != items[right].SourceIP {
+			return items[left].SourceIP < items[right].SourceIP
+		}
+		return items[left].SourcePort < items[right].SourcePort
+	})
+	return items
 }
 
 func gatewayLANAddress(value string, prefixes []netip.Prefix) bool {

@@ -49,7 +49,7 @@ func TestRenderGatewayNftablesCaptureInterceptsTCPAndUDPDNSOnlyOnExplicitLAN(t *
 		"add table inet ly_route_dns_capture",
 		"flush table inet ly_route_dns_capture",
 		"table inet ly_route_dns_capture",
-		"type nat hook prerouting priority -100",
+		"type nat hook prerouting priority -200",
 		`iifname "lan0" udp dport 53 counter redirect to :53`,
 		`iifname "lan0" tcp dport 53 counter redirect to :53`,
 		`iifname "lan1" udp dport 53 counter redirect to :53`,
@@ -66,9 +66,54 @@ func TestRenderGatewayNftablesCaptureInterceptsTCPAndUDPDNSOnlyOnExplicitLAN(t *
 	}
 }
 
+func TestRenderGatewayNftablesCapturePlacesDNSBeforeTProxy(t *testing.T) {
+	plan := proxy.NftablesCapturePlan{
+		Family: "inet",
+		Table:  "ly_route_proxy_capture",
+		Chains: []proxy.NftablesChain{{Name: "proxy_prerouting", Type: "filter", Hook: "prerouting", Priority: -150, Policy: "accept"}},
+		Rules: []proxy.NftablesRule{
+			{Chain: "proxy_prerouting", Expression: "meta l4proto tcp", Action: "tproxy to :25656 accept"},
+			{Chain: "proxy_prerouting", Expression: "meta l4proto udp", Action: "tproxy to :25656 accept"},
+		},
+	}
+	artifacts, err := RenderGatewayNftablesCapture(plan, DNSInterceptionPlan{LANInterfaces: []string{"lan0"}, ListenPort: 53})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := artifacts[0].Content
+	dnsPosition := strings.Index(content, `iifname "lan0" udp dport 53`)
+	proxyPosition := strings.Index(content, "meta l4proto tcp tproxy")
+	if dnsPosition < 0 || proxyPosition < 0 || dnsPosition >= proxyPosition {
+		t.Fatalf("DNS capture is not before TProxy:\n%s", content)
+	}
+	if _, _, _, err := expectedNftablesRules(content); err != nil {
+		t.Fatalf("combined nftables plan is not readable: %v", err)
+	}
+}
+
 func TestRenderGatewayNftablesCaptureRejectsUnsafeLANInterface(t *testing.T) {
 	if _, err := RenderGatewayNftablesCapture(proxy.NftablesCapturePlan{}, DNSInterceptionPlan{LANInterfaces: []string{"lan0; flush ruleset"}}); err == nil {
 		t.Fatal("unsafe LAN interface was accepted")
+	}
+}
+
+func TestRenderGatewayNftablesCaptureDropsOnlyLinuxLCPDNSCopies(t *testing.T) {
+	artifacts, err := RenderGatewayNftablesCapture(proxy.NftablesCapturePlan{}, DNSInterceptionPlan{LCPGuardAddresses: []string{"192.168.50.1", "2001:db8:50::1", "192.168.50.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("LCP guard artifacts = %d", len(artifacts))
+	}
+	for _, required := range []string{
+		"type filter hook input priority -300; policy accept;",
+		"ip daddr 192.168.50.1 udp dport 53 counter drop",
+		"ip daddr 192.168.50.1 tcp dport 53 counter drop",
+		"ip6 daddr 2001:db8:50::1 udp dport 53 counter drop",
+	} {
+		if !strings.Contains(artifacts[0].Content, required) {
+			t.Fatalf("LCP guard missing %q:\n%s", required, artifacts[0].Content)
+		}
 	}
 }
 
@@ -88,6 +133,22 @@ func TestExpectedNftablesRulesAllowsProxyOnlyCapture(t *testing.T) {
 	}
 }
 
+func TestExpectedNftablesRulesAllowsAdaptiveIPv4TProxyCapture(t *testing.T) {
+	content := `table inet ly_route_proxy_capture {
+  chain proxy_prerouting {
+    iifname "proxy-in" meta l4proto tcp jhash ip saddr . ip daddr . meta l4proto . tcp sport . tcp dport mod 100 seed 0x9e3779b9 == 0 meta mark set 0x101 tproxy ip to :20001 accept
+    iifname "proxy-in" meta l4proto udp jhash ip saddr . ip daddr . meta l4proto . udp sport . udp dport mod 100 seed 0x9e3779b9 == 0 meta mark set 0x101 tproxy ip to :20001 accept
+  }
+}`
+	family, table, rules, err := expectedNftablesRules(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if family != "inet" || table != "ly_route_proxy_capture" || len(rules) != 2 {
+		t.Fatalf("expected adaptive nftables rules = %s %s %#v", family, table, rules)
+	}
+}
+
 func TestExpectedNftablesRulesRejectsDNSAfterTProxy(t *testing.T) {
 	content := `table inet ly_route_proxy_capture {
   chain proxy_prerouting {
@@ -102,11 +163,67 @@ func TestExpectedNftablesRulesRejectsDNSAfterTProxy(t *testing.T) {
 	}
 }
 
+func TestExpectedNftablesRulesIgnoresPostTProxyLCPDNSGuard(t *testing.T) {
+	content := `table inet ly_route_proxy_capture {
+  chain dns_prerouting {
+    iifname "lan0" udp dport 53 redirect to :53
+    iifname "lan0" tcp dport 53 redirect to :53
+  }
+  chain proxy_prerouting {
+    meta l4proto tcp tproxy to :20001 accept
+    meta l4proto udp tproxy to :20001 accept
+  }
+  chain dns_lcp_guard {
+    ip daddr 192.168.50.1 udp dport 53 drop
+    ip daddr 192.168.50.1 tcp dport 53 drop
+  }
+}`
+	_, _, rules, err := expectedNftablesRules(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 4 {
+		t.Fatalf("capture rule count = %d, want 4", len(rules))
+	}
+}
+
 func TestNormalizedNftablesCanonicalizesPaddedMarks(t *testing.T) {
 	want := normalizedNftables(`meta mark set 0x100475 accept`)
 	got := normalizedNftables(`meta mark set 0x00100475 accept`)
 	if got != want {
 		t.Fatalf("normalized mark = %q, want %q", got, want)
+	}
+}
+
+func TestNormalizedNftablesCanonicalizesAdaptiveJHashReadback(t *testing.T) {
+	rendered := normalizedNftables(`iifname "proxy-in" meta l4proto tcp jhash ip saddr . ip daddr . meta l4proto . tcp sport . tcp dport mod 100 seed 0x9e3779b9 == 0 meta mark set 0x100468 tproxy ip to :25656 accept`)
+	live := normalizedNftables(`iifname "proxy-in" jhash ip saddr . ip daddr . meta l4proto . tcp sport . tcp dport mod 100 seed 0x9e3779b9 0 meta mark set 0x00100468 tproxy ip to :25656 accept`)
+	if rendered != live {
+		t.Fatalf("normalized adaptive rule = %q, want %q", live, rendered)
+	}
+}
+
+func TestNftablesRulePositionAcceptsEquivalentTProxyProtocolSelector(t *testing.T) {
+	rendered := `iifname "proxy-in" meta l4proto tcp meta mark set 0x100468 tproxy ip to :25657 accept`
+	live := `iifname "proxy-in" meta mark set 0x00100468 tproxy ip to :25657 accept`
+	if got := nftablesRulePosition(normalizedNftables(live), normalizedNftables(rendered), -1); got < 0 {
+		t.Fatal("equivalent TProxy rule was rejected")
+	}
+}
+
+func TestNftablesRulePositionAcceptsEquivalentCountedTProxyProtocolSelector(t *testing.T) {
+	rendered := `iifname "proxy-in" meta l4proto tcp counter meta mark set 0x100468 tproxy ip to :25657 accept`
+	live := `iifname "proxy-in" counter packets 0 bytes 0 meta mark set 0x00100468 tproxy ip to :25657 accept`
+	if got := nftablesRulePosition(normalizedNftables(live), normalizedNftables(rendered), -1); got < 0 {
+		t.Fatal("equivalent counted TProxy rule was rejected")
+	}
+}
+
+func TestNormalizedNftablesIgnoresLiveCounterValues(t *testing.T) {
+	rendered := normalizedNftables(`counter meta mark set 0x100468 tproxy ip to :25657 accept`)
+	live := normalizedNftables(`counter packets 17 bytes 2048 meta mark set 0x00100468 tproxy ip to :25657 accept`)
+	if rendered != live {
+		t.Fatalf("normalized counter rule = %q, want %q", live, rendered)
 	}
 }
 
@@ -810,6 +927,45 @@ func TestFilesystemControllerRemovesStaleSmartDNSArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(string(written), "address /-.current.example/203.0.113.10") {
 		t.Fatalf("active artifact = %q", string(written))
+	}
+}
+
+func TestFilesystemControllerSmartDNSRollbackRestoresRemovedDomainSet(t *testing.T) {
+	controller := FilesystemController{RootDir: t.TempDir()}
+	confDir := filepath.Join(controller.RootDir, "etc/smartdns/conf.d")
+	setDir := filepath.Join(controller.RootDir, "etc/smartdns/domain-sets")
+	for _, dir := range []string{confDir, setDir} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldSetPath := filepath.Join(setDir, "lyroute-set-old.list")
+	if err := os.WriteFile(filepath.Join(confDir, "ly-route-active.conf"), []byte("domain-set old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldSetPath, []byte("old.example\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	artifacts := []RenderedArtifact{
+		NewArtifact(SmartDNS, "/etc/smartdns/conf.d/ly-route-active.conf", "domain-set new\n", "restart"),
+		NewArtifact(SmartDNS, "/etc/smartdns/domain-sets/lyroute-set-new.list", "new.example\n", "restart"),
+	}
+	snapshots, err := controller.captureArtifacts(SmartDNS, artifacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.writeArtifacts(SmartDNS, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.restoreArtifacts(snapshots); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := os.ReadFile(oldSetPath)
+	if err != nil {
+		t.Fatalf("SmartDNS rollback did not restore the removed domain set: %v", err)
+	}
+	if got, want := string(restored), "old.example\n"; got != want {
+		t.Fatalf("restored domain set = %q, want %q", got, want)
 	}
 }
 

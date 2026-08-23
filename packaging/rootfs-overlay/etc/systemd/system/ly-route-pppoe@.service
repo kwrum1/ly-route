@@ -16,8 +16,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 # PPPoE instances publish separate status files beneath this shared directory.
-# Do not declare it as RuntimeDirectory: systemd otherwise lets one restarted
-# instance clean the directory while another WAN is still connected.
+# Preserve the shared runtime directory so mount namespacing also works after reboot.
+RuntimeDirectory=ly-route
+RuntimeDirectoryPreserve=yes
 ReadWritePaths=/run/ly-route
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW

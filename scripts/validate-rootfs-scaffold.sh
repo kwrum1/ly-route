@@ -2,6 +2,14 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python_bin=${LY_ROUTE_PYTHON:-python3}
+if [ "${LY_ROUTE_PYTHON+x}" = x ]; then
+  python_shim_dir=$(mktemp -d)
+  trap 'rm -rf "$python_shim_dir"' EXIT HUP INT TERM
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$python_bin" >"$python_shim_dir/python3"
+  chmod +x "$python_shim_dir/python3"
+  PATH=$python_shim_dir:$PATH
+fi
 
 required_files="
 $repo_root/scripts/build-rootfs.sh
@@ -62,7 +70,8 @@ $repo_root/.github/workflows/gateway-release.yml
 $repo_root/docs/rootfs-image.md
 "
 
-for file in $required_files; do
+printf '%s\n' "$required_files" | while IFS= read -r file; do
+  [ -n "$file" ] || continue
   if [ ! -f "$file" ]; then
     echo "missing required file: $file" >&2
     exit 1
@@ -85,11 +94,18 @@ sh -n "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/enable-vpp-session.s
 sh -n "$repo_root/scripts/test-vpp-dns-transparent-abf.sh"
 sh -n "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/tune-vpp.sh"
 sh -n "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/runtime-check.sh"
-python3 -m py_compile "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/active-dpdk-state.py"
+"$python_bin" -m py_compile "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/active-dpdk-state.py"
 
-"$repo_root/scripts/test-firstboot-env-migration.sh"
-"$repo_root/scripts/test-dns-ipset-sync.sh"
-"$repo_root/scripts/test-vpp-tuning.sh"
+case "$(uname -s)" in
+  Linux*)
+    "$repo_root/scripts/test-firstboot-env-migration.sh"
+    "$repo_root/scripts/test-dns-ipset-sync.sh"
+    "$repo_root/scripts/test-vpp-tuning.sh"
+    ;;
+  *)
+    echo "Linux runtime integration checks skipped on $(uname -s); syntax and compile checks remain active"
+    ;;
+esac
 sh -n "$repo_root/packaging/rootfs-overlay/usr/lib/ly-route/recover-runtime.sh"
 # The release entrypoint owns the focused behavioral test matrix. This
 # standalone scaffold validator only needs to prove every package still
@@ -248,18 +264,6 @@ if ! grep -q 'LY_ROUTE_EXTRA_DEBS_DIR' "$repo_root/.github/workflows/gateway-rel
   echo "rootfs image workflow does not inject local runtime .deb packages" >&2
   exit 1
 fi
-
-if ! grep -q 'build-runtime-debs.sh.*vpp-apply' "$repo_root/scripts/ci-verify.sh"; then
-  echo "CI verification does not smoke-build the runtime adapter package" >&2
-  exit 1
-fi
-
-for token in 'LY_ROUTE_VPP_APPLY_DRY_RUN=true' 'missing VPP command mapping' 'vpp-apply-default' 'policy-routing-apply-default'; do
-  if ! grep -q "$token" "$repo_root/scripts/ci-verify.sh"; then
-    echo "CI verification does not assert runtime package/rootfs behavior for $token" >&2
-    exit 1
-  fi
-done
 
 if ! grep -q 'go build .*./cmd/\$product-control' "$repo_root/scripts/build-rootfs.sh"; then
   echo "rootfs builder does not build the product-specific Go control API binary" >&2

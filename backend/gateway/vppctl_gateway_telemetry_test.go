@@ -45,6 +45,8 @@ func TestVPPCTLGatewayTelemetryUsesVPPLogicalCountersAndLANObservations(t *testi
 			return output, nil
 		case "[show ip neighbors]":
 			return "1.25 10.1.18.101 D 00:11:22:33:44:55 lyroute-ens192\n2.00 198.18.0.2 D 00:aa:bb:cc:dd:ee " + network.IngressVPPInterface + "\n", nil
+		case "[show pppoe session]":
+			return "[1] sw-if-index 5 client-ip 10.67.0.10 session-id 7 encap-if-index 2 decap-fib-index 0\n", nil
 		case "[show nat44 sessions]":
 			return `NAT44 ED sessions:
     i2o 10.1.18.101 proto TCP port 50123 fib 0
@@ -57,8 +59,10 @@ func TestVPPCTLGatewayTelemetryUsesVPPLogicalCountersAndLANObservations(t *testi
        external host 203.0.113.20:443
        total pkts 8, total bytes 4096
 `, nil
-		case "[show nat44 ei sessions]":
+		case "[show nat44 ei sessions detail]":
 			return "NAT44 sessions:\n-------- thread 0 vpp_main: 0 sessions --------\n", nil
+		case "[show clock]":
+			return "Time now 100.000000, Thu, 6 Aug 2026 08:00:00 GMT\n", nil
 		default:
 			return "", fmt.Errorf("unexpected VPP command %v", args)
 		}
@@ -103,6 +107,31 @@ func TestParseGatewayNATEISummariesReportsLANConnectionCounts(t *testing.T) {
 	items := parseGatewayNATEISummaries(output, now, []netip.Prefix{netip.MustParsePrefix("192.168.50.0/24")})
 	if len(items) != 1 || items[0].SourceIP != "192.168.50.100" || items[0].ConnectionCount != 3 || !items[0].ObservedAt.Equal(now) {
 		t.Fatalf("EI connection summaries = %#v", items)
+	}
+}
+
+func TestParseGatewayNATEIActiveSessionsKeepsOnlyLatestFiveSeconds(t *testing.T) {
+	now := time.Date(2026, 8, 23, 8, 0, 0, 0, time.UTC)
+	output := `NAT44 sessions:
+    i2o 192.168.50.10 proto tcp port 50000 fib 0
+       last heard 8.00
+       total pkts 4, total bytes 2048
+    i2o 192.168.50.10 proto udp port 53000 fib 0
+       last heard 2.50
+       total pkts 2, total bytes 256
+    i2o 198.19.1.2 proto tcp port 40000 fib 3
+       last heard 1.00
+       total pkts 2, total bytes 128
+`
+	items := parseGatewayNATEIActiveSessions(output, 10, now, []netip.Prefix{netip.MustParsePrefix("192.168.50.0/24")})
+	if len(items) != 1 || items[0].SourceIP != "192.168.50.10" || items[0].SourcePort != 50000 || items[0].Protocol != "tcp" || items[0].ConnectionCount != 1 {
+		t.Fatalf("active EI sessions = %#v", items)
+	}
+}
+
+func TestParseVPPClock(t *testing.T) {
+	if value := parseVPPClock("Time now 31250.952994, Sun, 23 Aug 2026 01:45:21 GMT"); value != 31250.952994 {
+		t.Fatalf("clock = %f", value)
 	}
 }
 

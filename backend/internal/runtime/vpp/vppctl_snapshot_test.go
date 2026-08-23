@@ -93,12 +93,42 @@ func TestParseFIBResultIgnoresMainTableFallbackAfterVPP2510WANPaths(t *testing.T
 			"  [@0]: dpo-load-balance: [proto:ip4 index:163 buckets:1 uRPF:199 to:[0:0]]\n" +
 			"    [0] [@0]: dpo-drop ip4\n",
 	}}
-	paths, err := parseFIBResult(results, tableID)
+	paths, err := parseWANGroupFIBResult(results, tableID)
 	if err != nil {
 		t.Fatalf("parseFIBResult() error = %v", err)
 	}
 	if len(paths) != 2 || paths[0].via != "0.0.0.0 pppoe_session9: mtu:9000 next:3 flags:[]" || paths[1].via != "0.0.0.0 pppoe_session8: mtu:9000 next:3 flags:[]" {
 		t.Fatalf("parseFIBResult() paths = %#v, want only the two configured PPPoE paths", paths)
+	}
+}
+
+func TestParseFIBResultPrefersExactDefaultOverInheritedWANGroupCoveringRoutes(t *testing.T) {
+	const tableID = 52922
+	results := []VPPCTLCommandResult{{
+		Command: fmt.Sprintf("show ip fib table %d", tableID),
+		Stdout: fmt.Sprintf(`ipv4-VRF:%d, fib_index:10, flow hash:[src dst sport dport proto]
+0.0.0.0/0
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:63 buckets:1]
+    [0] [@6]: ipv4 via 0.0.0.0 pppoe_session2: mtu:9000
+0.0.0.0/1
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:70 buckets:2]
+    [0] [@6]: ipv4 via 0.0.0.0 pppoe_session2: mtu:9000
+    [1] [@6]: ipv4 via 0.0.0.0 pppoe_session5: mtu:9000
+128.0.0.0/1
+  unicast-ip4-chain
+  [@0]: dpo-load-balance: [proto:ip4 index:71 buckets:2]
+    [0] [@6]: ipv4 via 0.0.0.0 pppoe_session2: mtu:9000
+    [1] [@6]: ipv4 via 0.0.0.0 pppoe_session5: mtu:9000
+`, tableID),
+	}}
+	paths, err := parseFIBResult(results, tableID)
+	if err != nil {
+		t.Fatalf("parseFIBResult() error = %v", err)
+	}
+	if len(paths) != 1 || !strings.Contains(paths[0].via, "pppoe_session2") {
+		t.Fatalf("parseFIBResult() paths = %#v, want exact default only", paths)
 	}
 }
 
@@ -127,7 +157,7 @@ func TestParseFIBResultAcceptsCoveringWANGroupDefaults(t *testing.T) {
     [0] [@0]: dpo-drop ip4
 `, tableID),
 	}}
-	paths, err := parseFIBResult(results, tableID)
+	paths, err := parseWANGroupFIBResult(results, tableID)
 	if err != nil {
 		t.Fatalf("parseFIBResult() error = %v", err)
 	}
@@ -318,6 +348,11 @@ func TestDecodeRoutesUsesABFReferencedACLWhenTaggedInventoryHasStaleDuplicate(t 
 }
 
 func TestDecodeRoutesReadsBackRadixPolicyWithoutACLOrABF(t *testing.T) {
+	statusDir := t.TempDir()
+	t.Setenv("LY_ROUTE_PPPOE_RUNTIME_STATUS_DIR", statusDir)
+	if err := os.WriteFile(filepath.Join(statusDir, "wan-primary.json"), []byte(`{"interface":"pppoe_session1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	route := trafficpolicy.RoutePolicy{
 		ID:       "route-split-geoip-cn",
 		Priority: 10,
@@ -327,7 +362,7 @@ func TestDecodeRoutesReadsBackRadixPolicyWithoutACLOrABF(t *testing.T) {
 			Destinations: []string{"1.0.1.0/24", "1.0.2.0/23"},
 			Protocols:    []string{"any"},
 		},
-		Path: &trafficpolicy.WANPath{VPPInterface: "pppoe_session1", NextHop: "10.67.0.1"},
+		Path: &trafficpolicy.WANPath{VPPInterface: "pppoe-runtime:wan-primary", NextHop: "10.67.0.1"},
 	}
 	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
 	tableID := stableID("route-table:"+route.ID, 50000, 49999)
@@ -352,6 +387,67 @@ func TestDecodeRoutesReadsBackRadixPolicyWithoutACLOrABF(t *testing.T) {
 	}
 	if !reflect.DeepEqual(readback.Policies, []trafficpolicy.RoutePolicy{route}) {
 		t.Fatalf("routes = %#v, want radix route", readback.Policies)
+	}
+}
+
+func TestDecodeRoutesReadsBackRadixPolicyThroughWANGroupTable(t *testing.T) {
+	group := trafficpolicy.WANGroup{
+		ID:      "dual-wan",
+		Mode:    trafficpolicy.WANGroupWeighted,
+		Members: []string{"wan-primary", "wan-backup"},
+		Weights: map[string]int{"wan-primary": 7, "wan-backup": 3},
+		Paths: map[string]trafficpolicy.WANPath{
+			"wan-primary": {VPPInterface: "pppoe_session1", NextHop: "10.67.0.1"},
+			"wan-backup":  {VPPInterface: "pppoe_session2", NextHop: "10.68.0.1"},
+		},
+	}
+	route := trafficpolicy.RoutePolicy{
+		ID:       "route-split-geoip-cn",
+		Priority: 10,
+		Action:   "route",
+		Egress:   group.ID,
+		Match: trafficpolicy.Match{
+			Sources:      []string{"0.0.0.0/0"},
+			Destinations: []string{"1.0.1.0/24", "1.0.2.0/23"},
+			Protocols:    []string{"any"},
+		},
+	}
+	policyID := stableID("route-abf:"+route.ID, 10000, 8999)
+	tableID := stableID("route-table:"+route.ID, 50000, 49999)
+	groupTableID := wanGroupTableID(group.ID)
+	request := SnapshotRequest{
+		LANVPPInterface:   "lyroute-ens34",
+		LocalDestinations: []string{"192.168.50.0/24"},
+		RoutePolicies:     []string{route.ID},
+		Candidates: SnapshotCandidates{
+			RoutePolicies: []trafficpolicy.RoutePolicy{route},
+			WANGroups:     []trafficpolicy.WANGroup{group},
+		},
+	}
+	readback, err := decodeVPPCTLRoutes(request, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: ""},
+		{Command: "show ly-route pre-nat-route", Stdout: fmt.Sprintf("enabled 1 interface lyroute-ens34 lan-prefix 192.168.50.0/24 rules 2 radix-nodes 3\nrule id %d priority 10 prefixes 2 table %d fib-index 12 skip-nat 0 bypass 0\n", policyID, tableID)},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: fmt.Sprintf("Invalid policy ID:%d\n", policyID)},
+		{Command: fmt.Sprintf("show ip fib table %d", tableID), Stdout: fmt.Sprintf("ipv4-VRF:%d, fib_index:12, flow hash:[src dst sport dport proto]\n0.0.0.0/0\n  unicast-ip4-chain\n    [@0]: ipv4 via table %d\n", tableID, groupTableID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(readback.Policies, []trafficpolicy.RoutePolicy{route}) {
+		t.Fatalf("routes = %#v, want radix route through WAN-group table", readback.Policies)
+	}
+
+	readback, err = decodeVPPCTLRoutes(request, []VPPCTLCommandResult{
+		{Command: "show acl-plugin acl", Stdout: ""},
+		{Command: "show ly-route pre-nat-route", Stdout: fmt.Sprintf("enabled 1 interface lyroute-ens34 lan-prefix 192.168.50.0/24 rules 2 radix-nodes 3\nrule id %d priority 10 prefixes 2 table %d fib-index 12 skip-nat 0 bypass 0\n", policyID, tableID)},
+		{Command: fmt.Sprintf("show abf policy %d", policyID), Stdout: fmt.Sprintf("Invalid policy ID:%d\n", policyID)},
+		{Command: fmt.Sprintf("show ip fib table %d", tableID), Stdout: fmt.Sprintf("ipv4-VRF:%d, fib_index:12, flow hash:[src dst sport dport proto]\n0.0.0.0/0\n  unicast-ip4-chain\n    [@0]: dpo-load-balance: [proto:ip4 index:8 buckets:2]\n      path-list:[17] locks:1 flags:shared len:2\n        path:[21] pl-index:17 ip4 weight=7 pref=0\n          [@0]: ipv4 via 0.0.0.0 pppoe_session1: mtu:9000\n        path:[22] pl-index:17 ip4 weight=3 pref=0\n          [@1]: ipv4 via 0.0.0.0 pppoe_session2: mtu:9000\n", tableID)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(readback.Policies, []trafficpolicy.RoutePolicy{route}) {
+		t.Fatalf("routes = %#v, want radix route through resolved WAN-group members", readback.Policies)
 	}
 }
 

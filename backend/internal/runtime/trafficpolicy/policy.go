@@ -73,13 +73,15 @@ type SecurityACL struct {
 }
 
 type WANGroup struct {
-	ID            string             `json:"id"`
-	Mode          WANGroupMode       `json:"mode"`
-	Members       []string           `json:"members"`
-	PrimaryMember string             `json:"primary_member,omitempty"`
-	BackupMember  string             `json:"backup_member,omitempty"`
-	Weights       map[string]int     `json:"weights,omitempty"`
-	Paths         map[string]WANPath `json:"paths,omitempty"`
+	ID               string             `json:"id"`
+	Mode             WANGroupMode       `json:"mode"`
+	Members          []string           `json:"members"`
+	PrimaryMember    string             `json:"primary_member,omitempty"`
+	BackupMember     string             `json:"backup_member,omitempty"`
+	Weights          map[string]int     `json:"weights,omitempty"`
+	ConnectionLimits map[string]int     `json:"connection_limits,omitempty"`
+	DownlinkMbps     map[string]int     `json:"downlink_mbps,omitempty"`
+	Paths            map[string]WANPath `json:"paths,omitempty"`
 }
 
 type WANPath struct {
@@ -98,6 +100,8 @@ const (
 	WANGroupPrimaryBackup WANGroupMode = "primary_backup"
 	WANGroupWeighted      WANGroupMode = "weighted"
 	WANGroupFiveTuple     WANGroupMode = "five_tuple"
+	WANGroupLeastConn     WANGroupMode = "least_connections"
+	WANGroupIdleBandwidth WANGroupMode = "max_idle_bandwidth"
 )
 
 type objectGroup struct {
@@ -205,6 +209,10 @@ func CompileWANGroupsWithBindings(items []map[string]any, bindings map[string]WA
 				}
 			}
 		}
+		connectionLimits, downlinkMbps, err := wanGroupModeMetrics(item, mode, members)
+		if err != nil {
+			return nil, fmt.Errorf("wan_group %q: %w", id, err)
+		}
 		paths := make(map[string]WANPath, len(members))
 		for _, member := range members {
 			path := WANPath{VPPInterface: member}
@@ -231,13 +239,15 @@ func CompileWANGroupsWithBindings(items []map[string]any, bindings map[string]WA
 			paths[member] = path
 		}
 		groups = append(groups, WANGroup{
-			ID:            id,
-			Mode:          mode,
-			Members:       members,
-			PrimaryMember: primaryMember,
-			BackupMember:  backupMember,
-			Weights:       weights,
-			Paths:         paths,
+			ID:               id,
+			Mode:             mode,
+			Members:          members,
+			PrimaryMember:    primaryMember,
+			BackupMember:     backupMember,
+			Weights:          weights,
+			ConnectionLimits: connectionLimits,
+			DownlinkMbps:     downlinkMbps,
+			Paths:            paths,
 		})
 	}
 	return groups, nil
@@ -293,9 +303,54 @@ func wanGroupMode(item map[string]any) (WANGroupMode, error) {
 		return WANGroupPrimaryBackup, nil
 	case "five_tuple", "five_tuple_load", "per_connection", "ecmp":
 		return WANGroupFiveTuple, nil
+	case "least_connections", "least_connection", "min_connections":
+		return WANGroupLeastConn, nil
+	case "max_idle_bandwidth", "idle_bandwidth", "maximum_idle_bandwidth":
+		return WANGroupIdleBandwidth, nil
 	default:
 		return "", fmt.Errorf("unsupported mode %q", raw)
 	}
+}
+
+func wanGroupModeMetrics(item map[string]any, mode WANGroupMode, members []string) (map[string]int, map[string]int, error) {
+	connectionLimits := wanGroupMetricMap(item, "connection_limits", "member_connections", "connection_count")
+	downlinkMbps := wanGroupMetricMap(item, "downlink_mbps", "member_downlink_mbps", "download_mbps")
+	if mode == WANGroupLeastConn {
+		if err := requireWANGroupMetrics(connectionLimits, members, "connection_limits"); err != nil {
+			return nil, nil, err
+		}
+	}
+	if mode == WANGroupIdleBandwidth {
+		if err := requireWANGroupMetrics(downlinkMbps, members, "downlink_mbps"); err != nil {
+			return nil, nil, err
+		}
+	}
+	return connectionLimits, downlinkMbps, nil
+}
+
+func wanGroupMetricMap(item map[string]any, keys ...string) map[string]int {
+	result := map[string]int{}
+	for _, key := range keys {
+		object, ok := item[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		for id, value := range object {
+			if metric := numericWeight(value); metric > 0 {
+				result[id] = metric
+			}
+		}
+	}
+	return result
+}
+
+func requireWANGroupMetrics(metrics map[string]int, members []string, field string) error {
+	for _, member := range members {
+		if metrics[member] < 1 {
+			return fmt.Errorf("%s requires a positive value for member %q", field, member)
+		}
+	}
+	return nil
 }
 
 func wanGroupWeights(item map[string]any, members []string) (map[string]int, error) {

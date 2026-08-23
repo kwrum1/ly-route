@@ -33,7 +33,7 @@ func TestProgramVPPConfiguresAndRemovesNATInsideInterfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := string(content)
-	for _, want := range []string{"ip route del 0.0.0.0/0 via 10.0.0.1 pppoe_session7", "ip route del 10.0.0.1/32 via 10.0.0.1 pppoe_session7", "create pppoe session client-ip 10.0.0.2 session-id 7 client-mac 00:01:02:03:04:05 encap-interface lyroute-wan0 decap-vrf-id 0 del", "ip route add 0.0.0.0/0 via 10.0.0.1 pppoe_session7", "set interface nat44 in pppoe_session7 output-feature", "nat44 add interface address pppoe_session7 del", "nat44 add address 10.0.0.2 tenant-vrf 0", "nat44 add address 10.0.0.2 del", "set interface nat44 in pppoe_session7 output-feature del"} {
+	for _, want := range []string{"ip route del 0.0.0.0/0 via 10.0.0.1 pppoe_session7", "ip route del 10.0.0.1/32 via 10.0.0.1 pppoe_session7", "create pppoe session client-ip 10.0.0.2 session-id 7 client-mac 00:01:02:03:04:05 encap-interface lyroute-wan0 decap-vrf-id 0 del", "ip route add 0.0.0.0/0 via 10.0.0.1 pppoe_session7", "set interface nat44 in pppoe_session7 output-feature", "nat44 add interface address pppoe_session7", "nat44 add interface address pppoe_session7 del", "set interface nat44 in pppoe_session7 output-feature del"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("VPP command log missing %q:\n%s", want, log)
 		}
@@ -41,10 +41,8 @@ func TestProgramVPPConfiguresAndRemovesNATInsideInterfaces(t *testing.T) {
 	if strings.Contains(log, "set interface nat44 in lyroute-lan0 out pppoe_session7\n") {
 		t.Fatalf("endpoint-dependent NAT was installed before multi-WAN route selection:\n%s", log)
 	}
-	outputFeature := strings.Index(log, "set interface nat44 in pppoe_session7 output-feature\n")
-	boundAddress := strings.Index(log, "nat44 add address 10.0.0.2 tenant-vrf 0\n")
-	if outputFeature < 0 || boundAddress < 0 || outputFeature > boundAddress {
-		t.Fatalf("NAT output interface must exist before its VRF-bound address is added:\n%s", log)
+	if strings.Contains(log, "nat44 add address 10.0.0.2") {
+		t.Fatalf("PPPoE output-feature must use the interface-bound address, not a global pool address:\n%s", log)
 	}
 }
 

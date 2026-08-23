@@ -25,9 +25,11 @@ if ((${#scopes[@]} == 0)); then
 fi
 
 manifest=$(mktemp)
-trap 'rm -f "$manifest"' EXIT
+files=$(mktemp)
+trap 'rm -f "$manifest" "$files"' EXIT
 count=0
 
+git -c "safe.directory=$repo_root" ls-files -z --cached --others --exclude-standard -- "${scopes[@]}" | LC_ALL=C sort -z >"$files"
 while IFS= read -r -d '' file; do
   count=$((count + 1))
   if [[ -L $file ]]; then
@@ -41,7 +43,7 @@ while IFS= read -r -d '' file; do
     kind=deleted
   fi
   printf '%s\0%s\0%s\0' "$kind" "$file" "$digest" >>"$manifest"
-done < <(git -c "safe.directory=$repo_root" ls-files -z --cached --others --exclude-standard -- "${scopes[@]}" | LC_ALL=C sort -z)
+done <"$files"
 
 if ((count == 0)); then
   printf 'no source files found in scopes: %s\n' "${scopes[*]}" >&2

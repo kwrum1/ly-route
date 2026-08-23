@@ -3,12 +3,58 @@ package vpp
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 )
+
+const defaultPPPoERuntimeStatusDir = "/run/ly-route/pppoe"
+
+type pppoeRuntimeStatus struct {
+	Interface string `json:"interface"`
+}
+
+func resolveRuntimePPPoECommand(command string) (string, error) {
+	fields := strings.Fields(command)
+	for index, field := range fields {
+		resolved, err := resolveRuntimePPPoEInterface(field)
+		if err != nil {
+			return "", err
+		}
+		fields[index] = resolved
+	}
+	return strings.Join(fields, " "), nil
+}
+
+func resolveRuntimePPPoEInterface(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "pppoe-runtime:") {
+		return value, nil
+	}
+	peerID := strings.TrimPrefix(value, "pppoe-runtime:")
+	if peerID == "" || strings.ContainsAny(peerID, "/\\ \t\r\n") {
+		return "", fmt.Errorf("invalid PPPoE runtime peer %q", peerID)
+	}
+	statusDir := strings.TrimSpace(os.Getenv("LY_ROUTE_PPPOE_RUNTIME_STATUS_DIR"))
+	if statusDir == "" {
+		statusDir = defaultPPPoERuntimeStatusDir
+	}
+	data, err := os.ReadFile(statusDir + "/" + peerID + ".json")
+	if err != nil {
+		return "", fmt.Errorf("read PPPoE runtime peer %q: %w", peerID, err)
+	}
+	var status pppoeRuntimeStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return "", fmt.Errorf("decode PPPoE runtime peer %q: %w", peerID, err)
+	}
+	if !strings.HasPrefix(status.Interface, "pppoe_session") {
+		return "", fmt.Errorf("PPPoE runtime peer %q has invalid interface %q", peerID, status.Interface)
+	}
+	return status.Interface, nil
+}
 
 func (channel vppctlChannel) doCommands(ctx context.Context, operation Operation) (Reply, error) {
 	results := make([]VPPCTLCommandResult, 0, len(operation.VPPCtlCommands))
@@ -33,6 +79,15 @@ func (channel vppctlChannel) doCommands(ctx context.Context, operation Operation
 		if lanInterface := strings.TrimSpace(os.Getenv("LY_ROUTE_LAN_INTERFACE")); lanInterface != "" {
 			command = strings.ReplaceAll(command, "$LY_ROUTE_LAN_INTERFACE", lanInterface)
 		}
+		resolvedCommand, resolveErr := resolveRuntimePPPoECommand(command)
+		if resolveErr != nil {
+			if ignoreFailure {
+				results = append(results, VPPCTLCommandResult{Command: logicalCommand, Stderr: resolveErr.Error(), Retval: 1})
+				continue
+			}
+			return Reply{Operation: operation.Name, Retval: 1, Payload: VPPCTLReplyPayload{CommandResults: results}}, resolveErr
+		}
+		command = resolvedCommand
 		if command == "" {
 			continue
 		}
@@ -126,6 +181,11 @@ func (channel vppctlChannel) doVPPRouteBatchChunk(ctx context.Context, commands 
 		if lanInterface := strings.TrimSpace(os.Getenv("LY_ROUTE_LAN_INTERFACE")); lanInterface != "" {
 			command = strings.ReplaceAll(command, "$LY_ROUTE_LAN_INTERFACE", lanInterface)
 		}
+		resolvedCommand, err := resolveRuntimePPPoECommand(command)
+		if err != nil {
+			return VPPCTLCommandResult{Command: label}, err
+		}
+		command = resolvedCommand
 		if _, err := file.WriteString(strings.TrimSpace(command) + "\n"); err != nil {
 			_ = file.Close()
 			return VPPCTLCommandResult{Command: label}, fmt.Errorf("write %s: %w", label, err)

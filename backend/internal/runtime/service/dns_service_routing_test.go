@@ -104,3 +104,33 @@ func TestRenderDNSServiceRoutingFullConeUsesOnlyEINATAndAddsReturnRoute(t *testi
 		t.Fatalf("full-cone DNS service routing must not enable NAT44-ED: %s", content)
 	}
 }
+
+func TestRenderDNSServiceRoutingResolvesDynamicPPPoEUnderlayAtExecution(t *testing.T) {
+	network, err := vpp.DNSServiceNetworkForUpstreamID("dns-dynamic", "wan-primary", []string{"9.9.9.9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vpp.BindDNSServiceNetwork(&network, "pppoe-runtime:wan-primary", 1492); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := RenderDNSServiceRouting(nat.BehaviorEndpointDependent, []vpp.DNSServiceNetwork{network})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := artifacts[0].Content
+	for _, required := range []string{
+		"resolve_underlay()",
+		"/run/ly-route/pppoe/",
+		"resolve_underlay pppoe-runtime:wan-primary",
+		"UNDERLAY_IF=$(resolve_underlay pppoe-runtime:wan-primary)",
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("dynamic PPPoE service routing is missing %q: %s", required, content)
+		}
+	}
+	whileIndex := strings.Index(content, "while :; do")
+	resolveIndex := strings.Index(content, "underlay_if=$(resolve_underlay \"$1\" 2>/dev/null || true)")
+	if whileIndex < 0 || resolveIndex < whileIndex {
+		t.Fatalf("readiness must re-resolve the runtime interface on every retry: %s", content)
+	}
+}

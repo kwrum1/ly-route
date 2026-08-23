@@ -3,10 +3,10 @@ package httpapi
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	"regexp"
+	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ly-route/backend/internal/runtime/proxy"
@@ -114,6 +114,8 @@ func (server *Server) compileProxySubscription(ctx context.Context, egress proxy
 			Enabled:   true,
 			NodeRefs:  stringSliceField(item, "node_refs"),
 			Selection: proxy.SelectionMode(strings.TrimSpace(stringField(item, "selection"))),
+			Strategy:  strings.TrimSpace(stringField(item, "strategy")),
+			TopN:      intField(item, "top_n"),
 		}
 		runtimeNodes := prepareProxyNodeTLS(ctx, proxyNodes, subscription.NodeRefs)
 		resolvedNodes := make([]proxy.Node, 0, len(runtimeNodes))
@@ -126,23 +128,31 @@ func (server *Server) compileProxySubscription(ctx context.Context, egress proxy
 		}
 		runtimeNodes = resolvedNodes
 		var probes []proxy.NodeProbe
-		if subscription.Selection == proxy.SelectionFastest {
+		if subscription.Selection == proxy.SelectionAdaptive || subscription.Strategy == proxy.AdaptiveSubscriptionStrategy {
 			probes = probeProxyNodes(ctx, runtimeNodes, subscription.NodeRefs)
 			if len(compiled.XrayRuntime.ConfigPayload.Inbounds) == 0 {
-				return "proxy runtime has no inbound for fastest-node routing"
+				return "proxy runtime has no inbound for adaptive-node routing"
 			}
-			outbounds, routing, observatory, compileErr := proxy.CompileFastestSubscriptionRuntime(subscription, runtimeNodes, probes, compiled.XrayRuntime.ConfigPayload.Inbounds[0].Tag)
+			runtime, compileErr := proxy.CompileAdaptiveSubscriptionLanes(subscription, runtimeNodes, probes, compiled.XrayRuntime.ListenPort)
 			if compileErr != nil {
 				return compileErr.Error()
 			}
-			compiled.XrayRuntime.ConfigPayload.Outbounds = outbounds
-			compiled.XrayRuntime.ConfigPayload.Routing = &routing
-			compiled.XrayRuntime.ConfigPayload.Observatory = &observatory
-			if apiErr := proxy.EnableXrayRoutingAPI(&compiled.XrayRuntime.ConfigPayload); apiErr != nil {
-				return apiErr.Error()
+			capture, captureErr := proxy.BuildAdaptiveCapturePlan(compiled.NftablesCapture, runtime.Lanes)
+			if captureErr != nil {
+				return captureErr.Error()
 			}
-			compiled.XrayRuntime.OutboundTag = routing.Balancers[0].Tag
+			compiled.NftablesCapture = capture
+			compiled.XrayRuntime.ConfigPayload.Inbounds = runtime.Inbounds
+			compiled.XrayRuntime.ConfigPayload.Outbounds = runtime.Outbounds
+			compiled.XrayRuntime.ConfigPayload.Routing = &runtime.Routing
+			compiled.XrayRuntime.ConfigPayload.Observatory = &runtime.Observatory
+			compiled.XrayRuntime.ConfigPayload.Metrics = runtime.Metrics
+			compiled.XrayRuntime.ConfigPayload.API = nil
+			compiled.XrayRuntime.OutboundTag = "subscription-" + subscription.ID + "-adaptive"
 			return ""
+		}
+		if subscription.Selection == proxy.SelectionFastest {
+			probes = probeProxyNodes(ctx, runtimeNodes, subscription.NodeRefs)
 		}
 		outbound, err := proxy.CompileSubscriptionWithSelection(subscription, runtimeNodes, probes)
 		if err != nil {
@@ -159,19 +169,18 @@ func prepareProxyNodeTLS(ctx context.Context, nodes []proxy.Node, selected []str
 	for _, id := range selected {
 		allowed[strings.TrimSpace(id)] = true
 	}
-	prepared := append([]proxy.Node(nil), nodes...)
-	for index, node := range prepared {
+	prepared := make([]proxy.Node, 0, len(nodes))
+	for _, node := range nodes {
 		if len(allowed) > 0 && !allowed[node.ID] {
 			continue
 		}
 		if candidate, err := proxy.PrepareNodeTLS(ctx, node); err == nil {
-			prepared[index] = candidate
+			node = candidate
 		}
+		prepared = append(prepared, node)
 	}
 	return prepared
 }
-
-var proxyPingRTT = regexp.MustCompile(`time[=<]([0-9]+(?:\.[0-9]+)?)\s*ms`)
 
 func probeProxyNodes(ctx context.Context, nodes []proxy.Node, selected []string) []proxy.NodeProbe {
 	allowed := make(map[string]bool, len(selected))
@@ -179,25 +188,32 @@ func probeProxyNodes(ctx context.Context, nodes []proxy.Node, selected []string)
 		allowed[strings.TrimSpace(id)] = true
 	}
 	probes := make([]proxy.NodeProbe, 0, len(nodes))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	for _, node := range nodes {
 		if len(allowed) > 0 && !allowed[node.ID] {
 			continue
 		}
-		probe := proxy.NodeProbe{NodeID: node.ID, ObservedAt: time.Now().UTC()}
-		commandCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		output, err := exec.CommandContext(commandCtx, "ping", "-n", "-c", "1", "-W", "1", node.Address).CombinedOutput()
-		cancel()
-		if err == nil {
-			match := proxyPingRTT.FindSubmatch(output)
-			if len(match) == 2 {
-				if milliseconds, parseErr := strconv.ParseFloat(string(match[1]), 64); parseErr == nil {
-					probe.Reachable = true
-					probe.RTT = time.Duration(milliseconds * float64(time.Millisecond))
-				}
+		node := node
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			probe := proxy.NodeProbe{NodeID: node.ID, ObservedAt: time.Now().UTC()}
+			address := net.JoinHostPort(node.Address, strconv.Itoa(node.Port))
+			dialer := net.Dialer{Timeout: 2 * time.Second}
+			started := time.Now()
+			conn, err := dialer.DialContext(ctx, "tcp", address)
+			if err == nil {
+				probe.Reachable = true
+				probe.RTT = time.Since(started)
+				_ = conn.Close()
 			}
-		}
-		probes = append(probes, probe)
+			mu.Lock()
+			probes = append(probes, probe)
+			mu.Unlock()
+		}()
 	}
+	wg.Wait()
 	return probes
 }
 

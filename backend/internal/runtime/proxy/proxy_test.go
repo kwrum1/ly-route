@@ -114,3 +114,25 @@ func TestServiceNetworkTapIDsFitVPPExplicitTapRange(t *testing.T) {
 		t.Fatalf("TAP peers share id %d", network.IngressTapID)
 	}
 }
+
+func TestRedactSubscriptionPreservesAdaptiveSelection(t *testing.T) {
+	subscription := Subscription{
+		ID:        "main",
+		URL:       "https://user:secret@example.test/subscription",
+		Enabled:   true,
+		Selection: SelectionMode("adaptive"),
+		Strategy:  AdaptiveSubscriptionStrategy,
+		TopN:      3,
+	}
+
+	redacted, err := RedactSubscription(subscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redacted.Selection != subscription.Selection || redacted.Strategy != subscription.Strategy || redacted.TopN != subscription.TopN {
+		t.Fatalf("adaptive selection lost during redaction: %#v", redacted)
+	}
+	if strings.Contains(redacted.URL, "secret") {
+		t.Fatalf("subscription credential leaked: %q", redacted.URL)
+	}
+}

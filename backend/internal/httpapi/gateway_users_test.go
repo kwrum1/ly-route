@@ -37,15 +37,16 @@ func TestGatewayCollectorsBackTopConnectionsAndDHCPNeighborOnlineUsers(t *testin
 	domains := api.telemetryData(t, "/api/v1/telemetry/top-domains")
 
 	connectionItems := mapItems(t, connections["items"])
-	if len(connectionItems) != 1 || connectionItems[0]["src_ip"] != "192.168.88.10" || connectionItems[0]["source_ip"] != "192.168.88.10" || connectionItems[0]["destination_ip"] != "8.8.8.8" || connectionItems[0]["bytes"] != float64(4096) {
-		t.Fatalf("top connections = %#v, want live gateway session", connectionItems)
+	if len(connectionItems) != 1 || connectionItems[0]["src_ip"] != "192.168.88.10" || connectionItems[0]["source_ip"] != "192.168.88.10" || connectionItems[0]["connection_count"] != float64(1) || connectionItems[0]["bytes"] != float64(4096) {
+		t.Fatalf("top connections = %#v, want five-second source aggregation", connectionItems)
 	}
 	userItems := mapItems(t, users["items"])
 	if len(userItems) != 1 || userItems[0]["hostname"] != "workstation" || userItems[0]["neighbor_state"] != "reachable" || userItems[0]["rx_bytes"] != float64(100_000) {
 		t.Fatalf("online users = %#v, want DHCP identity enriched by neighbor activity", userItems)
 	}
-	if domains["state"] != "unavailable" || domains["degraded"] != true || len(mapItems(t, domains["items"])) != 0 {
-		t.Fatalf("Gateway top domains = %#v, want unavailable until SmartDNS collector exists", domains)
+	domainItems := mapItems(t, domains["items"])
+	if domains["degraded"] != false || len(domainItems) != 1 || domainItems[0]["domain"] != "must-not-leak.example" {
+		t.Fatalf("Gateway top domains = %#v, want SmartDNS collector data", domains)
 	}
 }
 
@@ -89,23 +90,23 @@ func TestGatewayDashboardUsesLocalGatewayTelemetry(t *testing.T) {
 	}
 }
 
-func TestGatewayTopConnectionsPrunesHistoryBeyond24Hours(t *testing.T) {
+func TestGatewayTopConnectionsPrunesHistoryBeyondFiveSeconds(t *testing.T) {
 	start := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
 	now := start
 	collector := &scriptedGatewayTelemetry{snapshots: []GatewayTelemetrySnapshot{
 		{ObservedAt: start, Connections: []GatewayConnection{{SourceIP: "192.168.88.10", DestinationIP: "8.8.8.8", Protocol: "udp", Bytes: 100}}},
-		{ObservedAt: start.Add(25 * time.Hour), Connections: []GatewayConnection{{SourceIP: "192.168.88.10", DestinationIP: "1.1.1.1", Protocol: "tcp", Bytes: 200}}},
+		{ObservedAt: start.Add(6 * time.Second), Connections: []GatewayConnection{{SourceIP: "192.168.88.10", DestinationIP: "1.1.1.1", Protocol: "tcp", Bytes: 200}}},
 	}}
 	server := New(WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(func() time.Time { return now }), WithGatewayTelemetry(collector))
 	api := authenticatedHTTPClient(t, server)
 
 	api.telemetryData(t, "/api/v1/telemetry/top-sessions")
-	now = start.Add(25 * time.Hour)
+	now = start.Add(6 * time.Second)
 	result := api.telemetryData(t, "/api/v1/telemetry/top-sessions")
 
 	items := mapItems(t, result["items"])
-	if len(items) != 1 || items[0]["dst_ip"] != "1.1.1.1" {
-		t.Fatalf("retained Top Connections = %#v, want only latest 24-hour item", items)
+	if len(items) != 1 || items[0]["src_ip"] != "192.168.88.10" || items[0]["bytes"] != float64(200) {
+		t.Fatalf("retained Top Connections = %#v, want only sessions observed in the latest five seconds", items)
 	}
 }
 

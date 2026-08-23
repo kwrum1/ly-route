@@ -12,7 +12,7 @@ import (
 func (server *Server) gatewayDashboardCounters() (int, float64) {
 	server.runtimeMu.Lock()
 	defer server.runtimeMu.Unlock()
-	cutoff := server.now().UTC().Add(-gatewayTelemetryRetention)
+	cutoff := server.now().UTC().Add(-gatewayConnectionRetention)
 	connections := map[string]struct{}{}
 	for _, connection := range server.gatewayState.connections {
 		if connection.ObservedAt.Before(cutoff) {
@@ -42,23 +42,28 @@ func (server *Server) gatewayTopConnections(ctx context.Context) ([]map[string]a
 	server.runtimeMu.Lock()
 	defer server.runtimeMu.Unlock()
 	state, reason := server.gatewayCollectionState(err)
-	latest := map[string]GatewayConnection{}
-	cutoff := server.now().UTC().Add(-gatewayTelemetryRetention)
+	bySource := map[string]GatewayConnection{}
+	cutoff := server.now().UTC().Add(-gatewayConnectionRetention)
 	for _, connection := range server.gatewayState.connections {
 		if connection.ObservedAt.Before(cutoff) {
 			continue
 		}
-		key := fmt.Sprintf("%s|%s|%s|%d|%d", connection.SourceIP, connection.DestinationIP, connection.Protocol, connection.SourcePort, connection.DestinationPort)
-		current, exists := latest[key]
-		if !exists || connection.ObservedAt.After(current.ObservedAt) || connection.Bytes > current.Bytes {
-			latest[key] = connection
+		current := bySource[connection.SourceIP]
+		current.SourceIP = connection.SourceIP
+		current.ConnectionCount += maxInt(connection.ConnectionCount, 1)
+		current.Bytes += connection.Bytes
+		if connection.ObservedAt.After(current.ObservedAt) {
+			current.ObservedAt = connection.ObservedAt
 		}
+		bySource[connection.SourceIP] = current
 	}
-	connections := make([]GatewayConnection, 0, len(latest))
-	for _, connection := range latest {
+	connections := make([]GatewayConnection, 0, len(bySource))
+	for _, connection := range bySource {
 		connections = append(connections, connection)
 	}
-	sort.SliceStable(connections, func(left, right int) bool { return connections[left].Bytes > connections[right].Bytes })
+	sort.SliceStable(connections, func(left, right int) bool {
+		return connections[left].ConnectionCount > connections[right].ConnectionCount
+	})
 	items := make([]map[string]any, 0, len(connections))
 	for _, connection := range connections {
 		connectionCount := connection.ConnectionCount
@@ -74,6 +79,33 @@ func (server *Server) gatewayTopConnections(ctx context.Context) ([]map[string]a
 		})
 	}
 	return items, state, reason
+}
+
+func (server *Server) gatewayActiveSessions(ctx context.Context) ([]map[string]any, string, string) {
+	err := server.collectGatewayTelemetry(ctx)
+	server.runtimeMu.Lock()
+	defer server.runtimeMu.Unlock()
+	state, reason := server.gatewayCollectionState(err)
+	cutoff := server.now().UTC().Add(-gatewayConnectionRetention)
+	items := make([]map[string]any, 0, len(server.gatewayState.connections))
+	for _, connection := range server.gatewayState.connections {
+		if connection.ObservedAt.Before(cutoff) || connection.ConnectionCount > 1 {
+			continue
+		}
+		items = append(items, map[string]any{
+			"src_ip": connection.SourceIP, "source_ip": connection.SourceIP, "dst_ip": connection.DestinationIP, "destination_ip": connection.DestinationIP,
+			"translated_ip": connection.TranslatedIP, "protocol": connection.Protocol, "src_port": connection.SourcePort, "dst_port": connection.DestinationPort,
+			"translated_port": connection.TranslatedPort, "bytes": connection.Bytes, "age_seconds": connection.AgeSeconds, "session_kind": connection.SessionKind, "observed_at": connection.ObservedAt,
+		})
+	}
+	return items, state, reason
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func (server *Server) gatewayNeighborSnapshot(ctx context.Context) ([]GatewayNeighbor, string, string) {
@@ -95,6 +127,7 @@ func (server *Server) gatewayCollectionState(collectionErr error) (string, strin
 }
 
 type onlineUserTelemetryInput struct {
+	now            time.Time
 	leases         []map[string]any
 	neighbors      []GatewayNeighbor
 	runtimeState   string
@@ -126,6 +159,10 @@ func normalizeOnlineUsersWithNeighbors(input onlineUserTelemetryInput) ([]map[st
 		matchedIPs[neighbor.IP] = struct{}{}
 		matchedMACs[neighbor.MAC] = struct{}{}
 		user["last_traffic_time"] = neighbor.LastSeen.Format(time.RFC3339)
+		if !neighbor.FirstSeen.IsZero() {
+			user["online_since"] = neighbor.FirstSeen.Format(time.RFC3339)
+			user["online_duration_seconds"] = int64(input.now.Sub(neighbor.FirstSeen).Seconds())
+		}
 		user["rx_bytes"] = neighbor.DownloadBytes
 		user["tx_bytes"] = neighbor.UploadBytes
 		user["neighbor_state"] = "reachable"
@@ -148,6 +185,7 @@ func normalizeOnlineUsersWithNeighbors(input onlineUserTelemetryInput) ([]map[st
 		users = append(users, map[string]any{
 			"ip": neighbor.IP, "ip_address": neighbor.IP, "mac": neighbor.MAC,
 			"online_status": "online", "last_traffic_time": neighbor.LastSeen.Format(time.RFC3339),
+			"online_since": neighbor.FirstSeen.Format(time.RFC3339), "online_duration_seconds": int64(input.now.Sub(neighbor.FirstSeen).Seconds()),
 			"rx_bps": 0, "tx_bps": 0, "rx_bytes": neighbor.DownloadBytes, "tx_bytes": neighbor.UploadBytes,
 			"neighbor_state": neighborState, "traffic_activity_state": input.neighborState,
 			"runtime_state": input.runtimeState,

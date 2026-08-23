@@ -101,6 +101,43 @@ func DNSServiceNetworkForUpstreamID(upstreamID, wanEgressID string, servers []st
 	}, nil
 }
 
+// AllocateDNSServiceTapIDs resolves hash collisions inside VPP's bounded TAP
+// instance range. Allocation order is derived from stable upstream identity so
+// the result does not depend on storage or API iteration order.
+func AllocateDNSServiceTapIDs(networks []DNSServiceNetwork) error {
+	indices := make([]int, len(networks))
+	for index := range networks {
+		indices[index] = index
+	}
+	slices.SortFunc(indices, func(left, right int) int {
+		leftKey := fmt.Sprintf("%04d\x00%s\x00%s\x00%s", networks[left].TapID, networks[left].VPPInterface, networks[left].UpstreamID, networks[left].WANEgressID)
+		rightKey := fmt.Sprintf("%04d\x00%s\x00%s\x00%s", networks[right].TapID, networks[right].VPPInterface, networks[right].UpstreamID, networks[right].WANEgressID)
+		return strings.Compare(leftKey, rightKey)
+	})
+
+	used := make(map[int]struct{}, len(networks))
+	for _, index := range indices {
+		start := networks[index].TapID
+		if start < dnsServiceTapIDBase || start >= dnsServiceTapIDBase+dnsServiceTapIDSpan {
+			return fmt.Errorf("DNS upstream %q has TAP id %d outside the DNS service range", networks[index].UpstreamID, start)
+		}
+		for probe := 0; probe < dnsServiceTapIDSpan; probe++ {
+			candidate := dnsServiceTapIDBase + (start-dnsServiceTapIDBase+probe)%dnsServiceTapIDSpan
+			if _, exists := used[candidate]; exists {
+				continue
+			}
+			networks[index].TapID = candidate
+			used[candidate] = struct{}{}
+			start = 0
+			break
+		}
+		if start != 0 {
+			return fmt.Errorf("DNS service TAP range is exhausted")
+		}
+	}
+	return nil
+}
+
 // BindDNSServiceNetwork adds the resolved VPP route after WAN selection has
 // compiled. It intentionally accepts only one VPP underlay expression.
 func BindDNSServiceNetwork(network *DNSServiceNetwork, underlayRoute string, mtu ...int) error {

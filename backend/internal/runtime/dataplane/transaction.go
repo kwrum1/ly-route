@@ -52,6 +52,10 @@ type ActiveStateStore interface {
 	ClearActiveState(context.Context) error
 }
 
+type KeaRebinder interface {
+	RebindKea(context.Context) error
+}
+
 // Host owns privileged Linux/VPP operations. Its implementation must make
 // ConfigureDPDK atomic and Restore idempotent so recovery is safe to repeat.
 type Host interface {
@@ -71,6 +75,14 @@ type Transaction struct {
 	active      map[string]Snapshot
 	current     *vpp.NativePath
 	initialized bool
+}
+
+func (transaction *Transaction) RebindKea(ctx context.Context) error {
+	rebinder, ok := transaction.Host.(KeaRebinder)
+	if !ok {
+		return nil
+	}
+	return rebinder.RebindKea(ctx)
 }
 
 func (transaction *Transaction) Apply(ctx context.Context, request Request) (Receipt, error) {

@@ -109,8 +109,16 @@ func parseObservedServiceChainABFPolicy(output string) (observedServiceChainABFP
 	}
 	observed := observedServiceChainABFPolicy{ID: policyID, ACLID: aclID}
 	paths := 0
+	localPolicy := false
 	for _, line := range lines[1:] {
 		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "no" && fields[1] == "forwarding" {
+			localPolicy = true
+			observed.AddressFamily = "ip4"
+			observed.NextHop = "local"
+			observed.ServiceInterface = ""
+			continue
+		}
 		// VPP renders a receive/local path on the `path:` line itself:
 		// `path:[N] ... ip4 ... receive:`.  There is no `via` line to
 		// parse in this form.
@@ -143,6 +151,9 @@ func parseObservedServiceChainABFPolicy(output string) (observedServiceChainABFP
 		observed.AddressFamily = family
 		observed.NextHop = nextHop.String()
 		observed.ServiceInterface = strings.TrimRight(fields[4], ",:")
+	}
+	if paths == 0 && localPolicy {
+		return observed, nil
 	}
 	if paths != 1 {
 		return observedServiceChainABFPolicy{}, serviceChainDecodeError("ABF path count %d, want 1", paths)

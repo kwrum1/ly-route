@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	gatewayTelemetryRetention = 24 * time.Hour
-	gatewayTelemetryFreshness = 10 * time.Minute
+	gatewayTelemetryRetention  = 24 * time.Hour
+	gatewayTelemetryFreshness  = 10 * time.Minute
+	gatewayConnectionRetention = 5 * time.Second
 )
 
 type logicalEgressHistory struct {
@@ -20,23 +21,32 @@ type logicalEgressHistory struct {
 }
 
 type gatewayTelemetryState struct {
-	series         map[string]*logicalEgressHistory
-	connections    []GatewayConnection
-	neighbors      []GatewayNeighbor
-	lastSuccess    time.Time
-	lastError      string
-	nextCollection uint64
-	lastCompletion uint64
+	series            map[string]*logicalEgressHistory
+	connections       []GatewayConnection
+	neighbors         []GatewayNeighbor
+	neighborFirstSeen map[string]time.Time
+	lastSuccess       time.Time
+	lastError         string
+	nextCollection    uint64
+	lastCompletion    uint64
 }
 
 func newGatewayTelemetryState() *gatewayTelemetryState {
-	return &gatewayTelemetryState{series: map[string]*logicalEgressHistory{}}
+	return &gatewayTelemetryState{series: map[string]*logicalEgressHistory{}, neighborFirstSeen: map[string]time.Time{}}
 }
 
 func (server *Server) collectGatewayTelemetry(ctx context.Context) error {
 	if server.gatewayTelemetry == nil {
 		return fmt.Errorf("gateway telemetry collector is not configured")
 	}
+	server.gatewayCollectMu.Lock()
+	defer server.gatewayCollectMu.Unlock()
+	server.runtimeMu.Lock()
+	if !server.gatewayState.lastSuccess.IsZero() && server.now().UTC().Sub(server.gatewayState.lastSuccess) < time.Second {
+		server.runtimeMu.Unlock()
+		return nil
+	}
+	server.runtimeMu.Unlock()
 	server.runtimeMu.Lock()
 	server.gatewayState.nextCollection++
 	collection := server.gatewayState.nextCollection
@@ -122,12 +132,20 @@ func (state *gatewayTelemetryState) record(snapshot GatewayTelemetrySnapshot) {
 		}
 	}
 	trimLogicalEgressHistories(state.series)
-	for _, connection := range snapshot.Connections {
-		connection.ObservedAt = snapshot.ObservedAt
-		state.connections = append(state.connections, connection)
+	state.connections = append([]GatewayConnection(nil), snapshot.Connections...)
+	for index := range state.connections {
+		state.connections[index].ObservedAt = snapshot.ObservedAt
 	}
-	state.connections = retainedGatewayConnections(state.connections, cutoff)
 	state.neighbors = append([]GatewayNeighbor(nil), snapshot.Neighbors...)
+	for index := range state.neighbors {
+		key := state.neighbors[index].IP + "|" + state.neighbors[index].MAC
+		first, found := state.neighborFirstSeen[key]
+		if !found {
+			first = snapshot.ObservedAt
+			state.neighborFirstSeen[key] = first
+		}
+		state.neighbors[index].FirstSeen = first
+	}
 	state.lastSuccess = snapshot.ObservedAt
 	state.lastError = ""
 }
@@ -136,7 +154,7 @@ func (server *Server) gatewayTrafficTrend(query TrafficTrendQuery) TrafficTrendR
 	server.runtimeMu.Lock()
 	defer server.runtimeMu.Unlock()
 	now := server.now().UTC()
-	result := TrafficTrendResult{Window: query.Window, Points: query.Points, SamplingIntervalSeconds: 300, State: "unavailable", Degraded: true, Series: TrafficTrendSets{LogicalEgresses: []LogicalEgressSeries{}}}
+	result := TrafficTrendResult{Window: query.Window, Points: query.Points, SamplingIntervalSeconds: 5, State: "unavailable", Degraded: true, Series: TrafficTrendSets{LogicalEgresses: []LogicalEgressSeries{}}}
 	retentionCutoff := now.Add(-gatewayTelemetryRetention)
 	for id, history := range server.gatewayState.series {
 		history.samples = retainedLogicalEgressSamples(history.samples, retentionCutoff)

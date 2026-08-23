@@ -56,6 +56,10 @@ func TestBuildPreNATRoutePolicyCommandsUsesDataLANPrefix(t *testing.T) {
 	if !strings.Contains(joined, dhcpBypass) {
 		t.Fatalf("all DHCP client requests must bypass pre-NAT policy routing: %s", joined)
 	}
+	localBypass := "add id 64999 priority 1 source 192.168.50.0/24 destination 192.168.50.0/24 protocol any sport 0-65535 dport 0-65535 bypass"
+	if !strings.Contains(joined, localBypass) {
+		t.Fatalf("LAN-local traffic must bypass outbound policy routing: %s", joined)
+	}
 	if strings.Index(joined, dhcpBypass) > strings.Index(joined, "add id 101 priority") {
 		t.Fatalf("DHCP bypass must be installed before user route policies: %s", joined)
 	}
@@ -240,6 +244,8 @@ func TestPreNATRoutePolicyRefreshRecreatesPrivateFIBBeforeClassifier(t *testing.
 
 	wantOrder := []string{
 		"set ly-route pre-nat-route del id 10886",
+		"ip route del table 52110 0.0.0.0/1",
+		"ip route del table 52110 128.0.0.0/1",
 		"ip route del table 52110 0.0.0.0/0",
 		"ip table del 52110",
 		"ip table add 52110",

@@ -10,8 +10,9 @@ import (
 type SelectionMode string
 
 const (
-	SelectionFixed   SelectionMode = "fixed"
-	SelectionFastest SelectionMode = "fastest"
+	SelectionFixed    SelectionMode = "fixed"
+	SelectionFastest  SelectionMode = "fastest"
+	SelectionAdaptive SelectionMode = "adaptive"
 	// Fastest selection must use a fresh probe; stale health must never keep a dead node active.
 	ProbeMaxAge = 15 * time.Second
 )

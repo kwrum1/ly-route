@@ -746,14 +746,8 @@ func ProgramVPP(ctx context.Context, config VPPConfig, session Session) (VPPSess
 			// output feature gives NAT44-ED the selected PPPoE sw_if_index so it
 			// can allocate the address that belongs to that exact WAN.
 			commands = append(commands, []string{"set", "interface", "nat44", "in", interfaceName, "output-feature"})
-			// `nat44 add interface address` creates a VRF-independent pool entry.
-			// VPP cannot bind such an entry to a particular output interface, so
-			// two PPPoE WANs may translate with the other WAN's address. Register
-			// the negotiated address in VRF 0 instead; VPP then records the
-			// address/interface binding used by output-feature allocation.
 			_, _ = runVPP(ctx, config.Binary, "nat44", "add", "interface", "address", interfaceName, "del")
-			_, _ = runVPP(ctx, config.Binary, "nat44", "add", "address", session.LocalAddress, "del")
-			commands = append(commands, []string{"nat44", "add", "address", session.LocalAddress, "tenant-vrf", "0"})
+			commands = append(commands, []string{"nat44", "add", "interface", "address", interfaceName})
 		}
 	}
 	for _, command := range commands {
@@ -764,9 +758,6 @@ func ProgramVPP(ctx context.Context, config VPPConfig, session Session) (VPPSess
 	if config.IPv6PrefixGroup != "" && len(config.IPv6LANInterfaces) > 0 {
 		if !session.IPv6Ready {
 			return VPPSession{}, errors.New("IPv6 prefix delegation requires an active IPv6CP session")
-		}
-		if _, err := netip.ParsePrefix(session.DelegatedPrefix); err != nil {
-			return VPPSession{}, fmt.Errorf("invalid delegated prefix %q: %w", session.DelegatedPrefix, err)
 		}
 		if err := ensureIPv6Interface(ctx, config.Binary, interfaceName); err != nil {
 			return VPPSession{}, err
@@ -783,8 +774,13 @@ func ProgramVPP(ctx context.Context, config VPPConfig, session Session) (VPPSess
 		// The native Ly Route PPPoE client obtains the prefix over its dedicated
 		// control path, then VPP owns routing and LAN router advertisements.
 		_, _ = runVPP(ctx, config.Binary, "dhcp6", "pd", "client", interfaceName, "disable")
-		if err := configureDelegatedPrefix(ctx, config, session.DelegatedPrefix); err != nil {
-			return VPPSession{}, err
+		if strings.TrimSpace(session.DelegatedPrefix) != "" {
+			if _, err := netip.ParsePrefix(session.DelegatedPrefix); err != nil {
+				return VPPSession{}, fmt.Errorf("invalid delegated prefix %q: %w", session.DelegatedPrefix, err)
+			}
+			if err := configureDelegatedPrefix(ctx, config, session.DelegatedPrefix); err != nil {
+				return VPPSession{}, err
+			}
 		}
 	}
 	cleanup = false
@@ -942,9 +938,6 @@ func (session VPPSession) Remove(ctx context.Context) error {
 			_, _ = runVPP(ctx, binary, "nat44", "ei", "add", "interface", "address", session.Interface, "del")
 		} else {
 			_, _ = runVPP(ctx, binary, "nat44", "add", "interface", "address", session.Interface, "del")
-			if address := strings.TrimSpace(session.Session.LocalAddress); address != "" {
-				_, _ = runVPP(ctx, binary, "nat44", "add", "address", address, "del")
-			}
 		}
 	}
 	removeDelegatedPrefix(ctx, session.config, session.Session.DelegatedPrefix)

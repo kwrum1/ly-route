@@ -6,10 +6,17 @@ debs=${LY_ROUTE_VPP_DEV_DEBS_DIR:-$repo_root/runtime-downloads}
 out=${LY_ROUTE_VPP_PPPOE_CLIENT_BUILD_DIR:-$repo_root/build/vpp-pppoe-client}
 sysroot=${LY_ROUTE_VPP_PPPOE_CLIENT_SYSROOT:-$out/sysroot}
 
-vpp_dev=$(find "$debs" -maxdepth 1 -type f -name 'vpp-dev_*.deb' -print -quit)
-infra_dev=$(find "$debs" -maxdepth 1 -type f -name 'libvppinfra-dev_*.deb' -print -quit)
+required_version=${LY_ROUTE_VPP_VERSION:-25.10.0-release}
+vpp_dev=$(find "$debs" -maxdepth 1 -type f -name "vpp-dev_${required_version}_*.deb" -print -quit)
+infra_dev=$(find "$debs" -maxdepth 1 -type f -name "libvppinfra-dev_${required_version}_*.deb" -print -quit)
 [ -f "$vpp_dev" ] || { echo "missing VPP development package in $debs: vpp-dev" >&2; exit 1; }
 [ -f "$infra_dev" ] || { echo "missing VPP development package in $debs: libvppinfra-dev" >&2; exit 1; }
+vpp_version=$(dpkg-deb -f "$vpp_dev" Version)
+infra_version=$(dpkg-deb -f "$infra_dev" Version)
+[ "$vpp_version" = "$infra_version" ] || {
+  echo "VPP development package version mismatch: vpp-dev=$vpp_version libvppinfra-dev=$infra_version" >&2
+  exit 1
+}
 command -v cmake >/dev/null
 command -v dpkg-deb >/dev/null
 

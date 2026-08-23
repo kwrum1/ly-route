@@ -42,6 +42,48 @@ func TestDNSServiceNetworkUsesStableDedicatedVPPHandoff(t *testing.T) {
 	assertOperationCommand(t, operations, "vpp.dns-service.network", "set interface nat44 ei in "+network.VPPInterface+" out lyroute-wan0")
 }
 
+func TestAllocateDNSServiceTapIDsResolvesStableHashCollision(t *testing.T) {
+	first, err := DNSServiceNetworkForUpstreamID("dns-policy-e2e-gateway-dns-mt2u5hdk-upstream", "wan-ens33-ipv4", []string{"223.5.5.5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := DNSServiceNetworkForUpstreamID("dns-policy-foreign-dns-default-upstream", "wan-ens33-ipv4", []string{"1.1.1.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.TapID != second.TapID {
+		t.Fatalf("fixture does not collide: %d != %d", first.TapID, second.TapID)
+	}
+
+	networks := []DNSServiceNetwork{second, first}
+	if err := AllocateDNSServiceTapIDs(networks); err != nil {
+		t.Fatal(err)
+	}
+	if networks[0].TapID == networks[1].TapID {
+		t.Fatalf("allocated TAP ids still collide: %#v", networks)
+	}
+	if got, want := networks[0].TapID, dnsServiceTapIDBase+46; got != want {
+		t.Fatalf("first stable allocation = %d, want %d", got, want)
+	}
+	if got, want := networks[1].TapID, dnsServiceTapIDBase+47; got != want {
+		t.Fatalf("second stable allocation = %d, want %d", got, want)
+	}
+
+	reversed := []DNSServiceNetwork{first, second}
+	if err := AllocateDNSServiceTapIDs(reversed); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]int{}
+	for _, network := range networks {
+		byID[network.UpstreamID] = network.TapID
+	}
+	for _, network := range reversed {
+		if got, want := network.TapID, byID[network.UpstreamID]; got != want {
+			t.Fatalf("allocation for %q changed with input order: %d != %d", network.UpstreamID, got, want)
+		}
+	}
+}
+
 func TestDNSServiceNetworkRejectsNonIPResolver(t *testing.T) {
 	if _, err := DNSServiceNetworkForUpstreamID("dns-bad", "wan-primary", []string{"resolver.example"}); err == nil {
 		t.Fatal("expected non-IP resolver rejection")

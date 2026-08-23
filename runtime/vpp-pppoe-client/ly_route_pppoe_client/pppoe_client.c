@@ -3,9 +3,20 @@
 #include <vnet/feature/feature.h>
 #include <vnet/interface.h>
 #include <vnet/plugin/plugin.h>
-#include <vppinfra/bihash_8_8.h>
 #include <vpp/app/version.h>
-#include <dlfcn.h>
+
+#define LY_ROUTE_VLIB_CLI_COMMAND(x, ...)                                    \
+  __VA_ARGS__ vlib_cli_command_t x;                                          \
+  static void __ly_route_cli_registration_##x (void)                         \
+    __attribute__ ((__constructor__));                                       \
+  static void __ly_route_cli_registration_##x (void)                         \
+  {                                                                          \
+    vlib_global_main_t *vgm = vlib_get_global_main ();                       \
+    vlib_cli_main_t *cm = &vgm->cli_main;                                    \
+    x.next_cli_command = cm->cli_command_registrations;                      \
+    cm->cli_command_registrations = &x;                                      \
+  }                                                                          \
+  __VA_ARGS__ vlib_cli_command_t x
 
 typedef struct
 {
@@ -22,15 +33,6 @@ typedef struct
   vnet_main_t *vnet_main;
   ly_pppoe_client_binding_t *bindings;
 } ly_pppoe_client_main_t;
-
-/* VPP's PPPoE plugin keeps its learned AC-MAC to WAN association in this
- * leading portion of pppoe_main_t. Resolve it at runtime instead of linking
- * against the stock plugin so the Ly Route plugin remains load-order safe. */
-typedef struct
-{
-  void *sessions;
-  clib_bihash_8_8_t link_table;
-} ly_pppoe_stock_main_t;
 
 typedef enum
 {
@@ -55,32 +57,6 @@ static char *ly_pppoe_client_error_strings[] = {
 };
 
 static ly_pppoe_client_main_t ly_pppoe_client_main;
-static ly_pppoe_stock_main_t *ly_pppoe_stock_main;
-
-static_always_inline ly_pppoe_stock_main_t *
-ly_pppoe_stock_main_get (void)
-{
-  if (!ly_pppoe_stock_main)
-    ly_pppoe_stock_main = dlsym (RTLD_DEFAULT, "pppoe_main");
-  return ly_pppoe_stock_main;
-}
-
-static_always_inline void
-ly_pppoe_learn_wan (u8 *mac, u32 wan_sw_if_index)
-{
-  ly_pppoe_stock_main_t *stock = ly_pppoe_stock_main_get ();
-  if (!stock)
-    return;
-
-  u64 mac_word = 0;
-  clib_memcpy_fast (&mac_word, mac, 6);
-  clib_bihash_kv_8_8_t entry = {
-    .key = (mac_word << 16) & ~0xffffULL,
-    .value = ((u64) ~0U << 32) | wan_sw_if_index,
-  };
-  clib_bihash_add_del_8_8 (&stock->link_table, &entry, 1);
-}
-
 typedef struct
 {
   u8 discovery;
@@ -189,6 +165,14 @@ ly_pppoe_binding_for_interface (ly_pppoe_client_main_t *main,
   return 0;
 }
 
+static_always_inline int
+ly_pppoe_interface_is_valid (ly_pppoe_client_main_t *main, u32 sw_if_index)
+{
+  return sw_if_index != ~0 &&
+    !pool_is_free_index (main->vnet_main->interface_main.sw_interfaces,
+                         sw_if_index);
+}
+
 static_always_inline void
 ly_pppoe_forward_to_interface (vlib_buffer_t *buffer, u32 sw_if_index)
 {
@@ -241,11 +225,33 @@ VLIB_NODE_FN (ly_pppoe_client_node) (vlib_main_t *vm,
 
       if (from_control)
         {
+          if (!ly_pppoe_interface_is_valid (main, binding->wan_sw_if_index))
+            {
+              vlib_node_increment_counter (vm, node->node_index,
+                                           LY_PPPOE_CLIENT_ERROR_PASSED, 1);
+              continue;
+            }
           vnet_sw_interface_t *wan = vnet_get_sw_interface (
             main->vnet_main, binding->wan_sw_if_index);
           if (wan->type == VNET_SW_INTERFACE_TYPE_SUB)
-            wan =
-              vnet_get_sw_interface (main->vnet_main, wan->sup_sw_if_index);
+            {
+              if (!ly_pppoe_interface_is_valid (main, wan->sup_sw_if_index))
+                {
+                  vlib_node_increment_counter (
+                    vm, node->node_index, LY_PPPOE_CLIENT_ERROR_PASSED, 1);
+                  continue;
+                }
+              wan = vnet_get_sw_interface (main->vnet_main,
+                                           wan->sup_sw_if_index);
+            }
+          if (wan->hw_if_index == ~0 ||
+              pool_is_free_index (main->vnet_main->interface_main.hw_interfaces,
+                                  wan->hw_if_index))
+            {
+              vlib_node_increment_counter (vm, node->node_index,
+                                           LY_PPPOE_CLIENT_ERROR_PASSED, 1);
+              continue;
+            }
           vnet_hw_interface_t *hardware =
             vnet_get_hw_interface (main->vnet_main, wan->hw_if_index);
           ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
@@ -254,12 +260,6 @@ VLIB_NODE_FN (ly_pppoe_client_node) (vlib_main_t *vm,
         }
       else
         {
-          /* The stock PPPoE session creator resolves its egress interface
-           * from this learned AC MAC. Our per-WAN relay owns control frames,
-           * so it performs the same learning before VPP creates the session. */
-          ethernet_header_t *ethernet = vlib_buffer_get_current (buffer);
-          ly_pppoe_learn_wan (ethernet->src_address,
-                              binding->wan_sw_if_index);
           ly_pppoe_forward_to_interface (buffer,
                                          binding->control_sw_if_index);
         }
@@ -424,7 +424,7 @@ ly_pppoe_client_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
   return 0;
 }
 
-VLIB_CLI_COMMAND (ly_pppoe_client_set_command, static) = {
+LY_ROUTE_VLIB_CLI_COMMAND (ly_pppoe_client_set_command, static) = {
   .path = "set ly-route pppoe-client",
   .short_help = "set ly-route pppoe-client control-interface <interface> "
                 "wan-interface <interface> [disable] | disable",
@@ -442,8 +442,7 @@ ly_pppoe_client_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
     {
       vlib_cli_output (vm, "state enabled\nbindings %u",
                        vec_len (main->bindings));
-      vlib_cli_output (vm, "stock-pppoe-link-table %s",
-                       ly_pppoe_stock_main_get () ? "ready" : "unavailable");
+      vlib_cli_output (vm, "stock-pppoe-link-mode explicit-encap-interface");
       u32 index;
       vec_foreach_index (index, main->bindings)
         {
@@ -463,7 +462,7 @@ ly_pppoe_client_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
   return 0;
 }
 
-VLIB_CLI_COMMAND (ly_pppoe_client_show_command, static) = {
+LY_ROUTE_VLIB_CLI_COMMAND (ly_pppoe_client_show_command, static) = {
   .path = "show ly-route pppoe-client",
   .short_help = "show ly-route pppoe-client",
   .function = ly_pppoe_client_show_command_fn,

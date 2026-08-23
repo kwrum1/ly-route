@@ -56,7 +56,11 @@ func run() error {
 		httpapi.WithSmartQoSRuntime(productionSmartQoSObserver{transaction: dataplaneController}, true),
 	}
 	if envBool("LY_ROUTE_ENABLE_SERVICE_RUNTIME", false) {
-		options = append(options, httpapi.WithServiceRuntime(serviceRuntime.Runtime{Controller: serviceRuntime.FilesystemController{RootDir: env("LY_ROUTE_SERVICE_ROOT", ""), Runner: serviceRuntime.SystemctlRunner{}, XrayAPIAddress: env("LY_ROUTE_XRAY_API_ADDRESS", serviceRuntime.DefaultXrayRoutingAPIAddress)}}))
+		options = append(options, httpapi.WithServiceRuntime(serviceRuntime.Runtime{Controller: serviceRuntime.FilesystemController{
+			RootDir: env("LY_ROUTE_SERVICE_ROOT", ""), Runner: serviceRuntime.SystemctlRunner{},
+			XrayAPIAddress:     env("LY_ROUTE_XRAY_API_ADDRESS", serviceRuntime.DefaultXrayRoutingAPIAddress),
+			XrayMetricsAddress: env("LY_ROUTE_XRAY_METRICS_ADDRESS", serviceRuntime.DefaultXrayMetricsAddress),
+		}}))
 	}
 	if profile.AllowsService(product.ServiceKea) {
 		options = append(options, httpapi.WithDHCPLeases(serviceRuntime.KeaMemfileLeaseCollector{Path: env("LY_ROUTE_KEA_LEASE_FILE", serviceRuntime.DefaultKeaDHCP4LeaseFile)}))
@@ -66,6 +70,7 @@ func run() error {
 		options = append(options, httpapi.WithInterfaceTelemetry(vppctlInterfaceTelemetry{binary: vppctl}))
 	}
 	options = append(options, httpapi.WithPolicyHitTelemetry(newVPPCTLPolicyCounters(store, vppctl)))
+	options = append(options, httpapi.WithTopTelemetry(newSmartDNSAuditTelemetry(env("LY_ROUTE_SMARTDNS_AUDIT_FILE", "/var/log/smartdns/smartdns-audit.log"))))
 	options = append(options, httpapi.WithSecurityGuardRuntime(productionSecurityGuardObserver{binary: vppctl, now: time.Now}))
 	if endpoint := strings.TrimSpace(os.Getenv("LY_ROUTE_GATEWAY_TELEMETRY_URL")); endpoint != "" {
 		collector, collectorErr := newGatewayHTTPTelemetry(endpoint)
@@ -80,6 +85,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("initialize control API: %w", err)
 	}
+	server.StartAdaptiveProxyReconciler(context.Background(), 10*time.Second)
 	log.Printf("ly-route %s control API listening on %s database=%s config=%s", profile.ID(), addr, databasePath, configPath)
 	if err := httpapi.ListenAndServe(addr, server); err != nil {
 		return fmt.Errorf("serve control API: %w", err)

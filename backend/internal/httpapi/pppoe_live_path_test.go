@@ -39,3 +39,13 @@ func TestPPPRuntimePathTokenChangesAcrossReconnects(t *testing.T) {
 		t.Fatalf("PPPoE runtime tokens = %q, %q", firstToken, secondToken)
 	}
 }
+
+func TestVPPInterfaceHasAddressUsesInterfaceInventory(t *testing.T) {
+	output := "lyroute-ens33 (up):\n  L3 10.67.0.10/32\nlyroute-ens35 (up):\n  L3 10.68.0.10/32\n"
+	if !vppInterfaceHasAddress(output, "lyroute-ens35", "10.68.0.10") {
+		t.Fatal("expected negotiated address in the selected VPP interface section")
+	}
+	if vppInterfaceHasAddress(output, "lyroute-ens35", "10.67.0.10") {
+		t.Fatal("address from another interface must not satisfy the selected path")
+	}
+}

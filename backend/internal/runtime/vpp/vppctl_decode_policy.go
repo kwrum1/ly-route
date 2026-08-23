@@ -78,7 +78,11 @@ func decodeVPPCTLWANGroups(request SnapshotRequest, results []VPPCTLCommandResul
 	configuredPathLists, configuredPathListsErr := parseConfiguredFIBPathLists(results)
 	for _, id := range request.WANGroups {
 		candidate := candidates[strings.TrimSpace(id)]
-		paths, err := parseFIBResult(results, wanGroupTableID(candidate.ID))
+		observedCandidate, err := resolveRuntimePPPoEWANGroup(candidate)
+		if err != nil {
+			return WANGroupReadback{}, err
+		}
+		paths, err := parseWANGroupFIBResult(results, wanGroupTableID(candidate.ID))
 		if err != nil {
 			if request.AllowMissing && wanGroupFIBIsAbsent(results, candidate.ID) {
 				continue
@@ -94,7 +98,7 @@ func decodeVPPCTLWANGroups(request SnapshotRequest, results []VPPCTLCommandResul
 			}
 			return WANGroupReadback{}, snapshotDecodeError("WAN group %q active path count does not match candidate", candidate.ID)
 		}
-		if candidate.Mode != trafficpolicy.WANGroupPrimaryBackup && len(paths) != len(candidate.Members) {
+		if observedCandidate.Mode != trafficpolicy.WANGroupPrimaryBackup && len(paths) != len(observedCandidate.Members) {
 			if request.AllowMissing {
 				continue
 			}
@@ -105,8 +109,8 @@ func decodeVPPCTLWANGroups(request SnapshotRequest, results []VPPCTLCommandResul
 			live = append(live, path)
 		}
 		activeMatches := 0
-		for _, member := range candidate.Members {
-			expectedPath := candidate.Paths[member]
+		for _, member := range observedCandidate.Members {
+			expectedPath := observedCandidate.Paths[member]
 			for _, path := range live {
 				if activeWANPathMatches(path, expectedPath, member) {
 					activeMatches++
@@ -114,20 +118,20 @@ func decodeVPPCTLWANGroups(request SnapshotRequest, results []VPPCTLCommandResul
 				}
 			}
 		}
-		if candidate.Mode == trafficpolicy.WANGroupPrimaryBackup {
+		if observedCandidate.Mode == trafficpolicy.WANGroupPrimaryBackup {
 			if activeMatches != 1 {
 				if request.AllowMissing {
 					continue
 				}
 				return WANGroupReadback{}, snapshotDecodeError("WAN group %q active primary/backup path does not match candidate", candidate.ID)
 			}
-		} else if activeMatches != len(candidate.Members) {
+		} else if activeMatches != len(observedCandidate.Members) {
 			if request.AllowMissing {
 				continue
 			}
 			return WANGroupReadback{}, snapshotDecodeError("WAN group %q active members do not match candidate", candidate.ID)
 		}
-		if configuredPathListsErr == nil && !configuredWANPathListMatches(candidate, configuredPathLists) {
+		if configuredPathListsErr == nil && !configuredWANPathListMatches(observedCandidate, configuredPathLists) {
 			if request.AllowMissing {
 				continue
 			}
@@ -142,6 +146,23 @@ func decodeVPPCTLWANGroups(request SnapshotRequest, results []VPPCTLCommandResul
 		}
 	}
 	return WANGroupReadback{Groups: groups}, nil
+}
+
+func resolveRuntimePPPoEWANGroup(candidate trafficpolicy.WANGroup) (trafficpolicy.WANGroup, error) {
+	if len(candidate.Paths) == 0 {
+		return candidate, nil
+	}
+	paths := make(map[string]trafficpolicy.WANPath, len(candidate.Paths))
+	for member, path := range candidate.Paths {
+		resolved, err := resolveRuntimePPPoEInterface(path.VPPInterface)
+		if err != nil {
+			return trafficpolicy.WANGroup{}, fmt.Errorf("resolve WAN group %q member %q: %w", candidate.ID, member, err)
+		}
+		path.VPPInterface = resolved
+		paths[member] = path
+	}
+	candidate.Paths = paths
+	return candidate, nil
 }
 
 func wanGroupFIBIsAbsent(results []VPPCTLCommandResult, id string) bool {

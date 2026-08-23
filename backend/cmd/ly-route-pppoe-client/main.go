@@ -147,13 +147,16 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	defer client.Disconnect(context.Background())
 	var prefixLease pppoeclient.DelegatedPrefixLease
-	if ipv6PrefixGroup != "" && len(ipv6LANInterfaces) > 0 {
+	prefixDelegationEnabled := ipv6PrefixGroup != "" && len(ipv6LANInterfaces) > 0
+	if prefixDelegationEnabled {
 		prefixLease, err = client.AcquireDelegatedPrefix(ctx, session)
 		if err != nil {
-			fatal(err)
+			fmt.Fprintf(os.Stderr, "DHCPv6-PD initial acquisition deferred: %v\n", err)
+		} else {
+			session = sessionWithPrefixLease(session, prefixLease)
 		}
-		session = sessionWithPrefixLease(session, prefixLease)
 	}
 	encoded, _ := json.Marshal(session)
 	programmed, err := pppoeclient.ProgramVPP(ctx, pppoeclient.VPPConfig{Binary: *vppctl, WANInterface: *wanInterface, SessionInterface: *sessionInterface, TableID: *tableID, MTU: uint16(*mru), InstallDefaultRoute: *defaultRoute, EnableNAT: *nat, NATInsideInterfaces: natInsideInterfaces, NATBehavior: natBehavior, IPv6PrefixGroup: ipv6PrefixGroup, IPv6LANInterfaces: ipv6LANInterfaces}, session)
@@ -171,11 +174,10 @@ func main() {
 	// plane validates it against VPP before using it, so a stale file is safe;
 	// writing "disconnected" here is not, because an older instance can race a
 	// newly connected replacement during a systemd restart.
-	defer client.Disconnect(context.Background())
 	serve := client.Serve
-	if prefixLease.Prefix.IsValid() {
+	if prefixDelegationEnabled {
 		serve = func(ctx context.Context) error {
-			return client.ServeWithDelegatedPrefix(ctx, session, prefixLease, func(ctx context.Context, updated pppoeclient.DelegatedPrefixLease) error {
+			return client.ServeWithDelegatedPrefixRecovery(ctx, session, prefixLease, func(ctx context.Context, updated pppoeclient.DelegatedPrefixLease) error {
 				if err := programmed.UpdateDelegatedPrefix(ctx, updated.Prefix.String()); err != nil {
 					return err
 				}

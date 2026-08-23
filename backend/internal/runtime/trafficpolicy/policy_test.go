@@ -351,6 +351,33 @@ func TestCompileWANGroupsSupportsPrimaryBackupAndFiveTuple(t *testing.T) {
 	}
 }
 
+func TestCompileWANGroupsSupportsDynamicLoadModesAndRequiredLineMetrics(t *testing.T) {
+	groups, err := CompileWANGroups([]map[string]any{
+		{"id": "least", "members": []any{"wan0", "wan1"}, "mode": "least_connections", "connection_limits": map[string]any{"wan0": 200, "wan1": 500}},
+		{"id": "idle", "members": []any{"wan0", "wan1"}, "mode": "max_idle_bandwidth", "downlink_mbps": map[string]any{"wan0": 100, "wan1": 300}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groups[0].Mode != WANGroupLeastConn || groups[0].ConnectionLimits["wan1"] != 500 {
+		t.Fatalf("least-connection group = %#v", groups[0])
+	}
+	if groups[1].Mode != WANGroupIdleBandwidth || groups[1].DownlinkMbps["wan1"] != 300 {
+		t.Fatalf("idle-bandwidth group = %#v", groups[1])
+	}
+}
+
+func TestCompileWANGroupsRejectsDynamicLoadModesWithoutLineMetrics(t *testing.T) {
+	for _, item := range []map[string]any{
+		{"id": "least", "members": []any{"wan0", "wan1"}, "mode": "least_connections", "connection_limits": map[string]any{"wan0": 10}},
+		{"id": "idle", "members": []any{"wan0", "wan1"}, "mode": "max_idle_bandwidth", "downlink_mbps": map[string]any{"wan0": 100}},
+	} {
+		if _, err := CompileWANGroups([]map[string]any{item}); err == nil {
+			t.Fatalf("dynamic WAN group accepted without complete metrics: %#v", item)
+		}
+	}
+}
+
 func TestCompileWANGroupsPrimaryBackupFallsBackToLegacyMemberOrder(t *testing.T) {
 	groups, err := CompileWANGroups([]map[string]any{{
 		"id": "legacy-failover", "members": []any{"wan1", "wan0"}, "mode": "primary_backup",

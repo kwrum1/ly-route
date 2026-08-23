@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -102,5 +103,11 @@ func validateSubscriptionEndpoint(ctx context.Context, rawURL string) (*url.URL,
 }
 
 func allowedSubscriptionAddress(address netip.Addr) bool {
-	return address.IsValid() && address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast()
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsLoopback() || address.IsLinkLocalUnicast() {
+		return false
+	}
+	if address.IsPrivate() {
+		return strings.EqualFold(strings.TrimSpace(os.Getenv("LY_ROUTE_ALLOW_PRIVATE_SUBSCRIPTION_ENDPOINTS")), "1")
+	}
+	return true
 }

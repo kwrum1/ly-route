@@ -387,17 +387,24 @@ func (controller FilesystemController) captureArtifacts(service ServiceName, art
 		paths[path] = struct{}{}
 	}
 	if service == SmartDNS {
-		dir, err := controller.resolvePath("/etc/smartdns/conf.d")
-		if err != nil {
-			return nil, err
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "ly-route-") && strings.HasSuffix(entry.Name(), ".conf") {
-				paths[filepath.Join(dir, entry.Name())] = struct{}{}
+		for _, managed := range []struct {
+			dir, prefix, suffix string
+		}{
+			{dir: "/etc/smartdns/conf.d", prefix: "ly-route-", suffix: ".conf"},
+			{dir: "/etc/smartdns/domain-sets", prefix: "lyroute-", suffix: ".list"},
+		} {
+			dir, err := controller.resolvePath(managed.dir)
+			if err != nil {
+				return nil, err
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), managed.prefix) && strings.HasSuffix(entry.Name(), managed.suffix) {
+					paths[filepath.Join(dir, entry.Name())] = struct{}{}
+				}
 			}
 		}
 	}

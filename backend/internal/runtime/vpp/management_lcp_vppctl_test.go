@@ -65,3 +65,16 @@ func TestLANDHCPBroadcastPolicyReadbackUsesReceivePath(t *testing.T) {
 		t.Fatalf("VPP ACL attachment-state readback = %#v", acl)
 	}
 }
+
+func TestLANDHCPBroadcastPolicyReadbackAcceptsLocalNoForwarding(t *testing.T) {
+	output := `abf:[0]: policy:65000 acl:1
+ no forwarding
+`
+	observed, err := parseObservedServiceChainABFPolicy(output)
+	if err != nil {
+		t.Fatalf("local no-forwarding readback failed: %v", err)
+	}
+	if observed.ID != 65000 || observed.ACLID != 1 || observed.AddressFamily != "ip4" || observed.NextHop != "local" || observed.ServiceInterface != "" {
+		t.Fatalf("local no-forwarding readback = %#v", observed)
+	}
+}

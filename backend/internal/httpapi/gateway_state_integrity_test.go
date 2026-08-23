@@ -72,34 +72,34 @@ func TestGatewayTelemetryRejectsFutureSourceTimestamp(t *testing.T) {
 	}
 }
 
-func TestGatewayTelemetryBucketsReadbacksAtFiveMinuteCadence(t *testing.T) {
+func TestGatewayTelemetryBucketsReadbacksAtFiveSecondCadence(t *testing.T) {
 	start := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
 	state := newGatewayTelemetryState()
 
-	state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(10 * time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: 1_000, UploadBytes: 500}}})
-	state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(4*time.Minute + 50*time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: 2_000, UploadBytes: 1_000}}})
-	state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(5*time.Minute + 10*time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: 32_000, UploadBytes: 16_000}}})
+	state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: 1_000, UploadBytes: 500}}})
+	state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(4 * time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: 2_000, UploadBytes: 1_000}}})
+	state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(6 * time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: 32_000, UploadBytes: 16_000}}})
 
 	samples := state.series["wan-a"].samples
-	if len(samples) != 2 || !samples[0].Timestamp.Equal(start) || !samples[1].Timestamp.Equal(start.Add(5*time.Minute)) {
-		t.Fatalf("bucketed samples = %#v, want two five-minute buckets", samples)
+	if len(samples) != 2 || !samples[0].Timestamp.Equal(start) || !samples[1].Timestamp.Equal(start.Add(5*time.Second)) {
+		t.Fatalf("bucketed samples = %#v, want two five-second buckets", samples)
 	}
 	if samples[0].DownloadBytes != 2_000 || samples[1].DownloadBPS == nil {
 		t.Fatalf("bucket replacement/rate = %#v, want latest readback and derived rate", samples)
 	}
-	wantDownload := float64(30_000 * 8 / 300)
+	wantDownload := float64(30_000 * 8 / 5)
 	assertWithinFivePercent(t, *samples[1].DownloadBPS, wantDownload)
 }
 
 func TestGatewayTelemetryBoundsSamplesPerSeries(t *testing.T) {
 	start := time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC)
 	state := newGatewayTelemetryState()
-	for index := 0; index < 289; index++ {
-		state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(time.Duration(index) * 5 * time.Minute), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: int64(index)}}})
+	for index := 0; index < gatewayLogicalEgressSampleLimit+1; index++ {
+		state.record(GatewayTelemetrySnapshot{ObservedAt: start.Add(time.Duration(index) * 5 * time.Second), LogicalEgresses: []LogicalEgressCounter{{ID: "wan-a", Kind: LogicalEgressDirectWAN, Health: "healthy", DownloadBytes: int64(index)}}})
 	}
 
-	if got := len(state.series["wan-a"].samples); got != 288 {
-		t.Fatalf("retained samples = %d, want bounded 288", got)
+	if got := len(state.series["wan-a"].samples); got != gatewayLogicalEgressSampleLimit {
+		t.Fatalf("retained samples = %d, want bounded %d", got, gatewayLogicalEgressSampleLimit)
 	}
 }
 

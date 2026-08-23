@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"ly-route/backend/internal/runtime/trafficpolicy"
 )
@@ -181,7 +182,7 @@ func (a Adapter) ApplyRouteWANGroup(ctx context.Context, plan RouteWANGroupPlan,
 		}
 	}
 	for _, operation := range operations {
-		if fullRouteRebuild && isRoutePolicyApplyOperation(operation) {
+		if fullRouteRebuild && isStagedRoutePolicyApplyOperation(operation) {
 			// The old state was removed in the phase above.  The replay name is
 			// handled by the same dynamic-ACL path but skips a second cleanup.
 			operation.Name = "vpp.route-policy.replay"
@@ -191,7 +192,7 @@ func (a Adapter) ApplyRouteWANGroup(ctx context.Context, plan RouteWANGroupPlan,
 		}
 		receiptOperations = append(receiptOperations, operation)
 	}
-	readback, err := a.Snapshot(ctx, routeWANGroupSnapshotRequestForPlan(plan))
+	readback, err := a.snapshotRouteWANGroupConverged(ctx, routeWANGroupSnapshotRequestForPlan(plan))
 	if err != nil {
 		return RouteWANGroupApplyResult{}, a.routeWANGroupFailure(ctx, channel, plan.TransactionID, "readback", err, prior, rollbackPlan)
 	}
@@ -199,4 +200,37 @@ func (a Adapter) ApplyRouteWANGroup(ctx context.Context, plan RouteWANGroupPlan,
 		return RouteWANGroupApplyResult{}, a.routeWANGroupFailure(ctx, channel, plan.TransactionID, "readback", err, prior, rollbackPlan)
 	}
 	return RouteWANGroupApplyResult{Receipt: Receipt{RequestID: plan.TransactionID, Operations: receiptOperations}, Readback: readback}, nil
+}
+
+func (a Adapter) snapshotRouteWANGroupConverged(ctx context.Context, request SnapshotRequest) (Snapshot, error) {
+	return retryRouteWANGroupSnapshot(ctx, 6, 2*time.Second, func() (Snapshot, error) {
+		return a.Snapshot(ctx, request)
+	})
+}
+
+func retryRouteWANGroupSnapshot(ctx context.Context, attempts int, delay time.Duration, snapshot func() (Snapshot, error)) (Snapshot, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		readback, err := snapshot()
+		if err == nil {
+			return readback, nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrSnapshotIncomplete) || attempt == attempts-1 {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return Snapshot{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return Snapshot{}, lastErr
 }

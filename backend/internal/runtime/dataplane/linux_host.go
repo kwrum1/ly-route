@@ -127,6 +127,14 @@ func (host *LinuxHost) StartVPP(ctx context.Context) error {
 	return err
 }
 
+func (host *LinuxHost) RebindKea(ctx context.Context) error {
+	if _, err := host.run(ctx, "systemctl", "is-active", "--quiet", "kea-dhcp4-server.service"); err != nil {
+		return nil
+	}
+	_, err := host.run(ctx, "systemctl", "restart", "kea-dhcp4-server.service")
+	return err
+}
+
 func (host *LinuxHost) VerifyDPDK(ctx context.Context, path vpp.NativePath) error {
 	if _, err := host.run(ctx, "systemctl", "is-active", "--quiet", "vpp.service"); err != nil {
 		return err

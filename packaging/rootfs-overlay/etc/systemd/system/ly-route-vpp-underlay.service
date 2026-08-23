@@ -12,7 +12,6 @@ EnvironmentFile=-/etc/ly-route/runtime.env
 EnvironmentFile=-/etc/ly-route/control-api.env
 Environment=LY_ROUTE_VPP_RECEIPT=/var/lib/ly-route/vpp-underlay-apply-receipt.json
 ExecStart=/usr/lib/ly-route/vpp-apply /var/lib/ly-route/vpp/operations.json
-RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target

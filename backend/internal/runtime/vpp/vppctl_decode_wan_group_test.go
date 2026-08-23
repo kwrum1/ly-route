@@ -2,10 +2,57 @@ package vpp
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"ly-route/backend/internal/runtime/trafficpolicy"
 )
+
+func TestDecodeVPPCTLWANGroupsVerifiesResolvedRuntimePPPoEInterfacesWithoutChangingDesiredState(t *testing.T) {
+	statusDir := t.TempDir()
+	t.Setenv("LY_ROUTE_PPPOE_RUNTIME_STATUS_DIR", statusDir)
+	for peerID, interfaceName := range map[string]string{
+		"wan-primary": "pppoe_session1",
+		"wan-backup":  "pppoe_session0",
+	} {
+		payload := []byte(fmt.Sprintf(`{"interface":%q}`, interfaceName))
+		if err := os.WriteFile(filepath.Join(statusDir, peerID+".json"), payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	group := trafficpolicy.WANGroup{
+		ID: "runtime-pppoe", Mode: trafficpolicy.WANGroupWeighted,
+		Members: []string{"wan-primary", "wan-backup"},
+		Weights: map[string]int{"wan-primary": 1, "wan-backup": 1},
+		Paths: map[string]trafficpolicy.WANPath{
+			"wan-primary": {VPPInterface: "pppoe-runtime:wan-primary", NextHop: "10.67.0.1"},
+			"wan-backup":  {VPPInterface: "pppoe-runtime:wan-backup", NextHop: "10.68.0.1"},
+		},
+	}
+	tableID := wanGroupTableID(group.ID)
+	results := []VPPCTLCommandResult{
+		{Command: fmt.Sprintf("show ip fib table %d", tableID), Stdout: fmt.Sprintf(`ipv4-VRF:%d, fib_index:15, flow hash:[src dst sport dport proto]
+0.0.0.0/0
+  unicast-ip4-chain
+    [0] [@6]: ipv4 via 0.0.0.0 pppoe_session1: mtu:9000 next:6 flags:[]
+    [1] [@6]: ipv4 via 0.0.0.0 pppoe_session0: mtu:9000 next:6 flags:[]`, tableID)},
+		{Command: "show fib path-lists", Stdout: `path-list:[211] locks:2 flags:shared, len:2
+  path:[244] pl-index:211 ip4 weight=1 pref=0 attached-nexthop: oper-flags:resolved,
+    10.67.0.1 pppoe_session1 (p2p)
+  path:[245] pl-index:211 ip4 weight=1 pref=0 attached-nexthop: oper-flags:resolved,
+    10.68.0.1 pppoe_session0 (p2p)`},
+	}
+	readback, err := decodeVPPCTLWANGroups(SnapshotRequest{
+		WANGroups: []string{group.ID}, Candidates: SnapshotCandidates{WANGroups: []trafficpolicy.WANGroup{group}},
+	}, results)
+	if err != nil {
+		t.Fatalf("decode runtime PPPoE WAN group: %v", err)
+	}
+	if len(readback.Groups) != 1 || readback.Groups[0].Paths["wan-primary"].VPPInterface != "pppoe-runtime:wan-primary" {
+		t.Fatalf("runtime PPPoE readback = %#v", readback.Groups)
+	}
+}
 
 func TestDecodeVPPCTLWANGroupsAcceptsResolvedPPPoEForwardingPaths(t *testing.T) {
 	group := trafficpolicy.WANGroup{

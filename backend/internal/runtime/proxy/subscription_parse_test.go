@@ -14,7 +14,7 @@ import (
 )
 
 func TestParseSubscriptionDecodesVLESSReality(t *testing.T) {
-	uri := "vless://11111111-1111-1111-1111-111111111111@node.example:443?type=tcp&encryption=none&security=reality&pbk=public-key&fp=chrome&sni=www.example.com&sid=98&flow=xtls-rprx-vision#Primary"
+	uri := "vless://11111111-1111-1111-1111-111111111111@node.example:443?type=tcp&encryption=none&security=reality&pbk=public-key&pqv=post-quantum-verify-key&fp=chrome&sni=www.example.com&sid=98&flow=xtls-rprx-vision#Primary"
 	content := base64.StdEncoding.EncodeToString([]byte(uri + "\n"))
 	nodes, err := ParseSubscription([]byte(content))
 	if err != nil {
@@ -27,7 +27,7 @@ func TestParseSubscriptionDecodesVLESSReality(t *testing.T) {
 		t.Fatalf("settings = %#v", nodes[0].Settings)
 	}
 	reality := nodes[0].Settings["realitySettings"].(map[string]any)
-	if reality["publicKey"] != "public-key" || reality["fingerprint"] != "chrome" || reality["serverName"] != "www.example.com" || reality["shortId"] != "98" {
+	if reality["publicKey"] != "public-key" || reality["mldsa65Verify"] != "post-quantum-verify-key" || reality["fingerprint"] != "chrome" || reality["serverName"] != "www.example.com" || reality["shortId"] != "98" {
 		t.Fatalf("Reality settings = %#v", reality)
 	}
 	outbound, err := CompileNodeOutbound(nodes[0])
@@ -60,6 +60,19 @@ func TestParseSubscriptionRejectsUnsupportedOrOversizedContent(t *testing.T) {
 	}
 	if _, err := ParseSubscription(make([]byte, MaxSubscriptionBytes+1)); err == nil {
 		t.Fatal("oversized subscription was accepted")
+	}
+}
+
+func TestParseSubscriptionSkipsUnsupportedNodesWhenSupportedNodesRemain(t *testing.T) {
+	vless := "vless://11111111-1111-1111-1111-111111111111@node.example:443?type=tcp&encryption=none&security=reality&pbk=public-key&fp=chrome&sni=www.example.com&sid=98&flow=xtls-rprx-vision#Primary"
+	content := base64.StdEncoding.EncodeToString([]byte(vless + "\nhysteria2://secret@unsupported.example:443#Unsupported\n"))
+
+	nodes, err := ParseSubscription([]byte(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Protocol != "vless" || nodes[0].Name != "Primary" {
+		t.Fatalf("nodes = %#v, want the supported VLESS node only", nodes)
 	}
 }
 

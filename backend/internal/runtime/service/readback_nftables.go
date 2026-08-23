@@ -23,7 +23,7 @@ func validateNftablesReadback(ctx context.Context, runner CommandRunner, artifac
 	normalized := normalizedNftables(output)
 	position := -1
 	for _, rule := range rules {
-		next := strings.Index(normalized, rule)
+		next := nftablesRulePosition(normalized, rule, position)
 		if next < 0 {
 			return fmt.Errorf("nftables live table missing rule %q", rule)
 		}
@@ -33,6 +33,26 @@ func validateNftablesReadback(ctx context.Context, runner CommandRunner, artifac
 		position = next
 	}
 	return nil
+}
+
+func nftablesRulePosition(live, rendered string, previous int) int {
+	position := strings.Index(live, rendered)
+	if position > previous {
+		return position
+	}
+	for _, protocol := range []string{"tcp", "udp"} {
+		for _, suffix := range []string{" meta mark", " counter meta mark"} {
+			variant := strings.Replace(rendered, " meta l4proto "+protocol+suffix, suffix, 1)
+			if variant == rendered {
+				continue
+			}
+			position = strings.Index(live, variant)
+			if position > previous {
+				return position
+			}
+		}
+	}
+	return -1
 }
 
 func expectedNftablesRules(content string) (string, string, []string, error) {
@@ -48,8 +68,8 @@ func expectedNftablesRules(content string) (string, string, []string, error) {
 			family, table = fields[1], fields[2]
 		}
 		normalized := normalizedNftables(line)
-		isDNS := strings.Contains(normalized, "dport 53")
-		isTProxy := strings.Contains(normalized, "tproxy to")
+		isDNS := strings.Contains(normalized, "dport 53") && nftablesRuleHasToken(normalized, "redirect")
+		isTProxy := nftablesRuleHasToken(normalized, "tproxy")
 		if isDNS || isTProxy {
 			rules = append(rules, normalized)
 			position := len(rules) - 1
@@ -83,16 +103,50 @@ func expectedNftablesRules(content string) (string, string, []string, error) {
 	return family, table, rules, nil
 }
 
+func nftablesRuleHasToken(rule, token string) bool {
+	for _, field := range strings.Fields(rule) {
+		if field == token {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizedNftables(value string) string {
 	fields := strings.Fields(value)
-	for index, field := range fields {
+	transport := ""
+	if strings.Contains(value, "jhash") {
+		for _, protocol := range []string{"tcp", "udp"} {
+			if strings.Contains(value, protocol+" sport") {
+				transport = protocol
+				break
+			}
+		}
+	}
+	normalized := make([]string, 0, len(fields))
+	for index := 0; index < len(fields); index++ {
+		field := fields[index]
+		if field == "counter" && index+4 < len(fields) && fields[index+1] == "packets" && fields[index+3] == "bytes" {
+			normalized = append(normalized, field)
+			index += 4
+			continue
+		}
+		if field == "==" {
+			continue
+		}
+		if transport != "" && index+2 < len(fields) && field == "meta" && fields[index+1] == "l4proto" && fields[index+2] == transport {
+			index += 2
+			continue
+		}
 		if !strings.HasPrefix(field, "0x") {
+			normalized = append(normalized, field)
 			continue
 		}
 		parsed, err := strconv.ParseUint(field, 0, 64)
 		if err == nil {
-			fields[index] = fmt.Sprintf("0x%x", parsed)
+			field = fmt.Sprintf("0x%x", parsed)
 		}
+		normalized = append(normalized, field)
 	}
-	return strings.Join(fields, " ")
+	return strings.Join(normalized, " ")
 }

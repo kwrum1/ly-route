@@ -468,7 +468,7 @@ int main(void) {
 			}
 		}
 		usleep(1000);
-    }
+	}
     if (udp4 >= 0) close(udp4);
     if (tcp4 >= 0) close(tcp4);
     if (udp6 >= 0) close(udp6);

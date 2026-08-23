@@ -135,12 +135,19 @@ func (channel vppctlChannel) doPreNATRoutePolicyLifecycle(ctx context.Context, o
 		return routePolicyLifecycleReply(operation, addressResults), nil
 	}
 
-	commands := preNATRoutePolicyRefreshCommands(operation, spec, classifier)
+	commands := preNATRoutePolicyApplyCommands(operation, spec, classifier)
 	fibCommand := fmt.Sprintf("show ip fib table %d", spec.tableID)
 	commands = append(commands, fibCommand)
 	results, err := channel.runServiceChainCommands(ctx, operation, commands...)
 	if err != nil {
 		return Reply{}, err
+	}
+	if repair := preNATRoutePolicyRepairCommands(operation, spec, results); len(repair) > 0 {
+		repaired, repairErr := channel.runServiceChainCommands(ctx, operation, repair...)
+		results = append(results, repaired...)
+		if repairErr != nil {
+			return Reply{}, repairErr
+		}
 	}
 	results = append(addressResults, results...)
 	if strings.TrimSpace(resultStdoutLast(results, fibCommand)) == "" {
@@ -156,9 +163,53 @@ func (channel vppctlChannel) doPreNATRoutePolicyLifecycle(ctx context.Context, o
 	return routePolicyLifecycleReply(operation, results), nil
 }
 
+func preNATRoutePolicyRepairCommands(operation Operation, spec routePolicyVPPCTLSpec, results []VPPCTLCommandResult) []string {
+	expected := nativeRoutePolicyExpectedVia(operation)
+	if expected == "" {
+		return nil
+	}
+	paths, err := parseFIBResult(results, spec.tableID)
+	if err == nil && len(paths) == 1 && fibPathMatchesExpected(paths[0].via, expected) {
+		return nil
+	}
+	commands := make([]string, 0, 2)
+	for _, raw := range routePolicyNativeTableCommands(operation) {
+		command := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "?"))
+		if strings.HasPrefix(command, "ip route add ") {
+			commands = append(commands, command)
+		}
+	}
+	if len(commands) > 0 {
+		commands = append(commands, fmt.Sprintf("show ip fib table %d", spec.tableID))
+	}
+	return commands
+}
+
+func nativeRoutePolicyExpectedVia(operation Operation) string {
+	for _, raw := range routePolicyNativeTableCommands(operation) {
+		command := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "?"))
+		if !strings.HasPrefix(command, "ip route add ") {
+			continue
+		}
+		if index := strings.Index(command, " via "); index >= 0 {
+			return routePolicyFIBVia(strings.TrimSpace(command[index+5:]))
+		}
+	}
+	return ""
+}
+
+func preNATRoutePolicyApplyCommands(operation Operation, spec routePolicyVPPCTLSpec, classifier []string) []string {
+	if strings.HasSuffix(operation.Name, ".replay") {
+		return append([]string(nil), classifier...)
+	}
+	return preNATRoutePolicyRefreshCommands(operation, spec, classifier)
+}
+
 func preNATRoutePolicyRefreshCommands(operation Operation, spec routePolicyVPPCTLSpec, classifier []string) []string {
 	commands := []string{
 		fmt.Sprintf("?set ly-route pre-nat-route del id %d", spec.policyID),
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/1", spec.tableID),
+		fmt.Sprintf("?ip route del table %d 128.0.0.0/1", spec.tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", spec.tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/32", spec.tableID),
 		// PPPoE reconnects and WAN-group changes replace interface DPOs. Merely
@@ -175,6 +226,8 @@ func (channel vppctlChannel) doPreNATRoutePolicyDelete(ctx context.Context, oper
 	fibCommand := fmt.Sprintf("show ip fib table %d", spec.tableID)
 	results, err := channel.runServiceChainCommands(ctx, operation,
 		preNATCommand,
+		fmt.Sprintf("?ip route del table %d 0.0.0.0/1", spec.tableID),
+		fmt.Sprintf("?ip route del table %d 128.0.0.0/1", spec.tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/0", spec.tableID),
 		fmt.Sprintf("?ip route del table %d 0.0.0.0/32", spec.tableID),
 		fmt.Sprintf("?ip table del %d", spec.tableID),

@@ -57,9 +57,7 @@ ly_dns_intercept_packet (vlib_buffer_t *buffer)
   u8 *data = vlib_buffer_get_current (buffer);
   ip4_header_t *ip4 = (ip4_header_t *) data;
   u32 header_bytes = ip4_header_bytes (ip4);
-  if (vnet_buffer (buffer)->sw_if_index[VLIB_RX] !=
-      ly_dns_intercept_main.sw_if_index ||
-      ip4->protocol != IP_PROTOCOL_UDP && ip4->protocol != IP_PROTOCOL_TCP)
+  if (ip4->protocol != IP_PROTOCOL_UDP && ip4->protocol != IP_PROTOCOL_TCP)
     return 0;
 
   if (vlib_buffer_length_in_chain (ly_dns_intercept_main.vlib_main, buffer) <

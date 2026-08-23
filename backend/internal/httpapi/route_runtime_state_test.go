@@ -83,6 +83,55 @@ func TestRoutePolicyRuntimeStateTracksCommittedVPPPlan(t *testing.T) {
 	}
 }
 
+func TestWANGroupRuntimeStateTracksCommittedVPPPlan(t *testing.T) {
+	ctx := context.Background()
+	store, err := persistence.Open(ctx, "file:httpapi-wan-group-runtime-state-test?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	server := New(WithStore(store), WithAuthConfig(AuthConfig{AdminUsername: "admin", AdminPassword: "secret"}), WithClock(fixedClock()))
+	login := requestBody(t, server, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"secret"}`)
+	cookie := login.Result().Cookies()[0]
+	for _, interfaceName := range []string{"wan0", "wan1"} {
+		assigned := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/interfaces", `{"id":"`+interfaceName+`","name":"`+interfaceName+`","interface_id":"`+interfaceName+`","gateway_role":"wan"}`, cookie)
+		if assigned.Code != http.StatusOK {
+			t.Fatalf("assign %s = %d %s", interfaceName, assigned.Code, assigned.Body.String())
+		}
+	}
+	created := authenticatedJSONRequest(t, server, http.MethodPost, "/api/v1/gateway/wan-groups", `{"id":"wan-group-status","name":"Dual WAN","wan_members":["wan0","wan1"],"mode":"five_tuple"}`, cookie)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create WAN group = %d %s", created.Code, created.Body.String())
+	}
+	compiled, err := server.currentTrafficPolicyConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transactionID := "txn-wan-group-status"
+	plan := vpp.Plan{Policy: compiled}
+	server.runtimeMu.Lock()
+	server.lastRuntime = &RuntimeApplyResult{
+		Status:        RuntimeStatusCommitted,
+		RuntimeState:  RuntimeStateRunning,
+		TransactionID: transactionID,
+		Receipt:       apply.ApplyReceipt{TransactionID: transactionID, Capability: "runtime", Status: apply.ReceiptApplied, AppliedAt: fixedClock()()},
+		GatewayPlan:   &plan,
+		GatewayEvidence: []apply.GatewayResourceEvidence{{
+			Resource:      "wan-groups",
+			Capability:    "wan-groups",
+			TransactionID: transactionID,
+			ApplyReceipt:  apply.ApplyReceipt{TransactionID: transactionID, Capability: "wan-groups", Status: apply.ReceiptApplied, AppliedAt: fixedClock()()},
+			After:         vpp.Snapshot{WANGroups: compiled.WANGroups},
+		}},
+	}
+	server.runtimeMu.Unlock()
+
+	list := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/gateway/wan-groups", "", cookie)
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"runtime_state":"applied"`) {
+		t.Fatalf("applied WAN group list = %d %s", list.Code, list.Body.String())
+	}
+}
+
 func TestRoutePolicyRuntimeStateAcceptsCompleteReadbackAfterDeletion(t *testing.T) {
 	ctx := context.Background()
 	store, err := persistence.Open(ctx, "file:httpapi-route-runtime-state-delete-test?mode=memory&cache=shared")

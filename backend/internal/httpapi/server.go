@@ -169,6 +169,7 @@ type Server struct {
 	trafficTrend                  TrafficTrendCollector
 	gatewayTelemetry              GatewayTelemetryCollector
 	gatewayState                  *gatewayTelemetryState
+	gatewayCollectMu              sync.Mutex
 	smartQoSObserver              SmartQoSRuntimeObserver
 	securityGuardObserver         SecurityGuardRuntimeObserver
 	requireSmartQoS               bool
@@ -1963,23 +1964,35 @@ func (server *Server) xrayRuntimeSelections(ctx context.Context) ([]map[string]a
 	}
 	tags := make([]string, 0)
 	subscriptionByTag := map[string]string{}
+	result := make([]map[string]any, 0)
 	for _, item := range items {
 		if enabled, exists := item["enabled"].(bool); exists && !enabled {
 			continue
 		}
-		if strings.TrimSpace(stringField(item, "selection")) != string(proxy.SelectionFastest) {
+		selection := strings.TrimSpace(stringField(item, "selection"))
+		strategy := strings.TrimSpace(stringField(item, "strategy"))
+		if selection != string(proxy.SelectionFastest) && selection != string(proxy.SelectionAdaptive) && strategy != proxy.AdaptiveSubscriptionStrategy {
 			continue
 		}
 		id := strings.TrimSpace(stringField(item, "id"))
 		if id == "" {
 			return nil, fmt.Errorf("enabled fastest proxy subscription has no ID")
 		}
-		tag := "subscription-" + id + "-fastest"
+		if selection == string(proxy.SelectionAdaptive) || strategy == proxy.AdaptiveSubscriptionStrategy {
+			state, err := server.adaptiveRuntimeSelection(ctx, item)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, state)
+			continue
+		}
+		tagSuffix := "fastest"
+		tag := "subscription-" + id + "-" + tagSuffix
 		tags = append(tags, tag)
 		subscriptionByTag[tag] = id
 	}
 	if len(tags) == 0 {
-		return []map[string]any{}, nil
+		return result, nil
 	}
 	controller, ok := server.services.Controller.(serviceRuntime.XrayRoutingStateController)
 	if !ok {
@@ -1989,7 +2002,6 @@ func (server *Server) xrayRuntimeSelections(ctx context.Context) ([]map[string]a
 	if err != nil {
 		return nil, err
 	}
-	result := make([]map[string]any, 0, len(states))
 	for _, state := range states {
 		subscriptionID := subscriptionByTag[state.Tag]
 		prefix := "subscription-" + subscriptionID + "-node-"
@@ -2000,9 +2012,54 @@ func (server *Server) xrayRuntimeSelections(ctx context.Context) ([]map[string]a
 			}
 			nodeIDs = append(nodeIDs, strings.TrimPrefix(outboundTag, prefix))
 		}
-		result = append(result, map[string]any{"subscription_id": subscriptionID, "balancer_tag": state.Tag, "selection": "fastest", "selected_node_ids": nodeIDs, "selected_outbound_tags": state.SelectedOutboundTags, "live_verified": true})
+		selectionName := "fastest"
+		if strings.HasSuffix(state.Tag, "-adaptive") {
+			selectionName = "adaptive"
+		}
+		result = append(result, map[string]any{"subscription_id": subscriptionID, "balancer_tag": state.Tag, "selection": selectionName, "selected_node_ids": nodeIDs, "selected_outbound_tags": state.SelectedOutboundTags, "live_verified": true})
 	}
 	return result, nil
+}
+
+func (server *Server) adaptiveRuntimeSelection(ctx context.Context, item map[string]any) (map[string]any, error) {
+	id := strings.TrimSpace(stringField(item, "id"))
+	candidateIDs := stringSliceField(item, "node_refs")
+	observer, ok := server.services.Controller.(serviceRuntime.XrayObservatoryStateController)
+	if !ok {
+		return nil, fmt.Errorf("Xray observatory state reader is not configured")
+	}
+	states, err := observer.XrayObservatoryStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	subscription := proxy.Subscription{
+		ID: id, Enabled: true, NodeRefs: candidateIDs, Selection: proxy.SelectionAdaptive,
+		Strategy: proxy.AdaptiveSubscriptionStrategy, TopN: intField(item, "top_n"),
+	}
+	lanes, err := adaptiveLanesFromObservations(subscription, states, 1, server.now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	prefix := "subscription-" + id + "-node-"
+	rttByNode := make(map[string]int64, len(states))
+	for _, state := range states {
+		if strings.HasPrefix(state.OutboundTag, prefix) {
+			rttByNode[strings.TrimPrefix(state.OutboundTag, prefix)] = state.DelayMilliseconds
+		}
+	}
+	selectedIDs := make([]string, 0, len(lanes))
+	activeNodes := make([]map[string]any, 0, len(lanes))
+	for _, lane := range lanes {
+		selectedIDs = append(selectedIDs, lane.NodeID)
+		activeNodes = append(activeNodes, map[string]any{
+			"node_id": lane.NodeID, "rtt_ms": rttByNode[lane.NodeID], "weight": lane.Weight,
+		})
+	}
+	return map[string]any{
+		"subscription_id": id, "selection": "adaptive", "algorithm": "rtt_weighted_five_tuple",
+		"candidate_node_ids": candidateIDs, "selected_node_ids": selectedIDs,
+		"active_nodes": activeNodes, "live_verified": true,
+	}, nil
 }
 
 func availabilityState(available bool) string {
@@ -2450,10 +2507,8 @@ var desiredResourceDefs = map[string]desiredResourceDef{
 	}},
 	"interface_bond": {CollectionPath: "/api/v1/interface-bonds", Defaults: []map[string]any{}},
 	"object_group": {CollectionPath: "/api/v1/objects/ip-groups", Defaults: []map[string]any{
-		{"id": "obj-local-lan", "kind": "ip", "name": "Local LAN", "entries": []string{"192.168.88.0/24"}},
 		{"id": "obj-geoip-cn", "kind": "ip", "name": "GeoIP 中国大陆", "entries": []string{}, "source": map[string]any{"provider": "v2ray-rules-dat", "format": "geoip", "category": "CN", "file": "geoip.dat", "sha256": "6ba63d75f307d16a81ae09406ddcf2779fa75cb642d4aae59613370d62d33509"}, "source_entry_count": 5822},
 		{"id": "obj-geosite-cn", "kind": "domain", "name": "GeoSite 中国大陆", "entries": []string{}, "source": map[string]any{"provider": "v2ray-rules-dat", "format": "geosite", "category": "CN", "file": "geosite.dat", "sha256": "857227f9dcedbfda5c067ba740ca8a461a06a6ac12aeeb99dcbf82c0e1bdb125"}, "source_entry_count": 111514},
-		{"id": "obj-proxy-domains", "kind": "domain", "name": "Proxy Domains", "entries": []string{}},
 	}},
 	"wan_link":           {CollectionPath: "/api/v1/gateway/wan-links", Defaults: []map[string]any{}},
 	"wan_group":          {CollectionPath: "/api/v1/gateway/wan-groups", Defaults: []map[string]any{}},
@@ -2505,6 +2560,9 @@ func (server *Server) handleDesiredCollection(resourceType string) http.HandlerF
 			}
 			if resourceType == "route_policy" {
 				items = server.decorateRoutePolicyRuntimeStates(r.Context(), items)
+			}
+			if resourceType == "wan_group" {
+				items = server.decorateWANGroupRuntimeStates(r.Context(), items)
 			}
 			if resourceType == "object_group" && server.profile.ID() == product.Orchestrator().ID() {
 				filtered := make([]map[string]any, 0, len(items))
@@ -2592,6 +2650,9 @@ func (server *Server) handleDesiredItem(resourceType string) http.HandlerFunc {
 			}
 			if resourceType == "route_policy" {
 				item = server.decorateRoutePolicyRuntimeState(r.Context(), item)
+			}
+			if resourceType == "wan_group" {
+				item = server.decorateWANGroupRuntimeStates(r.Context(), []map[string]any{item})[0]
 			}
 			if resourceType == "port_map" {
 				item = server.decoratePortMapRuntimeStates(r.Context(), []map[string]any{item})[0]
@@ -3301,6 +3362,22 @@ func (server *Server) handleDesiredMutation(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
+	if r.Method == http.MethodPatch && strings.TrimSpace(explicitID) != "" {
+		current, exists, err := server.desiredItem(r.Context(), resourceType, explicitID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "desired_state_read_failed", err.Error())
+			return
+		}
+		if !exists {
+			writeError(w, r, http.StatusNotFound, "not_found", "resource was not found")
+			return
+		}
+		merged := cloneObject(current)
+		for key, value := range payload {
+			merged[key] = value
+		}
+		payload = merged
+	}
 	id := nonEmpty(explicitID, stringField(payload, "id"))
 	if id == "" {
 		id = strings.ReplaceAll(newRequestID(), "-", "")
@@ -3958,6 +4035,27 @@ func validateDesiredPayload(resourceType string, payload map[string]any) error {
 		normalizeWANGroupPayload(payload)
 	}
 	if resourceType == "proxy_node" || resourceType == "proxy_subscription" {
+		if resourceType == "proxy_subscription" {
+			selection := strings.TrimSpace(stringField(payload, "selection"))
+			strategy := strings.TrimSpace(stringField(payload, "strategy"))
+			if selection == string(proxy.SelectionAdaptive) || strategy == proxy.AdaptiveSubscriptionStrategy {
+				topN := intField(payload, "top_n")
+				if topN == 0 {
+					topN = 2
+					payload["top_n"] = topN
+				}
+				if topN != 2 && topN != 3 {
+					return fmt.Errorf("proxy subscription top_n must be 2 or 3")
+				}
+				nodeRefs := stringSliceField(payload, "node_refs")
+				if len(nodeRefs) > 0 && len(nodeRefs) < 2 {
+					return fmt.Errorf("adaptive proxy subscription requires at least two candidate nodes")
+				}
+				if len(nodeRefs) > 0 && topN > len(nodeRefs) {
+					return fmt.Errorf("proxy subscription top_n cannot exceed candidate node count")
+				}
+			}
+		}
 		redactProxyDesiredPayload(payload)
 	}
 	return nil
@@ -4838,11 +4936,7 @@ func (server *Server) handleRuntimeApply(w http.ResponseWriter, r *http.Request)
 			// exactly once.
 			appliedArtifacts = append([]serviceRuntime.RenderedArtifact(nil), report.AppliedArtifacts...)
 			capabilityFailures = append(capabilityFailures, serviceFailureEvidence(report.Failures)...)
-			// Linux routing is intentionally executed in both phases, but the
-			// evidence set is the canonical one-artifact-per-path plan. Keeping
-			// the pre-gateway copy out of the evidence list avoids a false
-			// receipt cardinality failure after the post-gateway replay.
-			evidenceRequest.Artifacts = serviceArtifacts
+			evidenceRequest.Artifacts = appliedArtifacts
 			return nil
 		},
 		Receipt: func(ctx context.Context, _ apply.Plan) (apply.ApplyReceipt, error) {
@@ -4941,7 +5035,12 @@ func (server *Server) handleRuntimeStatus(w http.ResponseWriter, r *http.Request
 	}
 	plan, err := server.buildRuntimePlan(r.Context(), requestID(r))
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "runtime_status_failed", err.Error())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     "degraded",
+			"components": []RuntimeComponentState{{Name: "配置检查", State: "degraded", Available: false, Reason: serviceRuntime.Redact(err.Error())}},
+			"last_apply": server.lastRuntimeApply(),
+			"request_id": requestID(r),
+		})
 		return
 	}
 	components := server.runtimeStatusComponents(r.Context(), plan.RuntimeArtifacts, len(plan.VppOperations) > 0)
@@ -4949,6 +5048,12 @@ func (server *Server) handleRuntimeStatus(w http.ResponseWriter, r *http.Request
 	last := server.lastRuntime
 	server.runtimeMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"status": runtimeState(components), "components": components, "last_apply": last, "request_id": requestID(r)})
+}
+
+func (server *Server) lastRuntimeApply() *RuntimeApplyResult {
+	server.runtimeMu.Lock()
+	defer server.runtimeMu.Unlock()
+	return server.lastRuntime
 }
 
 func (server *Server) buildRuntimePlan(ctx context.Context, requestID string) (RuntimePlan, error) {
@@ -5068,7 +5173,7 @@ func (server *Server) buildRuntimePlanFromConfig(ctx context.Context, requestID 
 		}
 		artifacts = append(artifacts, routingArtifacts...)
 	}
-	dnsInterception := serviceRuntime.DNSInterceptionPlan{}
+	dnsInterception := dnsLCPGuardPlan(addressAssignments)
 	if strings.TrimSpace(compiledProxy.NftablesCapture.Table) != "" {
 		nftablesArtifacts, renderErr := serviceRuntime.RenderGatewayNftablesCapture(compiledProxy.NftablesCapture, dnsInterception)
 		if renderErr != nil {
@@ -5194,6 +5299,20 @@ func hasLANAddressAssignment(assignments []vpp.AddressAssignment) bool {
 	return false
 }
 
+func dnsLCPGuardPlan(assignments []vpp.AddressAssignment) serviceRuntime.DNSInterceptionPlan {
+	addresses := make([]string, 0, len(assignments))
+	for _, assignment := range assignments {
+		if !strings.EqualFold(strings.TrimSpace(assignment.Role), "lan") {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(assignment.CIDR))
+		if err == nil {
+			addresses = append(addresses, prefix.Addr().String())
+		}
+	}
+	return serviceRuntime.DNSInterceptionPlan{LCPGuardAddresses: addresses}
+}
+
 func runtimePolicyForAddressAssignments(policy trafficpolicy.Config, assignments []vpp.AddressAssignment) trafficpolicy.Config {
 	for _, assignment := range assignments {
 		if strings.EqualFold(strings.TrimSpace(assignment.Role), "wan") && strings.TrimSpace(assignment.VPPInterface) != "" {
@@ -5280,7 +5399,14 @@ func (server *Server) currentNATConfig(ctx context.Context) (nat.CompiledConfig,
 	}
 	bindings := make(map[string]string, len(wanPaths))
 	for id, path := range wanPaths {
-		bindings[id] = path.VPPInterface
+		interfaceName := path.VPPInterface
+		if strings.HasPrefix(interfaceName, "pppoe-runtime:") {
+			peerID := strings.TrimPrefix(interfaceName, "pppoe-runtime:")
+			if liveInterface, _, _, connected := livePPPoERuntimePath(ctx, peerID); connected {
+				interfaceName = liveInterface
+			}
+		}
+		bindings[id] = interfaceName
 	}
 	if err := nat.BindWANInterfaces(&compiled, bindings); err != nil {
 		return nat.CompiledConfig{}, err
@@ -5541,12 +5667,9 @@ func (server *Server) currentWANGroupBindings(ctx context.Context) (map[string]t
 		peerID := firstStringField(item, "pppoe_peer_id", "pppoe_id", "id")
 		isPPPoE := strings.EqualFold(nonEmpty(stringField(item, "wan_type"), stringField(item, "type")), "pppoe")
 		if isPPPoE {
-			vppInterface = serviceRuntime.PPPoEInterfaceName(peerID)
+			vppInterface = "pppoe-runtime:" + peerID
 		}
-		if sessionInterface, sessionNextHop, runtimeToken, connected := livePPPoERuntimePath(ctx, peerID); isPPPoE && connected {
-			if strings.TrimSpace(sessionInterface) != "" {
-				vppInterface = sessionInterface
-			}
+		if _, sessionNextHop, runtimeToken, connected := livePPPoERuntimePath(ctx, peerID); isPPPoE && connected {
 			if sessionNextHop != "" {
 				nextHop = sessionNextHop
 			}
@@ -5633,10 +5756,22 @@ func (server *Server) proxyUnderlayRoute(ctx context.Context, egress proxy.Egres
 	if !exists || strings.TrimSpace(path.VPPInterface) == "" {
 		return "", fmt.Errorf("proxy egress %q underlay %q has no live VPP path", egress.ID, underlayID)
 	}
+	if strings.HasPrefix(strings.TrimSpace(path.RuntimeToken), "pppoe:") || server.isPPPoEWANID(ctx, underlayID) {
+		return "pppoe-runtime:" + underlayID, nil
+	}
 	if strings.TrimSpace(path.NextHop) != "" {
 		return strings.TrimSpace(path.NextHop) + " " + strings.TrimSpace(path.VPPInterface), nil
 	}
 	return strings.TrimSpace(path.VPPInterface), nil
+}
+
+func (server *Server) isPPPoEWANID(ctx context.Context, wanID string) bool {
+	item, exists, err := server.desiredItem(ctx, "wan_link", strings.TrimSpace(wanID))
+	if err != nil || !exists || !desiredEnabled(item) {
+		return false
+	}
+	wanType := nonEmpty(stringField(item, "wan_type"), stringField(item, "type"))
+	return strings.EqualFold(strings.TrimSpace(wanType), "pppoe")
 }
 
 func (server *Server) proxyUnderlayMTU(ctx context.Context, egress proxy.Egress) (int, error) {
@@ -5917,6 +6052,9 @@ func (server *Server) activeProxyEgressDocuments(ctx context.Context) ([]persist
 		}
 		active = append(active, document)
 	}
+	sort.SliceStable(active, func(i, j int) bool {
+		return active[i].UpdatedAt.After(active[j].UpdatedAt)
+	})
 	return active, len(documents), nil
 }
 
@@ -6309,6 +6447,9 @@ func (server *Server) currentDNSUpstreams(ctx context.Context, policy trafficpol
 	}
 	sort.Slice(upstreams, func(left, right int) bool { return upstreams[left].ID < upstreams[right].ID })
 	sort.Slice(networks, func(left, right int) bool { return networks[left].UpstreamID < networks[right].UpstreamID })
+	if err := vpp.AllocateDNSServiceTapIDs(networks); err != nil {
+		return nil, serviceRuntime.SmartDNSCache{}, nil, err
+	}
 	return upstreams, cache, networks, nil
 }
 
@@ -6857,11 +6998,31 @@ func livePPPoEPathMatchesVPP(ctx context.Context, output []byte, interfaceName s
 	if !strings.Contains(sessions, needle) {
 		return false
 	}
-	addresses, err := runLiveVPP(ctx, "show", "interface", "address", interfaceName)
+	addresses, err := runLiveVPP(ctx, "show", "interface", "address")
 	if err != nil {
 		return false
 	}
-	return strings.Contains(addresses, localAddress.String()+"/")
+	return vppInterfaceHasAddress(addresses, interfaceName, localAddress.String())
+}
+
+func vppInterfaceHasAddress(output, interfaceName, address string) bool {
+	found := false
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, interfaceName+" ") {
+			found = true
+			continue
+		}
+		if !found {
+			continue
+		}
+		if strings.HasPrefix(line, "  L3 ") && strings.Contains(line, address+"/") {
+			return true
+		}
+		if line != "" && line[0] != ' ' {
+			return false
+		}
+	}
+	return false
 }
 
 func pppPathFromStatusJSON(output []byte) (string, string, bool) {
@@ -8220,18 +8381,17 @@ func (server *Server) handleTelemetry(kind string) http.HandlerFunc {
 func (server *Server) telemetryPayload(ctx context.Context, kind string) (any, []controlapi.CapabilityState) {
 	components := []RuntimeComponentState{}
 	runtimeStateValue := "degraded"
-	plan, err := server.buildRuntimePlan(ctx, "telemetry")
-	if err == nil {
-		components = server.runtimeStatusComponents(ctx, plan.RuntimeArtifacts, len(plan.VppOperations) > 0)
-		runtimeStateValue = runtimeState(components)
-	}
 	server.runtimeMu.Lock()
 	lastApply := server.lastRuntime
+	if lastApply != nil {
+		components = append([]RuntimeComponentState(nil), lastApply.Components...)
+		runtimeStateValue = lastApply.RuntimeState
+		if runtimeStateValue == "" {
+			runtimeStateValue = lastApply.Status
+		}
+	}
 	server.runtimeMu.Unlock()
 	capabilities := []controlapi.CapabilityState{{Name: "local_telemetry", Available: true, State: controlapi.CapabilityAvailable}}
-	if err != nil {
-		capabilities = append(capabilities, controlapi.CapabilityState{Name: "runtime_status", Available: false, State: controlapi.CapabilityDegraded, Reason: err.Error()})
-	}
 	if payload, capability, handled := server.orchestratorTelemetryPayload(ctx, kind, runtimeStateValue, components, lastApply); handled {
 		return payload, append(capabilities, capability)
 	}
@@ -8292,7 +8452,7 @@ func (server *Server) telemetryPayload(ctx context.Context, kind string) (any, [
 		if server.gatewayTelemetry != nil {
 			neighbors, neighborState, neighborReason = server.gatewayNeighborSnapshot(ctx)
 		}
-		onlineUsers, trafficCapability := normalizeOnlineUsersWithNeighbors(onlineUserTelemetryInput{leases: items, neighbors: neighbors, runtimeState: runtimeStateValue, leaseDegraded: len(leaseCapabilities) == 0 || !leaseCapabilities[0].Available, neighborState: neighborState, neighborReason: neighborReason})
+		onlineUsers, trafficCapability := normalizeOnlineUsersWithNeighbors(onlineUserTelemetryInput{now: server.now().UTC(), leases: items, neighbors: neighbors, runtimeState: runtimeStateValue, leaseDegraded: len(leaseCapabilities) == 0 || !leaseCapabilities[0].Available, neighborState: neighborState, neighborReason: neighborReason})
 		payload := map[string]any{"items": onlineUsers, "runtime_state": runtimeStateValue, "degraded": len(leaseCapabilities) == 0 || !leaseCapabilities[0].Available || !trafficCapability.Available}
 		if trafficCapability.Reason != "" {
 			payload["degraded_reason"] = trafficCapability.Reason
@@ -8320,11 +8480,6 @@ func (server *Server) telemetryPayload(ctx context.Context, kind string) (any, [
 		capabilities = append(capabilities, controlapi.CapabilityState{Name: "top_sessions", Available: false, State: controlapi.CapabilityDegraded, Reason: "top session collector is not configured"})
 		return map[string]any{"items": []map[string]any{}, "runtime_state": runtimeStateValue, "degraded": true, "degraded_reason": "top session collector is not configured"}, capabilities
 	case "top_domains":
-		if server.profile.ID() == product.Gateway().ID() {
-			reason := "Gateway Top Domains is unavailable until a SmartDNS collector is configured"
-			capabilities = append(capabilities, controlapi.CapabilityState{Name: "top_domains", Available: false, State: controlapi.CapabilityDegraded, Reason: reason})
-			return map[string]any{"items": []map[string]any{}, "runtime_state": runtimeStateValue, "state": "unavailable", "degraded": true, "degraded_reason": reason}, capabilities
-		}
 		if server.topTelemetry != nil {
 			items, err := server.topTelemetry.TopDomains(ctx)
 			if err == nil {
@@ -8334,8 +8489,9 @@ func (server *Server) telemetryPayload(ctx context.Context, kind string) (any, [
 			capabilities = append(capabilities, controlapi.CapabilityState{Name: "top_domains", Available: false, State: controlapi.CapabilityDegraded, Reason: reason})
 			return map[string]any{"items": []map[string]any{}, "runtime_state": runtimeStateValue, "degraded": true, "degraded_reason": reason}, capabilities
 		}
-		capabilities = append(capabilities, controlapi.CapabilityState{Name: "top_domains", Available: false, State: controlapi.CapabilityDegraded, Reason: "top domain collector is not configured"})
-		return map[string]any{"items": []map[string]any{}, "runtime_state": runtimeStateValue, "degraded": true, "degraded_reason": "top domain collector is not configured"}, capabilities
+		reason := "SmartDNS domain collector is not configured"
+		capabilities = append(capabilities, controlapi.CapabilityState{Name: "top_domains", Available: false, State: controlapi.CapabilityDegraded, Reason: reason})
+		return map[string]any{"items": []map[string]any{}, "runtime_state": runtimeStateValue, "state": "unavailable", "degraded": true, "degraded_reason": reason}, capabilities
 	default:
 		return map[string]any{"runtime_state": runtimeStateValue, "degraded": runtimeStateValue != "running"}, capabilities
 	}

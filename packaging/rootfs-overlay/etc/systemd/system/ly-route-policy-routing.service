@@ -1,18 +1,17 @@
 [Unit]
 Description=Ly Route proxy service handoff and policy routing
 StartLimitIntervalSec=0
-After=network-online.target vpp.service
+After=network-online.target vpp.service ly-route-pppoe.target
 Wants=network-online.target
-Requires=vpp.service
-PartOf=vpp.service
+Requires=vpp.service ly-route-pppoe.target
+PartOf=vpp.service ly-route-pppoe.target
 Before=smartdns.service ly-route-dns-vpp-proxy.service ly-route-dns-vpp-proxy-v6.service
+OnSuccess=ly-route-dns-vpp-proxy.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/lib/ly-route/policy-routing-apply-default
 RemainAfterExit=yes
 Restart=on-failure
-RestartSec=2s
-
-[Install]
-WantedBy=multi-user.target
+RestartSec=5s
+TimeoutStartSec=120s

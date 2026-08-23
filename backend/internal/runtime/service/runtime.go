@@ -1016,14 +1016,16 @@ func RenderNftablesCapture(plan proxy.NftablesCapturePlan) ([]RenderedArtifact, 
 }
 
 type DNSInterceptionPlan struct {
-	LANInterfaces []string `json:"lan_interfaces"`
-	ListenPort    int      `json:"listen_port"`
+	LANInterfaces     []string `json:"lan_interfaces"`
+	LCPGuardAddresses []string `json:"lcp_guard_addresses,omitempty"`
+	ListenPort        int      `json:"listen_port"`
 }
 
 func RenderGatewayNftablesCapture(plan proxy.NftablesCapturePlan, dns DNSInterceptionPlan) ([]RenderedArtifact, error) {
 	hasProxy := strings.TrimSpace(plan.Family) != "" || strings.TrimSpace(plan.Table) != ""
 	hasDNS := len(dns.LANInterfaces) > 0
-	if !hasProxy && !hasDNS {
+	hasLCPGuard := len(dns.LCPGuardAddresses) > 0
+	if !hasProxy && !hasDNS && !hasLCPGuard {
 		return nil, nil
 	}
 	if hasProxy && (strings.TrimSpace(plan.Family) == "" || strings.TrimSpace(plan.Table) == "") {
@@ -1053,6 +1055,19 @@ func RenderGatewayNftablesCapture(plan proxy.NftablesCapturePlan, dns DNSInterce
 		}
 	}
 	slices.Sort(lanInterfaces)
+	guardAddresses := make([]netip.Addr, 0, len(dns.LCPGuardAddresses))
+	seenGuardAddresses := map[netip.Addr]bool{}
+	for _, raw := range dns.LCPGuardAddresses {
+		address, err := netip.ParseAddr(strings.TrimSpace(raw))
+		if err != nil || address.IsUnspecified() || address.IsMulticast() {
+			return nil, fmt.Errorf("DNS LCP guard address %q is invalid", raw)
+		}
+		if !seenGuardAddresses[address] {
+			seenGuardAddresses[address] = true
+			guardAddresses = append(guardAddresses, address)
+		}
+	}
+	slices.SortFunc(guardAddresses, func(left, right netip.Addr) int { return left.Compare(right) })
 	var builder strings.Builder
 	builder.WriteString("#!/usr/sbin/nft -f\n\n")
 	// This artifact owns only its dedicated table. `add table` is idempotent on
@@ -1061,6 +1076,15 @@ func RenderGatewayNftablesCapture(plan proxy.NftablesCapturePlan, dns DNSInterce
 	builder.WriteString(fmt.Sprintf("add table %s %s\n", family, table))
 	builder.WriteString(fmt.Sprintf("flush table %s %s\n\n", family, table))
 	builder.WriteString(fmt.Sprintf("table %s %s {\n", family, table))
+	if len(lanInterfaces) > 0 {
+		builder.WriteString("  chain dns_prerouting {\n")
+		builder.WriteString("    type nat hook prerouting priority -200; policy accept;\n")
+		for _, name := range lanInterfaces {
+			builder.WriteString(fmt.Sprintf("    iifname %q udp dport 53 counter redirect to :%d\n", name, port))
+			builder.WriteString(fmt.Sprintf("    iifname %q tcp dport 53 counter redirect to :%d\n", name, port))
+		}
+		builder.WriteString("  }\n")
+	}
 	for _, chain := range plan.Chains {
 		builder.WriteString(fmt.Sprintf("  chain %s {\n", chain.Name))
 		builder.WriteString(fmt.Sprintf("    type %s hook %s priority %d; policy %s;\n", chain.Type, chain.Hook, chain.Priority, chain.Policy))
@@ -1071,12 +1095,16 @@ func RenderGatewayNftablesCapture(plan proxy.NftablesCapturePlan, dns DNSInterce
 		}
 		builder.WriteString("  }\n")
 	}
-	if len(lanInterfaces) > 0 {
-		builder.WriteString("  chain dns_prerouting {\n")
-		builder.WriteString("    type nat hook prerouting priority -100; policy accept;\n")
-		for _, name := range lanInterfaces {
-			builder.WriteString(fmt.Sprintf("    iifname %q udp dport 53 counter redirect to :%d\n", name, port))
-			builder.WriteString(fmt.Sprintf("    iifname %q tcp dport 53 counter redirect to :%d\n", name, port))
+	if len(guardAddresses) > 0 {
+		builder.WriteString("  chain dns_lcp_guard {\n")
+		builder.WriteString("    type filter hook input priority -300; policy accept;\n")
+		for _, address := range guardAddresses {
+			family := "ip"
+			if address.Is6() {
+				family = "ip6"
+			}
+			builder.WriteString(fmt.Sprintf("    %s daddr %s udp dport 53 counter drop\n", family, address))
+			builder.WriteString(fmt.Sprintf("    %s daddr %s tcp dport 53 counter drop\n", family, address))
 		}
 		builder.WriteString("  }\n")
 	}
@@ -1194,6 +1222,8 @@ func renderDNSServiceRoutingSection(networks []vpp.DNSServiceNetwork, proxyEgres
 	for _, network := range ordered {
 		if name := serviceUnderlayInterface(network.UnderlayRoute); name != "" {
 			underlayInterfaces = append(underlayInterfaces, name)
+		} else if isRuntimePPPoEUnderlay(network.UnderlayRoute) {
+			underlayInterfaces = append(underlayInterfaces, network.UnderlayRoute)
 		}
 	}
 	readiness, err := renderVPPUnderlayReadiness(underlayInterfaces)
@@ -1249,34 +1279,57 @@ func renderDNSServiceRoutingSection(networks []vpp.DNSServiceNetwork, proxyEgres
 	builder.WriteString("}\n\n")
 	for _, network := range ordered {
 		underlayPath := serviceVPPRoutePath(network.UnderlayRoute)
+		dynamicUnderlay := isRuntimePPPoEUnderlay(network.UnderlayRoute)
 		linuxTableID := network.TableID
 		rulePriority := 10000 + network.TapID
 		markPriority := 20000 + network.TapID
 		builder.WriteString(fmt.Sprintf("ensure_dns_tap %d %s %s\n", network.TapID, network.HostInterface, network.VPPInterface))
+		if dynamicUnderlay {
+			builder.WriteString(fmt.Sprintf("UNDERLAY_IF=$(resolve_underlay %s)\n", underlayPath))
+		}
 		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface mtu packet %d %s\n", network.MTU, network.VPPInterface))
 		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface ip address del %s %s 2>/dev/null || true\n", network.VPPInterface, network.CIDR))
 		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip table add %d 2>/dev/null || true\n", network.TableID))
 		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface ip table %s %d\n", network.VPPInterface, network.TableID))
 		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface ip address %s %s 2>/dev/null || true\n", network.VPPInterface, network.CIDR))
 		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route del table %d 0.0.0.0/0 2>/dev/null || true\n", network.TableID))
-		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add table %d 0.0.0.0/0 via %s\n", network.TableID, underlayPath))
-		if name := serviceUnderlayInterface(network.UnderlayRoute); name != "" {
+		if dynamicUnderlay {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add table %d 0.0.0.0/0 via \"$UNDERLAY_IF\"\n", network.TableID))
+		} else {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add table %d 0.0.0.0/0 via %s\n", network.TableID, underlayPath))
+		}
+		name := serviceUnderlayInterface(network.UnderlayRoute)
+		if name != "" || dynamicUnderlay {
 			if natBehavior == nat.BehaviorFullCone {
 				builder.WriteString("\"$VPPCTL\" nat44 plugin disable >/dev/null 2>&1 || true\n")
 				builder.WriteString("\"$VPPCTL\" nat44 ei plugin enable >/dev/null 2>&1 || true\n")
-				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 ei in %s out %s\n", network.VPPInterface, name))
-				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" nat44 ei add interface address %s >/dev/null 2>&1 || true\n", name))
+				if dynamicUnderlay {
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 ei in %s out \"$UNDERLAY_IF\"\n", network.VPPInterface))
+					builder.WriteString("\"$VPPCTL\" nat44 ei add interface address \"$UNDERLAY_IF\" >/dev/null 2>&1 || true\n")
+				} else {
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 ei in %s out %s\n", network.VPPInterface, name))
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" nat44 ei add interface address %s >/dev/null 2>&1 || true\n", name))
+				}
 				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add %s/32 via %s %s\n", network.HostAddress, network.HostAddress, network.VPPInterface))
 				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show nat44 ei interfaces | grep -Fq %s\n", network.VPPInterface))
 			} else {
 				builder.WriteString("\"$VPPCTL\" nat44 ei plugin disable 2>/dev/null || true\n")
 				builder.WriteString("\"$VPPCTL\" nat44 plugin enable 2>/dev/null || true\n")
-				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s output-feature del 2>/dev/null || true\n", network.VPPInterface, name))
-				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s\n", network.VPPInterface, name))
+				if dynamicUnderlay {
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out \"$UNDERLAY_IF\" output-feature del 2>/dev/null || true\n", network.VPPInterface))
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out \"$UNDERLAY_IF\"\n", network.VPPInterface))
+				} else {
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s output-feature del 2>/dev/null || true\n", network.VPPInterface, name))
+					builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s\n", network.VPPInterface, name))
+				}
 				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add %s/32 via %s %s\n", network.HostAddress, network.HostAddress, network.VPPInterface))
 				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show nat44 interfaces | grep -Fq %s\n", network.VPPInterface))
 			}
-			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show ip fib table %d | grep -F %s >/dev/null\n", network.TableID, name))
+			if dynamicUnderlay {
+				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show ip fib table %d | grep -F \"$UNDERLAY_IF\" >/dev/null\n", network.TableID))
+			} else {
+				builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show ip fib table %d | grep -F %s >/dev/null\n", network.TableID, name))
+			}
 		}
 		if strings.TrimSpace(proxyEgressID) != "" && strings.TrimSpace(network.WANEgressID) == strings.TrimSpace(proxyEgressID) {
 			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route del %s/32 via %s %s 2>/dev/null || true\n", network.HostAddress, network.HostAddress, network.VPPInterface))
@@ -1354,6 +1407,7 @@ func renderProxyServiceNetwork(plan proxy.LinuxPolicyRoutingPlan, natBehavior na
 		return nil, fmt.Errorf("proxy service network underlay route %q is unsafe", underlay)
 	}
 	underlayPath := serviceVPPRoutePath(underlay)
+	dynamicUnderlay := isRuntimePPPoEUnderlay(underlay)
 	lanRoutes := make([]string, 0, len(plan.LANRoutes))
 	for _, route := range plan.LANRoutes {
 		prefix, err := netip.ParsePrefix(strings.TrimSpace(route))
@@ -1366,11 +1420,25 @@ func renderProxyServiceNetwork(plan proxy.LinuxPolicyRoutingPlan, natBehavior na
 	var builder strings.Builder
 	builder.WriteString("#!/bin/sh\nset -eu\n\n")
 	builder.WriteString("VPPCTL=${LY_ROUTE_VPPCTL:-vppctl}\n")
-	readiness, err := renderVPPUnderlayReadiness([]string{serviceUnderlayInterface(underlay)})
+	readinessTarget := serviceUnderlayInterface(underlay)
+	if dynamicUnderlay {
+		readinessTarget = underlay
+	}
+	readiness, err := renderVPPUnderlayReadiness([]string{readinessTarget})
 	if err != nil {
 		return nil, err
 	}
+	strictReadiness := fmt.Sprintf("if ! wait_vpp_underlay %s; then\n  echo \"VPP underlay %s is unavailable; retrying dependent policy routing\" >&2\n  exit 1\nfi\n", readinessTarget, readinessTarget)
+	optionalReadiness := fmt.Sprintf("if wait_vpp_underlay %s; then\n  proxy_underlay_ready=true\nelse\n  echo \"VPP proxy underlay %s unavailable; bypassing proxy service\" >&2\n  proxy_underlay_ready=false\nfi\n", readinessTarget, readinessTarget)
+	if !strings.Contains(readiness, strictReadiness) {
+		return nil, fmt.Errorf("proxy readiness block is missing")
+	}
+	readiness = strings.Replace(readiness, strictReadiness, optionalReadiness, 1)
 	builder.WriteString(readiness)
+	builder.WriteString("if [ \"$proxy_underlay_ready\" = true ]; then\n")
+	if dynamicUnderlay {
+		builder.WriteString(fmt.Sprintf("UNDERLAY_IF=$(resolve_underlay %s)\n", underlayPath))
+	}
 	builder.WriteString("ensure_tap() {\n")
 	builder.WriteString("  tap_id=$1\n  host_if=$2\n  vpp_if=$3\n")
 	// A VPP TAP can survive while its Linux peer disappeared (for example
@@ -1406,9 +1474,14 @@ func renderProxyServiceNetwork(plan proxy.LinuxPolicyRoutingPlan, natBehavior na
 	builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface ip table %s %d\n", network.EgressVPPInterface, network.OutboundTableID))
 	builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface ip address %s %s 2>/dev/null || true\n", network.EgressVPPInterface, network.EgressCIDR))
 	builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route del table %d 0.0.0.0/0 2>/dev/null || true\n", network.OutboundTableID))
-	builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add table %d 0.0.0.0/0 via %s\n", network.OutboundTableID, underlayPath))
-	if name := serviceUnderlayInterface(underlay); name != "" {
-		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show ip fib table %d | grep -F %s >/dev/null\n", network.OutboundTableID, name))
+	if dynamicUnderlay {
+		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add table %d 0.0.0.0/0 via \"$UNDERLAY_IF\"\n", network.OutboundTableID))
+		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show ip fib table %d | grep -F \"$UNDERLAY_IF\" >/dev/null\n", network.OutboundTableID))
+	} else {
+		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" ip route add table %d 0.0.0.0/0 via %s\n", network.OutboundTableID, underlayPath))
+		if name := serviceUnderlayInterface(underlay); name != "" {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show ip fib table %d | grep -F %s >/dev/null\n", network.OutboundTableID, name))
+		}
 	}
 	// Proxy traffic enters VPP again from the Linux/Xray egress TAP. It must be
 	// the NAT inside interface for the selected WAN; otherwise the proxy node
@@ -1416,12 +1489,22 @@ func renderProxyServiceNetwork(plan proxy.LinuxPolicyRoutingPlan, natBehavior na
 	if natBehavior == nat.BehaviorFullCone {
 		builder.WriteString("\"$VPPCTL\" nat44 plugin disable >/dev/null 2>&1 || true\n")
 		builder.WriteString("\"$VPPCTL\" nat44 ei plugin enable >/dev/null 2>&1 || true\n")
-		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 ei in %s out %s\n", network.EgressVPPInterface, serviceUnderlayInterface(underlay)))
-		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" nat44 ei add interface address %s >/dev/null 2>&1 || true\n\n", serviceUnderlayInterface(underlay)))
+		if dynamicUnderlay {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 ei in %s out \"$UNDERLAY_IF\"\n", network.EgressVPPInterface))
+			builder.WriteString("\"$VPPCTL\" nat44 ei add interface address \"$UNDERLAY_IF\" >/dev/null 2>&1 || true\n\n")
+		} else {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 ei in %s out %s\n", network.EgressVPPInterface, serviceUnderlayInterface(underlay)))
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" nat44 ei add interface address %s >/dev/null 2>&1 || true\n\n", serviceUnderlayInterface(underlay)))
+		}
 	} else {
 		builder.WriteString("\"$VPPCTL\" nat44 plugin enable 2>/dev/null || true\n")
-		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s output-feature del 2>/dev/null || true\n", network.EgressVPPInterface, serviceUnderlayInterface(underlay)))
-		builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s\n\n", network.EgressVPPInterface, serviceUnderlayInterface(underlay)))
+		if dynamicUnderlay {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out \"$UNDERLAY_IF\" output-feature del 2>/dev/null || true\n", network.EgressVPPInterface))
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out \"$UNDERLAY_IF\"\n\n", network.EgressVPPInterface))
+		} else {
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s output-feature del 2>/dev/null || true\n", network.EgressVPPInterface, serviceUnderlayInterface(underlay)))
+			builder.WriteString(fmt.Sprintf("\"$VPPCTL\" set interface nat44 in %s out %s\n\n", network.EgressVPPInterface, serviceUnderlayInterface(underlay)))
+		}
 	}
 
 	builder.WriteString(fmt.Sprintf("ip link set dev %s mtu %d up\n", network.IngressHostInterface, network.MTU))
@@ -1460,6 +1543,7 @@ func renderProxyServiceNetwork(plan proxy.LinuxPolicyRoutingPlan, natBehavior na
 	builder.WriteString(fmt.Sprintf("\"$VPPCTL\" show interface address %s | grep -F %s >/dev/null\n", network.EgressVPPInterface, network.EgressVPPAddress))
 	builder.WriteString(fmt.Sprintf("ip route show table %d | grep -F %s >/dev/null\n", network.OutboundTableID, network.EgressVPPAddress))
 
+	builder.WriteString("else\n  echo \"proxy service bypassed because its WAN underlay is unavailable\" >&2\nfi\n")
 	return []RenderedArtifact{NewArtifact(LinuxRouting, "/var/lib/ly-route/policy-routing/apply.sh", builder.String(), "restart")}, nil
 }
 
@@ -1493,12 +1577,45 @@ func serviceUnderlayInterface(value string) string {
 
 func serviceVPPRoutePath(value string) string {
 	fields := strings.Fields(strings.TrimSpace(value))
-	if len(fields) == 1 && strings.HasPrefix(strings.ToLower(fields[0]), "pppoe_session") {
+	if len(fields) == 1 && (strings.HasPrefix(strings.ToLower(fields[0]), "pppoe_session") || isRuntimePPPoEUnderlay(fields[0])) {
 		// PPPoE is a point-to-point VPP interface. VPP resolves the peer
 		// through the session; an artificial 0.0.0.0 next hop is invalid.
 		return fields[0]
 	}
 	return strings.TrimSpace(value)
+}
+
+func isRuntimePPPoEUnderlay(value string) bool {
+	return strings.HasPrefix(strings.TrimSpace(value), "pppoe-runtime:")
+}
+
+func renderRuntimeUnderlayResolver(underlays []string) (string, error) {
+	for _, underlay := range underlays {
+		if !isRuntimePPPoEUnderlay(underlay) {
+			continue
+		}
+		peerID := strings.TrimPrefix(strings.TrimSpace(underlay), "pppoe-runtime:")
+		if !serviceTokenSafe(peerID) || peerID == "" {
+			return "", fmt.Errorf("PPPoE runtime underlay %q has an unsafe peer id", underlay)
+		}
+	}
+	for _, underlay := range underlays {
+		if isRuntimePPPoEUnderlay(underlay) {
+			return "resolve_underlay() {\n" +
+				"  case \"$1\" in\n" +
+				"    pppoe-runtime:*)\n" +
+				"      peer_id=${1#pppoe-runtime:}\n" +
+				"      status_file=/run/ly-route/pppoe/$peer_id.json\n" +
+				"      [ -r \"$status_file\" ] || { echo \"PPPoE status $status_file is unavailable\" >&2; return 1; }\n" +
+				"      interface=$(sed -n 's/.*\"interface\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' \"$status_file\" | head -n 1)\n" +
+				"      case \"$interface\" in pppoe_session[0-9]*) printf '%s\\n' \"$interface\" ;; *) echo \"invalid PPPoE runtime interface\" >&2; return 1 ;; esac\n" +
+				"      ;;\n" +
+				"    *) printf '%s\\n' \"$1\" ;;\n" +
+				"  esac\n" +
+				"}\n", nil
+		}
+	}
+	return "resolve_underlay() { printf '%s\\n' \"$1\"; }\n", nil
 }
 
 func renderVPPUnderlayReadiness(interfaces []string) (string, error) {
@@ -1523,14 +1640,20 @@ func renderVPPUnderlayReadiness(interfaces []string) (string, error) {
 	slices.Sort(ordered)
 	var builder strings.Builder
 	builder.WriteString("VPPCTL=${LY_ROUTE_VPPCTL:-vppctl}\n")
+	resolver, err := renderRuntimeUnderlayResolver(ordered)
+	if err != nil {
+		return "", err
+	}
+	builder.WriteString(resolver)
 	builder.WriteString("wait_vpp_underlay() {\n")
-	builder.WriteString("  underlay_if=$1\n")
-	builder.WriteString("  attempts=${LY_ROUTE_VPP_UNDERLAY_READY_ATTEMPTS:-10}\n")
+	builder.WriteString("  attempts=${LY_ROUTE_VPP_UNDERLAY_READY_ATTEMPTS:-60}\n")
 	builder.WriteString("  interval=${LY_ROUTE_VPP_UNDERLAY_READY_INTERVAL:-1}\n")
 	builder.WriteString("  case \"$attempts:$interval\" in *[!0-9:]*|0:*|*:0) echo \"VPP underlay readiness settings must be positive integers\" >&2; return 1 ;; esac\n")
 	builder.WriteString("  attempt=1\n")
-	builder.WriteString("  while ! \"$VPPCTL\" show interface address \"$underlay_if\" 2>/dev/null | grep -Eq 'L3 [0-9]'; do\n")
-	builder.WriteString("    [ \"$attempt\" -lt \"$attempts\" ] || { echo \"VPP underlay $underlay_if did not become ready\" >&2; return 1; }\n")
+	builder.WriteString("  while :; do\n")
+	builder.WriteString("    underlay_if=$(resolve_underlay \"$1\" 2>/dev/null || true)\n")
+	builder.WriteString("    if [ -n \"$underlay_if\" ] && \"$VPPCTL\" show interface address 2>/dev/null | tr -d '\\r' | grep -A1 -E \"^$underlay_if \" | grep -Eq '^  L3 [0-9]'; then return 0; fi\n")
+	builder.WriteString("    [ \"$attempt\" -lt \"$attempts\" ] || { echo \"VPP underlay ${underlay_if:-$1} did not become ready\" >&2; return 1; }\n")
 	builder.WriteString("    sleep \"$interval\"\n")
 	builder.WriteString("    attempt=$((attempt + 1))\n")
 	builder.WriteString("  done\n")
@@ -1678,10 +1801,11 @@ func marshalIndented(value any) (string, error) {
 }
 
 type FilesystemController struct {
-	RootDir        string
-	Runner         CommandRunner
-	Now            func() time.Time
-	XrayAPIAddress string
+	RootDir            string
+	Runner             CommandRunner
+	Now                func() time.Time
+	XrayAPIAddress     string
+	XrayMetricsAddress string
 }
 
 func (controller FilesystemController) ReloadOrRestart(ctx context.Context, service ServiceName, artifacts []RenderedArtifact) error {

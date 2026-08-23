@@ -167,6 +167,9 @@ func TestBuiltInRoutingGroupsMaterializeOnlyWhenReferenced(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, item := range items {
+		if id := stringField(item, "id"); id == "obj-local-lan" || id == "obj-proxy-domains" {
+			t.Fatalf("obsolete built-in object group is still exposed: %s", id)
+		}
 		if stringField(item, "id") == "obj-geoip-cn" && len(objectGroupEntries(item)) != 0 {
 			t.Fatal("built-in GeoIP group must remain lazy in the list representation")
 		}
@@ -2254,7 +2257,7 @@ func TestTopTelemetryCollectorBacksTopSessionsAndDomains(t *testing.T) {
 		t.Fatalf("top sessions response = %d %s", sessions.Code, sessions.Body.String())
 	}
 	domains := authenticatedJSONRequest(t, server, http.MethodGet, "/api/v1/telemetry/top-domains", "", cookie)
-	if domains.Code != http.StatusOK || strings.Contains(domains.Body.String(), "example.com") || !strings.Contains(domains.Body.String(), "SmartDNS collector") || !strings.Contains(domains.Body.String(), `"state":"unavailable"`) {
+	if domains.Code != http.StatusOK || !strings.Contains(domains.Body.String(), "example.com") || !strings.Contains(domains.Body.String(), `"degraded":false`) {
 		t.Fatalf("Gateway top domains response = %d %s", domains.Code, domains.Body.String())
 	}
 }
@@ -4174,10 +4177,16 @@ type httpServiceController struct {
 	applyErrs           map[serviceRuntime.ServiceName]error
 	xrayStates          []serviceRuntime.XrayBalancerState
 	xrayStateErr        error
+	xrayObservations    []serviceRuntime.XrayObservatoryState
+	xrayObservationErr  error
 }
 
 func (controller *httpServiceController) XrayBalancerStates(_ context.Context, _ []string) ([]serviceRuntime.XrayBalancerState, error) {
 	return append([]serviceRuntime.XrayBalancerState(nil), controller.xrayStates...), controller.xrayStateErr
+}
+
+func (controller *httpServiceController) XrayObservatoryStates(_ context.Context) ([]serviceRuntime.XrayObservatoryState, error) {
+	return append([]serviceRuntime.XrayObservatoryState(nil), controller.xrayObservations...), controller.xrayObservationErr
 }
 
 func (controller *httpServiceController) Stop(_ context.Context, service serviceRuntime.ServiceName, artifacts []serviceRuntime.RenderedArtifact) error {

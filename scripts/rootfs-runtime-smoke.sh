@@ -91,12 +91,12 @@ if [ -f "$tmp/etc/systemd/system/ly-route-policy-routing.service" ]; then
   test -x "$tmp/usr/lib/ly-route/policy-routing-apply-default"
   grep -q '^PartOf=vpp.service$' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
   grep -q 'ly-route-vpp-apply.service' "$tmp/etc/systemd/system/ly-route-policy-routing.service"
-  test -L "$tmp/etc/systemd/system/multi-user.target.wants/ly-route-policy-routing.service"
+  test ! -e "$tmp/etc/systemd/system/multi-user.target.wants/ly-route-policy-routing.service"
 fi
 if [ -f "$tmp/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf" ]; then
   grep -q '^Wants=ly-route-dns-vpp-session.service$' "$tmp/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf"
   grep -q '^Before=ly-route-dns-vpp-session.service$' "$tmp/etc/systemd/system/smartdns.service.d/10-ly-route-vpp-lifecycle.conf"
-  grep -q '^Wants=smartdns.service$' "$tmp/etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf"
+  test ! -s "$tmp/etc/systemd/system/ly-route-policy-routing.service.d/10-dns-vpp-lifecycle.conf"
 fi
 if [ -f "$tmp/etc/systemd/system/ly-route-vpp-apply.service" ]; then
   grep -q '/usr/lib/ly-route/vpp-apply-default' "$tmp/etc/systemd/system/ly-route-vpp-apply.service"

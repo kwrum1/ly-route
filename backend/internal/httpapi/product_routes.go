@@ -112,6 +112,7 @@ func productRoutes() []productRoute {
 		{pattern: "/api/v1/telemetry/interfaces", capability: product.CapabilityTelemetry, handler: telemetry("interfaces")},
 		{pattern: "/api/v1/telemetry/traffic-trend", capability: product.CapabilityTelemetry, handler: bindHandler((*Server).handleTrafficTrend)},
 		{pattern: "/api/v1/telemetry/top-sessions", capability: product.CapabilityTelemetry, handler: bindHandler((*Server).handleTopSessionsTelemetry)},
+		{pattern: "/api/v1/telemetry/sessions", capability: product.CapabilityTelemetry, handler: bindHandler((*Server).handleActiveSessionsTelemetry)},
 		{pattern: "/api/v1/telemetry/top-domains", capability: product.CapabilityTopDomains, handler: telemetry("top_domains")},
 		{pattern: "/api/v1/telemetry/online-users", capability: product.CapabilityTelemetry, handler: telemetry("online_users")},
 		{pattern: "/api/v1/telemetry/policy-hits", capability: product.CapabilityTelemetry, handler: telemetry("policy_hits")},

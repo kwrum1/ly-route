@@ -45,6 +45,44 @@ func TestProductionDataplaneWrapperMarksPlanPreparedBeforeGateway(t *testing.T) 
 	}
 }
 
+func TestProductionDataplaneWrapperRebindsKeaAfterVPPRecreatesGatewayTAPs(t *testing.T) {
+	// Given
+	trace := []string{}
+	inner := &fakeGatewayRunner{trace: &trace}
+	controller := &fakeDataplaneKeaRebinder{trace: &trace, changed: true}
+	transaction := &productionGatewayWithDataplane{inner: inner, dataplane: controller, dpdkActive: map[string]bool{}}
+
+	// When
+	_, err := transaction.Run(context.Background(), dpdkGatewayPlan("txn-dpdk-kea-rebind"))
+
+	// Then
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"dataplane-apply", "gateway-run", "kea-rebind"}; !reflect.DeepEqual(trace, want) {
+		t.Fatalf("trace=%v, want=%v", trace, want)
+	}
+}
+
+func TestProductionDataplaneWrapperDoesNotRebindKeaWithoutVPPRestart(t *testing.T) {
+	// Given
+	trace := []string{}
+	inner := &fakeGatewayRunner{trace: &trace}
+	controller := &fakeDataplaneKeaRebinder{trace: &trace}
+	transaction := &productionGatewayWithDataplane{inner: inner, dataplane: controller, dpdkActive: map[string]bool{}}
+
+	// When
+	_, err := transaction.Run(context.Background(), dpdkGatewayPlan("txn-dpdk-no-kea-rebind"))
+
+	// Then
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"dataplane-apply", "gateway-run"}; !reflect.DeepEqual(trace, want) {
+		t.Fatalf("trace=%v, want=%v", trace, want)
+	}
+}
+
 type fakeGatewayRunner struct {
 	trace    *[]string
 	fail     bool
@@ -73,6 +111,26 @@ func (controller *fakeDataplaneController) Apply(context.Context, dataplane.Requ
 func (controller *fakeDataplaneController) Rollback(context.Context, string) (dataplane.Receipt, error) {
 	*controller.trace = append(*controller.trace, "dataplane-rollback")
 	return dataplane.Receipt{}, nil
+}
+
+type fakeDataplaneKeaRebinder struct {
+	trace   *[]string
+	changed bool
+}
+
+func (controller *fakeDataplaneKeaRebinder) Apply(context.Context, dataplane.Request) (dataplane.Receipt, error) {
+	*controller.trace = append(*controller.trace, "dataplane-apply")
+	return dataplane.Receipt{Changed: controller.changed}, nil
+}
+
+func (controller *fakeDataplaneKeaRebinder) Rollback(context.Context, string) (dataplane.Receipt, error) {
+	*controller.trace = append(*controller.trace, "dataplane-rollback")
+	return dataplane.Receipt{}, nil
+}
+
+func (controller *fakeDataplaneKeaRebinder) RebindKea(context.Context) error {
+	*controller.trace = append(*controller.trace, "kea-rebind")
+	return nil
 }
 
 func dpdkGatewayPlan(id string) Plan {

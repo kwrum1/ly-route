@@ -181,10 +181,16 @@ type XrayRuntime struct {
 type XrayConfigPayload struct {
 	Log         XrayLog          `json:"log"`
 	API         *XrayAPI         `json:"api,omitempty"`
+	Metrics     *XrayMetrics     `json:"metrics,omitempty"`
 	Inbounds    []XrayInbound    `json:"inbounds"`
 	Outbounds   []XrayOutbound   `json:"outbounds"`
 	Routing     *XrayRouting     `json:"routing,omitempty"`
 	Observatory *XrayObservatory `json:"observatory,omitempty"`
+}
+
+type XrayMetrics struct {
+	Tag    string `json:"tag,omitempty"`
+	Listen string `json:"listen"`
 }
 
 type XrayLog struct {
@@ -243,7 +249,7 @@ type XrayBalancerStrategy struct {
 
 type XrayObservatory struct {
 	SubjectSelector   []string `json:"subjectSelector"`
-	ProbeURL          string   `json:"probeURL"`
+	ProbeURL          string   `json:"probeUrl"`
 	ProbeInterval     string   `json:"probeInterval"`
 	EnableConcurrency bool     `json:"enableConcurrency"`
 }
@@ -265,6 +271,8 @@ type Subscription struct {
 	Enabled   bool          `json:"enabled"`
 	NodeRefs  []string      `json:"node_refs,omitempty"`
 	Selection SelectionMode `json:"selection,omitempty"`
+	Strategy  string        `json:"strategy,omitempty"`
+	TopN      int           `json:"top_n,omitempty"`
 }
 
 type RedactedNode struct {
@@ -278,11 +286,14 @@ type RedactedNode struct {
 }
 
 type RedactedSubscription struct {
-	ID       string   `json:"id"`
-	Name     string   `json:"name"`
-	URL      string   `json:"url"`
-	Enabled  bool     `json:"enabled"`
-	NodeRefs []string `json:"node_refs,omitempty"`
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	URL       string        `json:"url"`
+	Enabled   bool          `json:"enabled"`
+	NodeRefs  []string      `json:"node_refs,omitempty"`
+	Selection SelectionMode `json:"selection,omitempty"`
+	Strategy  string        `json:"strategy,omitempty"`
+	TopN      int           `json:"top_n,omitempty"`
 }
 
 type CompiledEgress struct {
@@ -465,7 +476,16 @@ func RedactSubscription(subscription Subscription) (RedactedSubscription, error)
 	if strings.TrimSpace(subscription.ID) == "" || strings.TrimSpace(subscription.URL) == "" {
 		return RedactedSubscription{}, fmt.Errorf("%w: subscription requires id and url", ErrInvalidEgress)
 	}
-	return RedactedSubscription{ID: strings.TrimSpace(subscription.ID), Name: strings.TrimSpace(subscription.Name), URL: redactURL(subscription.URL), Enabled: subscription.Enabled, NodeRefs: append([]string(nil), subscription.NodeRefs...)}, nil
+	return RedactedSubscription{
+		ID:        strings.TrimSpace(subscription.ID),
+		Name:      strings.TrimSpace(subscription.Name),
+		URL:       redactURL(subscription.URL),
+		Enabled:   subscription.Enabled,
+		NodeRefs:  append([]string(nil), subscription.NodeRefs...),
+		Selection: subscription.Selection,
+		Strategy:  strings.TrimSpace(subscription.Strategy),
+		TopN:      subscription.TopN,
+	}, nil
 }
 
 func CompileNodeOutbound(node Node) (XrayOutbound, error) {

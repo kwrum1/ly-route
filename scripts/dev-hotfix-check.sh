@@ -26,11 +26,14 @@ printf '%s\n' '==> source whitespace check'
 git diff --check -- . ':(exclude)packaging/vpp-patches/*.patch'
 
 printf '%s\n' '==> shell syntax check'
+shell_files=$(mktemp)
+trap 'rm -f "$shell_files"' EXIT
+find scripts packaging/rootfs-overlay -type f -name '*.sh' -print0 >"$shell_files"
 while IFS= read -r -d '' file; do
   # bash parses the POSIX shell subset too, while handling the Bash scripts
   # used by the acceptance helpers without a second shell-specific branch.
   bash -n "$file"
-done < <(find scripts packaging/rootfs-overlay -type f -name '*.sh' -print0)
+done <"$shell_files"
 
 if ! command -v go >/dev/null 2>&1; then
   printf '%s\n' 'go is required for the daily source gate' >&2
