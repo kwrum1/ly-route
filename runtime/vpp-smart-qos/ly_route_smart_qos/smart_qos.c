@@ -617,16 +617,13 @@ VLIB_CLI_COMMAND (ly_sq_rate_show_command, static) = {
 static clib_error_t *
 ly_sq_init (vlib_main_t *vm)
 {
-  vlib_handoff_alloc_queues_args_t queue_args = {
-    .node_index = ly_sq_enqueue_node.index,
-  };
-
   ly_sq_main.vlib_main = vm;
   ly_sq_main.vnet_main = vnet_get_main ();
   ly_sq_main.arc_index =
     ly_sq_main.vnet_main->interface_main.output_feature_arc_index;
   ly_sq_main.scheduler_thread_index = 0;
-  ly_sq_main.frame_queue_index = vlib_handoff_alloc_queues (&queue_args);
+  ly_sq_main.frame_queue_index =
+    vlib_frame_queue_main_init (ly_sq_enqueue_node.index, 0);
   return 0;
 }
 

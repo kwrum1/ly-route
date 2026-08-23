@@ -4,7 +4,8 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
-#include <vlib/handoff.h>
+#include <vlib/buffer_node.h>
+#include <vlib/threads.h>
 
 #define LY_SQ_FLOW_COUNT 1024
 #define LY_SQ_HOST_COUNT 256
