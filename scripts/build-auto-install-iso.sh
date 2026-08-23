@@ -155,13 +155,6 @@ payload=$payload_dir/ly-route-gateway-x86_64.img.zst
 log=/var/log/ly-route-installer.log
 exec > >(tee -a "$log") 2>&1
 
-# Informational output must stay out of command substitutions used to collect
-# selected interface records. The service mirrors stderr to the same console.
-say() { printf '\n[Ly Route] %s\n' "$*" >&2; }
-fail() { say "Installation stopped: $*"; exit 1; }
-cmdline=" $(cat /proc/cmdline) "
-case "$cmdline" in *' lyroute.autoinstall=1 '*) ;; *) fail 'installer mode is not enabled' ;; esac
-
 # The ESXi remote console injects keys into the graphical virtual terminal,
 # not into its optional serial-log device. Bind the installer service to tty1
 # so both local hardware consoles and ESXi use the same visible input path.
@@ -169,9 +162,18 @@ prompt_tty=/dev/tty1
 [ -r "$prompt_tty" ] && [ -w "$prompt_tty" ] || prompt_tty=/dev/console
 [ -r "$prompt_tty" ] && [ -w "$prompt_tty" ] || fail 'installer console is unavailable'
 
+say() {
+  local message="[Ly Route] $*"
+  printf '\n%s\n' "$message" >&2
+  printf '\n%s\n' "$message" > "$prompt_tty" 2>/dev/null || true
+}
+fail() { say "Installation stopped: $*"; exit 1; }
+cmdline=" $(cat /proc/cmdline) "
+case "$cmdline" in *' lyroute.autoinstall=1 '*) ;; *) fail 'installer mode is not enabled' ;; esac
+
 ask() {
   local prompt=$1 default=$2 answer
-  printf '%s' "$prompt" > "$prompt_tty"
+  printf '\n%s ' "$prompt" > "$prompt_tty"
   read -r answer < "$prompt_tty" || fail 'cannot read installer input'
   printf '%s\n' "${answer:-$default}"
 }
@@ -348,16 +350,20 @@ fi
     confirmation=$(ask 'Enter yes to format the selected disk and install:' '')
   fi
 [ "$confirmation" = yes ] || fail 'installation cancelled'
-say "Installing to $target. All data on this disk will be erased."
+say "安装确认成功。目标磁盘：$target"
+say '正在清理目标磁盘，现有数据将被删除。'
 swapoff -a 2>/dev/null || true
 wipefs -a "$target" 2>/dev/null || true
-zstd -dc "$payload" | dd of="$target" bs=16M conv=fsync status=progress
+say '正在写入系统镜像，进度会持续显示，请勿断电。'
+zstd -dc "$payload" | dd of="$target" bs=16M conv=fsync,notrunc status=progress
 sync
+say '系统镜像写入完成，正在校验磁盘内容。'
 
 expected_image=$(cat "$payload_dir/image.sha256")
 image_size=$(cat "$payload_dir/image.size")
 actual_image=$(head -c "$image_size" "$target" | sha256sum | awk '{print $1}')
-[ "$actual_image" = "$expected_image" ] || fail 'installed disk verification failed'
+[ "$actual_image" = "$expected_image" ] || fail "installed disk verification failed: expected $expected_image actual $actual_image"
+say '磁盘校验通过，正在写入管理口和网卡映射。'
 
 udevadm settle 2>/dev/null || true
 partprobe "$target" 2>/dev/null || true
@@ -443,8 +449,8 @@ printf 'LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=%s\n' "$vmxnet3_afpacket_acceptanc
 chmod 0644 "$runtime_env_tmp"
 mv -f "$runtime_env_tmp" "$runtime_env"
 umount /mnt
-say 'Installation complete. Remove the installation media; the system will reboot.'
-sleep 5
+say '安装完成。5 秒后重启，请在重启前移除 ISO。'
+for seconds in 5 4 3 2 1; do say "即将重启：${seconds} 秒"; sleep 1; done
 systemctl reboot --force
 INSTALLER
 chmod 0755 "$work/config/includes.chroot/usr/local/sbin/ly-route-auto-install"
