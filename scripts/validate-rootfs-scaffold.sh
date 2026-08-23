@@ -276,7 +276,7 @@ if ! grep -q 'ExecStart=/usr/lib/ly-route/ly-route-control' "$repo_root/packagin
   exit 1
 fi
 
-if ! grep -q 'Requires=.*ly-route-runtime-check.service' "$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-control-api.service"; then
+if ! grep -q 'After=.*ly-route-runtime-check.service' "$repo_root/packaging/rootfs-overlay/etc/systemd/system/ly-route-control-api.service"; then
   echo "control API service is not gated by runtime readiness" >&2
   exit 1
 fi
