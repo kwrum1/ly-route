@@ -1,12 +1,13 @@
 # LY-Route Current Implementation Inventory
 
-Updated: 2026-08-01
-Audited branch: `codex/handoff-20260730`
-Current commit: `cfbd694` plus the uncommitted integration work listed by `git status`
+Updated: 2026-08-19
+Current baseline: the current `main` commit plus a sealed, fingerprinted hotfix artifact.
+
+> The 2026-08-01/02 figures below are historical snapshots, not the current acceptance result. The current ESXi batch evidence is under `.sisyphus/full-acceptance/evidence/gateway-live-batch-current/`; missing independent-client probes are recorded as `FIXTURE_FAIL` and are not counted as product failures or passes.
 
 ## Release position
 
-LY-Route is two immutable build-time products: an egress Gateway and a transparent Traffic Orchestrator. The current integration passes the `33/33` real protocol, packet, production-runtime, negative-contract, dataplane-contract, and browser container subset. The full release registry records `37/46` scenarios passed (`80.4%`). This is meaningful integration evidence, but it is not a production-release claim: Gateway security fault, telemetry, operations/UI, artifact, ARM64, and both products' target-hardware scenarios remain open.
+LY-Route is two immutable build-time products: an egress Gateway and a transparent Traffic Orchestrator. The `33/33` and `37/46` figures below are historical integration evidence, not a current release claim. The current result must be derived from the active batch evidence and independent-client probes.
 
 ## Shared platform
 

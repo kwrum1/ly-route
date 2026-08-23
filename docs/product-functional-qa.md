@@ -1,5 +1,10 @@
 # Product Verification Contract
 
+> This document defines feature-batch closeout and release evidence, not a
+> per-commit daily gate. Daily fixes use G1-G3 in the development workflow;
+> ISO, hardware, and performance evidence is required only when that phase is
+> explicitly opened.
+
 Verification is evidence-based. The live inventory is [Implementation Status](implementation-status.md), the normative scope is [Product Functional Boundary](product-functional-boundary.md), and remaining work is in the [Work Plan](work-plan.md).
 
 ## Required gates

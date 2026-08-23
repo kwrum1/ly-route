@@ -41,31 +41,12 @@ Search for the specific feature or error before opening a long document.
 
 ## OMO And Agent Routing
 
-- OMO Codex Light is installed. The current session is the lead and owns the
-  final diagnosis, source edits, integration, and user report.
-- OMO workflow is the default for every task; do not wait for a keyword or a
-  UI toggle. Start in LIGHT mode and escalate automatically when the change
-  crosses layers, affects security/concurrency, or enters a release decision.
-- The API limit is five concurrent requests. Reserve one slot for the lead;
-  use at most four child agents, and only for independent write scopes or
-  independent evidence collection. A narrow one-file fix stays local.
-- Route roles by cost and difficulty: `gpt-5.6-luna` with low reasoning for
-  search and inventory; `gpt-5.6-terra` with medium reasoning for ordinary
-  implementation, review, and QA; `gpt-5.6-sol` with high reasoning for root
-  cause, architecture, migration, and release decisions. `gpt-5.5` is the
-  fallback when Sol or Terra is unavailable.
-- Use two bounded batches for cross-layer work: first collect independent
-  evidence (no speculative edits), then implement disjoint fixes and run one
-  focused regression. Do not let multiple agents investigate or edit the same
-  failure. A worker must return the first failing layer, changed paths, command
-  result, and artifact/source fingerprint.
-- Full feature acceptance runs once at batch closeout. UI-only, documentation,
-  formatting, or unchanged-path edits do not restart Gateway/Orchestrator
-  acceptance. Reuse the retained topology and cache results by source
-  fingerprint plus scenario id.
-- `ultrawork` and `ulw-loop` are explicit batch modes, not defaults. Do not
-  start an autonomous loop for a single fix, and stop when the original
-  scenario, applicable smoke, and artifact identity are proven.
-- After context compaction, reload this file and the current failure ledger
-  only. Search and open the relevant document section on demand; never preload
-  the full `docs/` tree or historical acceptance logs.
+Global OMO defaults, model routing, and the five-request budget live in the
+user-level `~/.codex/AGENTS.md`; do not duplicate them here. This repository
+adds only its local constraints: the lead owns integration, child scopes must
+not overlap, and cross-layer work follows the two-batch workflow in
+`docs/zh/development-workflow.md`.
+
+After compaction, reload this file, the current failure ledger, and only the
+matched workflow/source section. Do not preload the full `docs/` tree or old
+acceptance logs.

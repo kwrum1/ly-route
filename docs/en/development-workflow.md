@@ -38,38 +38,24 @@ Run one batch when a product feature set is ready, not after every small edit. G
 
 Classify each result as `PASS`, `PRODUCT_FAIL`, `FIXTURE_FAIL`, or `BLOCKED`. Collect independent failures first, then repair them together. The four evidence points for a feature are real UI input, backend persistence, runtime application, and an independent client packet result.
 
-## OMO Agent Routing
+## OMO collaboration boundary
 
-Codex Light is now installed with OMO, and every task defaults to OMO's light
-orchestration without a keyword or UI toggle. The lead session owns diagnosis, edits,
-integration, and the final report. The API allows five concurrent requests, so
-the fixed budget is one lead plus at most four child agents; it is not a reason
-to fill all five slots on every task. Keep narrow, single-layer fixes local and
-delegate only independent scopes.
+OMO defaults, model routing, and the concurrency budget are managed centrally in
+the user-level `~/.codex/AGENTS.md`; this document does not duplicate the model
+table. Repository-specific rules are limited to two bounded batches for
+cross-layer work: collect independent evidence first, then implement disjoint
+scopes and run one focused regression. A narrow single-layer fix stays local.
+Every child must return the first failing layer, changed paths, command result,
+and source or artifact fingerprint.
 
-| Role | Model | Reasoning | Use |
-| --- | --- | --- | --- |
-| Search/inventory | `gpt-5.6-luna` | low | Read-only code, log, and dependency search |
-| Routine implementation/review/QA | `gpt-5.6-terra` | medium | Existing patterns and one focused check |
-| Root cause/architecture/release | `gpt-5.6-sol` | high | First failing layer and cross-module decisions |
-| Fallback | `gpt-5.5` | task-dependent | Use when Sol or Terra is unavailable |
-
-Cross-layer work uses two bounded batches: collect independent evidence first,
-then implement disjoint fixes and run one focused regression. Every worker must
-return the first failing layer, changed paths, command result, and source or
-artifact fingerprint. Never have multiple workers investigate or edit the same
-failure.
-
-`ultrawork` and `ulw-loop` are explicit batch/release modes, not defaults. A
-single bug does not start an autonomous loop. Reuse acceptance results by source
-fingerprint and scenario id; UI, documentation, formatting, or unchanged-path
-edits do not restart full Gateway/Orchestrator acceptance. After compaction,
-reload only `AGENTS.md`, the current failure ledger, and the matched source
-section rather than the whole documentation tree or historical logs.
+Reuse acceptance results by source fingerprint and scenario id. UI,
+documentation, formatting, or unchanged-path edits do not restart full
+Gateway/Orchestrator acceptance. After compaction, reload only `AGENTS.md`, the
+current failure ledger, and the matched source section.
 
 ### Release build
 
-After the feature batch passes, build the pinned Bookworm/VPP runtime, rootfs, ISO or ARM installer, upgrade package, checksums, manifests, and installation smoke. Release checks are not hotfix checks; VMXNET3/VFIO, physical PCI, performance, and temperature work is opt-in hardware work.
+After the feature batch passes, build the pinned Bookworm/VPP runtime, rootfs, ISO or ARM installer, upgrade package, checksums, manifests, and installation smoke. Release checks are not hotfix checks; VMXNET3/VFIO, physical PCI, performance, and temperature work is opt-in hardware work. ESXi/AF_PACKET may provide functional acceptance evidence but cannot replace physical datapath or performance evidence.
 
 ## Minimum Gates
 
