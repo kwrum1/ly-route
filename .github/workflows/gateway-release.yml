@@ -1,25 +1,22 @@
-name: Gateway production artifacts
+name: Ly Route production artifacts
 
 on:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Optional release tag to publish (for example v1.0.0-rc1)
+        description: Release tag to publish, for example v1.0.0
         required: false
         type: string
 
 concurrency:
-  group: gateway-release-${{ github.workflow }}-${{ github.ref }}
+  group: ly-route-production-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -29,7 +26,7 @@ env:
   LY_ROUTE_GO_VERSION: go1.24.4
   GOTOOLCHAIN: local
   CGO_ENABLED: '1'
-  GOPROXY: https://goproxy.io,direct
+  GOPROXY: https://proxy.golang.org,direct
   GOSUMDB: off
   TZ: UTC
   LC_ALL: C.UTF-8
@@ -41,123 +38,30 @@ env:
 
 jobs:
   verify:
-    name: Fast source verification
+    name: Source verification
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: '1.24.4'
           cache-dependency-path: backend/go.sum
-      - name: Run daily source gate
-        run: bash scripts/ci-verify.sh
+      - name: Normalize and check toolchain
+        run: |
+          bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
+          test "$(go version | awk '{print $3}')" = "$LY_ROUTE_GO_VERSION"
+          test "$(go env GOTOOLCHAIN)" = "$GOTOOLCHAIN"
+          test "$(go env GOSUMDB)" = "$GOSUMDB"
+          test "$(uname -m)" = x86_64
+      - name: Run release source gate
+        run: bash scripts/ci-release-verify.sh
 
   x86:
-    name: x86-64 IMG and upgrade
+    name: x86-64 ISO and upgrade
     needs: verify
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.24.4'
-          cache-dependency-path: backend/go.sum
-      - name: Normalize source line endings
-        run: bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
-      - name: Verify compiler environment
-        run: bash scripts/verify-compiler-environment.sh
-      - name: Reclaim runner disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          df -h /
-      - name: Install build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
-            build-essential cmake dpkg-dev git curl gdisk parted dosfstools rsync \
-            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux \
-            xorriso isolinux syslinux-common
-          curl -fsSL https://deb.debian.org/debian/pool/main/l/live-build/live-build_20230502_all.deb \
-            -o /tmp/live-build_20230502_all.deb
-          echo 'a863905724e7b69d45066ebab113cb6de12a11984349847ad49f6151c10f017d  /tmp/live-build_20230502_all.deb' \
-            | sha256sum -c -
-          sudo dpkg -i /tmp/live-build_20230502_all.deb || true
-          sudo apt-get install -f -y
-          lb --version
-      - name: Fetch pinned VPP source
-        run: |
-          git init vpp-master
-          git -C vpp-master remote add origin https://github.com/FDio/vpp.git
-          git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" \
-            '+refs/tags/v25.10:refs/tags/v25.10'
-          git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
-          test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
-          git -C vpp-master describe --long --match 'v*' "$LY_ROUTE_VPP_COMMIT"
-      - name: Build pinned x86 runtime packages
-        run: |
-          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR env \
-            LY_ROUTE_RUNTIME_DEB_ARCH=amd64 \
-            LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
-            LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
-            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen \
-            ./scripts/build-vpp-bookworm-debs.sh
-          sudo chown -R "$USER:$USER" runtime-debs vpp-master
-          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64
-          export LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs"
-          export LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
-          sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
-          sudo chown -R "$USER:$USER" runtime-debs tmp
-          ./scripts/build-runtime-debs.sh dns-vpp-proxy
-          ./scripts/build-runtime-debs.sh xray
-          ./scripts/build-runtime-debs.sh vpp-apply
-          sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-pppoe-client
-          sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-smart-qos
-          sudo --preserve-env=LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh vpp-security-guard
-      - name: Build gateway rootfs and upgrade
-        run: |
-          sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
-            ./scripts/build-rootfs.sh --product gateway --arch amd64 --out dist/rootfs
-          sudo chown -R "$USER:$USER" dist
-          LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
-            ./scripts/build-upgrade-package.sh --product gateway --arch amd64 --out dist/upgrade
-      - name: Build burnable image
-        run: |
-          sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR \
-            ./scripts/build-disk-image.sh --product gateway \
-              --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst \
-              --out dist/x86 --size 4G
-      - name: Build hardware-aware installer ISO
-        run: |
-          sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR \
-            ./scripts/build-auto-install-iso.sh --product gateway \
-              --image dist/x86/ly-route-gateway-bookworm-amd64-4g.img.zst \
-              --out dist/iso
-      - name: Upload x86 artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: ly-route-gateway-x86-64
-          retention-days: 14
-          if-no-files-found: error
-          path: |
-            dist/x86/*.img.zst
-            dist/x86/*.img.zst.sha256
-            dist/x86/*.manifest.json
-            dist/x86/*.manifest.json.sha256
-            dist/iso/ly-route-gateway-x86_64-installer.iso
-            dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
-            dist/iso/ly-route-gateway-x86_64-installer.iso.manifest.json
-            dist/iso/ly-route-gateway-x86_64-installer.iso.manifest.json.sha256
-            dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
-            dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
-
-  arm64:
-    name: Armbian arm64 installer and upgrade
-    needs: verify
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
@@ -165,67 +69,130 @@ jobs:
         with:
           go-version: '1.24.4'
           cache-dependency-path: backend/go.sum
-      - name: Normalize source line endings
-        run: bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
-      - name: Verify compiler environment
+      - name: Install x86 build tools
+        run: |
+          bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get update
+          sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
+            build-essential cmake dpkg-dev git curl gdisk parted dosfstools rsync \
+            grub-pc-bin grub-efi-amd64-bin shim-signed e2fsprogs util-linux \
+            xorriso isolinux syslinux-common
+          curl -fsSL https://deb.debian.org/debian/pool/main/l/live-build/live-build_20230502_all.deb -o /tmp/live-build.deb
+          sudo dpkg -i /tmp/live-build.deb || true
+          sudo apt-get install -f -y
+      - name: Fetch pinned VPP
+        run: |
+          git init vpp-master
+          git -C vpp-master remote add origin https://github.com/FDio/vpp.git
+          git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" '+refs/tags/v25.10:refs/tags/v25.10'
+          git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
+          test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
+      - name: Build x86 runtime packages
+        run: |
+          sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR env \
+            LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
+            LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
+            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
+          sudo chown -R "$USER:$USER" runtime-debs vpp-master
+          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
+          sudo chown -R "$USER:$USER" runtime-debs tmp
+          ./scripts/build-runtime-debs.sh dns-vpp-proxy
+          ./scripts/build-runtime-debs.sh xray
+          for target in vpp-apply vpp-pppoe-client vpp-smart-qos vpp-security-guard; do
+            sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh "$target"
+          done
+      - name: Build x86 rootfs, upgrade and ISO
+        run: |
+          sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" ./scripts/build-rootfs.sh --product gateway --arch amd64 --out dist/rootfs
+          sudo chown -R "$USER:$USER" dist
+          LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" ./scripts/build-upgrade-package.sh --product gateway --arch amd64 --out dist/upgrade
+          sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR ./scripts/build-disk-image.sh --product gateway --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-amd64.tar.zst --out dist/disk --size 4G
+          sudo --preserve-env=LY_ROUTE_MIRROR,LY_ROUTE_SECURITY_MIRROR ./scripts/build-auto-install-iso.sh --product gateway --image dist/disk/ly-route-gateway-bookworm-amd64-4g.img.zst --out dist/iso
+      - name: Verify x86 deliverables
+        run: |
+          test -s dist/iso/ly-route-gateway-x86_64-installer.iso
+          test -s dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
+          test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
+          test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
+          sha256sum -c dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
+          sha256sum -c dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ly-route-gateway-x86-64
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            dist/iso/ly-route-gateway-x86_64-installer.iso
+            dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
+            dist/iso/*.manifest.json
+            dist/iso/*.manifest.json.sha256
+            dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
+            dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
+
+  arm64:
+    name: ARM64 Armbian installer and upgrade
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.24.4'
+          cache-dependency-path: backend/go.sum
+      - name: Install ARM build tools and verify host
         env:
           LY_ROUTE_EXPECT_HOST_ARCH: aarch64
           LY_ROUTE_EXPECT_GOARCH: arm64
           LY_ROUTE_EXPECT_DEB_ARCH: arm64
-        run: bash scripts/verify-compiler-environment.sh
-      - name: Reclaim runner disk space
         run: |
+          bash scripts/normalize-source-line-endings.sh "$GITHUB_WORKSPACE"
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          df -h /
-      - name: Install native ARM build tools
-        run: |
           sudo apt-get update
-          sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates \
-            build-essential cmake dpkg-dev git curl rsync python3 debhelper devscripts
-      - name: Fetch pinned VPP source
+          sudo apt-get install -y mmdebstrap debian-archive-keyring zstd ca-certificates build-essential cmake dpkg-dev git curl rsync python3 debhelper devscripts
+          test "$(go version | awk '{print $3}')" = "$LY_ROUTE_GO_VERSION"
+          test "$(uname -m)" = aarch64
+      - name: Fetch pinned VPP
         run: |
           git init vpp-master
           git -C vpp-master remote add origin https://github.com/FDio/vpp.git
-          git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" \
-            '+refs/tags/v25.10:refs/tags/v25.10'
+          git -C vpp-master fetch --depth 512 origin "$LY_ROUTE_VPP_COMMIT" '+refs/tags/v25.10:refs/tags/v25.10'
           git -C vpp-master checkout --detach "$LY_ROUTE_VPP_COMMIT"
           test "$(git -C vpp-master rev-parse HEAD)" = "$LY_ROUTE_VPP_COMMIT"
-          git -C vpp-master describe --long --match 'v*' "$LY_ROUTE_VPP_COMMIT"
-      - name: Build native ARM64 VPP and gateway runtime packages
+      - name: Build ARM64 runtime packages
         run: |
           sudo --preserve-env=LY_ROUTE_VPP_COMMIT,LY_ROUTE_MIRROR env \
-            LY_ROUTE_RUNTIME_DEB_ARCH=arm64 \
-            LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
+            LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_SRC="$PWD/vpp-master" \
             LY_ROUTE_RUNTIME_DEBS_DIR="$PWD/runtime-debs" \
-            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen \
-            ./scripts/build-vpp-bookworm-debs.sh
+            LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
           sudo chown -R "$USER:$USER" runtime-debs vpp-master
-          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64
-          export LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs"
-          sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR \
-            ./scripts/build-runtime-debs.sh smartdns
+          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/runtime-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
-          ./scripts/build-runtime-debs.sh vpp-apply
-          ./scripts/build-runtime-debs.sh vpp-pppoe-client
-          ./scripts/build-runtime-debs.sh vpp-smart-qos
-          ./scripts/build-runtime-debs.sh vpp-security-guard
-      - name: Build ARM64 gateway rootfs, installer and upgrade
+          for target in vpp-apply vpp-pppoe-client vpp-smart-qos vpp-security-guard; do ./scripts/build-runtime-debs.sh "$target"; done
+      - name: Build ARM64 rootfs, installer and upgrade
         run: |
-          sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
-            ./scripts/build-rootfs.sh --product gateway --arch arm64 --out dist/rootfs
+          sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" ./scripts/build-rootfs.sh --product gateway --arch arm64 --out dist/rootfs
           sudo chown -R "$USER:$USER" dist
-          LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" \
-            ./scripts/build-upgrade-package.sh --product gateway --arch arm64 --out dist/upgrade
-          ./scripts/build-armbian-installer.sh --product gateway \
-            --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-arm64.tar.zst \
-            --runtime-debs runtime-debs --out dist/armbian
-      - name: Upload ARM64 artifacts
-        uses: actions/upload-artifact@v7
+          LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" ./scripts/build-upgrade-package.sh --product gateway --arch arm64 --out dist/upgrade
+          ./scripts/build-armbian-installer.sh --product gateway --rootfs dist/rootfs/ly-route-rootfs-gateway-bookworm-arm64.tar.zst --runtime-debs runtime-debs --out dist/armbian
+      - name: Verify ARM deliverables
+        run: |
+          test -s dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst
+          test -s dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst.sha256
+          test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst
+          test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256
+          sha256sum -c dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst.sha256
+          sha256sum -c dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256
+      - uses: actions/upload-artifact@v7
         with:
           name: ly-route-gateway-armbian-arm64
-          retention-days: 14
+          retention-days: 30
           if-no-files-found: error
           path: |
             dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst
@@ -234,52 +201,29 @@ jobs:
             dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256
 
   release:
-    name: Publish GitHub release
+    name: Publish release assets
     needs: [verify, x86, arm64]
     if: >-
-      always() && needs.verify.result == 'success' &&
-      (needs.x86.result == 'success' || needs.arm64.result == 'success') &&
-      (startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
+      always() && needs.verify.result == 'success' && needs.x86.result == 'success' && needs.arm64.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           name: ly-route-gateway-x86-64
-          path: release
-        if: needs.x86.result == 'success'
+          path: release/x86
       - uses: actions/download-artifact@v8
         with:
           name: ly-route-gateway-armbian-arm64
-          path: release
-        if: needs.arm64.result == 'success'
-      - name: Build unified checksum manifest
-        run: |
-          cd release
-          find . -type f ! -name '*.sha256' ! -name 'SHA256SUMS' -print0 \
-            | sort -z | xargs -0 sha256sum > SHA256SUMS
-      - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: 'release/**/*'
+          path: release/arm64
+      - name: Build checksums
+        run: find release -type f ! -name '*.sha256' -print0 | sort -z | xargs -0 sha256sum > release/SHA256SUMS
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          DISPATCH_TAG: ${{ inputs.release_tag }}
         run: |
-          tag=${GITHUB_REF_NAME}
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then tag=$DISPATCH_TAG; fi
-          mapfile -d '' assets < <(find release -type f -print0 | sort -z)
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-          elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
-            gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --title "Ly Route Gateway $tag" --generate-notes
-          else
-            gh release create "$tag" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
-              --title "Ly Route Gateway $tag" --generate-notes --verify-tag
-          fi
+          tag="$GITHUB_REF_NAME"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then tag="${{ inputs.release_tag }}"; fi
+          gh release create "$tag" release/**/* release/SHA256SUMS --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Ly Route Gateway $tag" --generate-notes
