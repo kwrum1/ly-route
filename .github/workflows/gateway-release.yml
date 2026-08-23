@@ -108,7 +108,7 @@ jobs:
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
-          for target in vpp-apply vpp-pppoe-client vpp-smart-qos vpp-security-guard; do
+          for target in vpp-apply vpp-pppoe-client vpp-smart-qos vpp-security-guard vpp-dns-intercept vpp-pre-nat-route; do
             sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh "$target"
           done
       - name: Build x86 rootfs, upgrade and ISO
@@ -189,7 +189,7 @@ jobs:
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
           ./scripts/build-runtime-debs.sh xray
-          for target in vpp-apply vpp-pppoe-client vpp-smart-qos vpp-security-guard; do ./scripts/build-runtime-debs.sh "$target"; done
+          for target in vpp-apply vpp-pppoe-client vpp-smart-qos vpp-security-guard vpp-dns-intercept vpp-pre-nat-route; do ./scripts/build-runtime-debs.sh "$target"; done
       - name: Build ARM64 rootfs, installer and upgrade
         run: |
           sudo --preserve-env=LY_ROUTE_MIRROR env LY_ROUTE_EXTRA_DEBS_DIR="$PWD/runtime-debs" ./scripts/build-rootfs.sh --product gateway --arch arm64 --out dist/rootfs
