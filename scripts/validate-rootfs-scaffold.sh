@@ -333,9 +333,9 @@ for forbidden in no-zero-copy native-driver-auto; do
   fi
 done
 
-if ! grep -q '^LY_ROUTE_VMXNET3_AF_PACKET_ACCEPTANCE=false$' \
+if ! grep -q '^LY_ROUTE_VMXNET3_TAP_BRIDGE_ACCEPTANCE=false$' \
   "$repo_root/packaging/rootfs-overlay/etc/ly-route/runtime.env"; then
-  echo "VMXNET3 AF_PACKET acceptance must be disabled in the baseline rootfs" >&2
+  echo "VMXNET3 TAP bridge acceptance must be disabled in the baseline rootfs" >&2
   exit 1
 fi
 
