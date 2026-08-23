@@ -99,9 +99,11 @@ jobs:
             LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
             LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
           sudo chown -R "$USER:$USER" runtime-debs vpp-dev-debs vpp-master
-          test -f vpp-dev-debs/vpp-dev_*.deb
-          test -f vpp-dev-debs/libvppinfra-dev_*.deb
-          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          test -n "$(find vpp-dev-debs -maxdepth 1 -name 'vpp-dev_*.deb' -print -quit)"
+          test -n "$(find vpp-dev-debs -maxdepth 1 -name 'libvppinfra-dev_*.deb' -print -quit)"
+          vpp_package=$(find runtime-debs -maxdepth 1 -name 'vpp_*.deb' -print -quit)
+          test -f "$vpp_package"
+          export LY_ROUTE_RUNTIME_DEB_ARCH=amd64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" LY_ROUTE_VPP_PACKAGE_VERSION="$(dpkg-deb -f "$vpp_package" Version)"
           sudo --preserve-env=LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
@@ -178,9 +180,11 @@ jobs:
             LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" \
             LY_ROUTE_VPP_MAKE_ARGS=DPDK_MLX_IBV_LINK=dlopen ./scripts/build-vpp-bookworm-debs.sh
           sudo chown -R "$USER:$USER" runtime-debs vpp-dev-debs vpp-master
-          test -f vpp-dev-debs/vpp-dev_*.deb
-          test -f vpp-dev-debs/libvppinfra-dev_*.deb
-          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" LY_ROUTE_VPP_PACKAGE_VERSION=25.10.0-release
+          test -n "$(find vpp-dev-debs -maxdepth 1 -name 'vpp-dev_*.deb' -print -quit)"
+          test -n "$(find vpp-dev-debs -maxdepth 1 -name 'libvppinfra-dev_*.deb' -print -quit)"
+          vpp_package=$(find runtime-debs -maxdepth 1 -name 'vpp_*.deb' -print -quit)
+          test -f "$vpp_package"
+          export LY_ROUTE_RUNTIME_DEB_ARCH=arm64 LY_ROUTE_VPP_DEV_DEBS_DIR="$PWD/vpp-dev-debs" LY_ROUTE_VPP_PACKAGE_VERSION="$(dpkg-deb -f "$vpp_package" Version)"
           sudo --preserve-env=LY_ROUTE_RUNTIME_DEB_ARCH,LY_ROUTE_SMARTDNS_REF,LY_ROUTE_MIRROR,LY_ROUTE_VPP_DEV_DEBS_DIR,LY_ROUTE_VPP_PACKAGE_VERSION ./scripts/build-runtime-debs.sh smartdns
           sudo chown -R "$USER:$USER" runtime-debs tmp
           ./scripts/build-runtime-debs.sh dns-vpp-proxy
