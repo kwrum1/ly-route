@@ -146,8 +146,8 @@ jobs:
           test -s dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
           test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst
           test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
-          sha256sum -c dist/iso/ly-route-gateway-x86_64-installer.iso.sha256
-          sha256sum -c dist/upgrade/ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256
+          (cd dist/iso && sha256sum -c ly-route-gateway-x86_64-installer.iso.sha256)
+          (cd dist/upgrade && sha256sum -c ly-route-upgrade-gateway-bookworm-amd64.tar.zst.sha256)
       - uses: actions/upload-artifact@v7
         with:
           name: ly-route-gateway-x86-64
@@ -246,8 +246,8 @@ jobs:
           test -s dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst.sha256
           test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst
           test -s dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256
-          sha256sum -c dist/armbian/ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst.sha256
-          sha256sum -c dist/upgrade/ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256
+          (cd dist/armbian && sha256sum -c ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst.sha256)
+          (cd dist/upgrade && sha256sum -c ly-route-upgrade-gateway-bookworm-arm64.tar.zst.sha256)
       - uses: actions/upload-artifact@v7
         with:
           name: ly-route-gateway-armbian-arm64

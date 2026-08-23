@@ -210,7 +210,9 @@ if [ "$product" = gateway ]; then
       product_build_fail "gateway disk image is missing required runtime file: $runtime_file"
   done
   for unit in $LY_ROUTE_GATEWAY_RUNTIME_UNITS; do
-    [ -e "$root_tree/lib/systemd/system/$unit" ] || [ -e "$root_tree/usr/lib/systemd/system/$unit" ] ||
+    [ -e "$root_tree/etc/systemd/system/$unit" ] ||
+      [ -e "$root_tree/lib/systemd/system/$unit" ] ||
+      [ -e "$root_tree/usr/lib/systemd/system/$unit" ] ||
       product_build_fail "gateway disk image is missing required runtime unit: $unit"
   done
 fi
