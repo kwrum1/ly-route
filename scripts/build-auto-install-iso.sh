@@ -159,15 +159,14 @@ exec > >(tee -a "$log") 2>&1
 # not into its optional serial-log device. Bind the installer service to tty1
 # so both local hardware consoles and ESXi use the same visible input path.
 prompt_tty=/dev/tty1
-[ -r "$prompt_tty" ] && [ -w "$prompt_tty" ] || prompt_tty=/dev/console
-[ -r "$prompt_tty" ] && [ -w "$prompt_tty" ] || fail 'installer console is unavailable'
-
 say() {
   local message="[Ly Route] $*"
-  printf '\n%s\n' "$message" >&2
+  printf '\n%s\n' "$message" >> "$log"
   printf '\n%s\n' "$message" > "$prompt_tty" 2>/dev/null || true
 }
 fail() { say "Installation stopped: $*"; exit 1; }
+[ -r "$prompt_tty" ] && [ -w "$prompt_tty" ] || prompt_tty=/dev/console
+[ -r "$prompt_tty" ] && [ -w "$prompt_tty" ] || fail 'installer console is unavailable'
 cmdline=" $(cat /proc/cmdline) "
 case "$cmdline" in *' lyroute.autoinstall=1 '*) ;; *) fail 'installer mode is not enabled' ;; esac
 
@@ -345,11 +344,15 @@ for row in "${data_rows[@]}"; do say "Data: ${row//|/  }"; done
 if [ "$data_state" = locked ]; then
   say 'Some data interfaces failed preflight. Installation may continue, but the data plane remains locked until runtime verification succeeds.'
 fi
-  confirmation=$(cmdline_value lyroute.confirm || true)
-  if [ -z "$confirmation" ]; then
-    confirmation=$(ask 'Enter yes to format the selected disk and install:' '')
-  fi
-[ "$confirmation" = yes ] || fail 'installation cancelled'
+confirmation=$(cmdline_value lyroute.confirm || true)
+while :; do
+  [ -n "$confirmation" ] || confirmation=$(ask 'Enter yes/y to format the selected disk and install, or no/n to cancel:' '')
+  case "${confirmation,,}" in
+    yes|y) break ;;
+    no|n) say 'Installation cancelled. No data was changed.'; exit 0 ;;
+    *) say 'Please enter yes, y, no, or n.'; confirmation= ;;
+  esac
+done
 say "安装确认成功。目标磁盘：$target"
 say '正在清理目标磁盘，现有数据将被删除。'
 swapoff -a 2>/dev/null || true
