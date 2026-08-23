@@ -43,9 +43,10 @@ validate_artifact_manifest() {
   arch=$3
   manifest=$4
   profile="$repo_root/packaging/build-profiles/$product.json"
-  node - "$matrix" "$profile" "$artifact_type" "$product" "$arch" "$manifest" <<'NODE'
+  source_fingerprint=$("$repo_root/scripts/source-fingerprint.sh" backend frontend packaging runtime scripts)
+  node - "$matrix" "$profile" "$artifact_type" "$product" "$arch" "$manifest" "$source_fingerprint" <<'NODE'
 const { readFileSync } = require("node:fs");
-const [matrixPath, profilePath, artifactType, product, arch, manifestPath] = process.argv.slice(2);
+const [matrixPath, profilePath, artifactType, product, arch, manifestPath, sourceFingerprint] = process.argv.slice(2);
 const matrix = JSON.parse(readFileSync(matrixPath, "utf8"));
 const profile = JSON.parse(readFileSync(profilePath, "utf8"));
 const actual = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -59,6 +60,7 @@ const expected = {
   suite: matrix.suite,
   arch,
   source_commit: matrix.source_commit,
+  source_fingerprint: sourceFingerprint,
   control_profile: "/etc/ly-route/product-manifest.json",
   frontend_bundle: "/opt/ly-route/admin",
   frontend_product: profile.frontend_product,
