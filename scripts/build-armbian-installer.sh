@@ -127,9 +127,73 @@ systemctl enable vpp.service smartdns.service kea-dhcp4-server.service xray.serv
 /usr/lib/ly-route/firstboot.sh
 systemctl restart ly-route-runtime-check.service
 systemctl restart ly-route-control-api.service nginx.service
-echo "Ly Route installation completed. Open https://192.168.88.1/ and sign in with admin/password."
+echo "Ly Route installation completed. Open https://192.168.88.254/ and sign in with admin/password."
 INSTALL
 chmod 0755 "$bundle/install.sh"
+
+cat > "$bundle/README.md" <<'README'
+# Ly Route Armbian ARM64 一键安装 / One-click Installation
+
+## 中文
+
+### 要求
+
+- 运行 Armbian Bookworm 的 ARM64 设备。
+- root 权限及可用于安装 Debian 依赖的网络。
+- 常规 LAN/WAN 部署至少需要两个可用网口。
+- 安装器保留板卡内核、DTB、引导程序和 `/boot`。
+
+### 安装
+
+```sh
+tar --use-compress-program=unzstd -xf ly-route-gateway-*-armbian-arm64-installer.tar.zst
+cd ly-route-gateway-*-armbian-arm64-installer
+sudo ./install.sh
+```
+
+安装完成后访问 `https://192.168.88.254/`。初始账号为 `admin`，密码为
+`password`，首次登录必须修改密码。
+
+### 网络与数据面
+
+管理地址默认为 `192.168.88.254/24`。通过 Web 控制台配置 LAN、WAN、PPPoE 和
+路由。系统优先验证 VPP 原生高性能路径，以 DPDK 作为受控回退；均不可用时锁定
+转发，不静默降级到低性能生产路径。
+
+### 升级
+
+在 Web 控制台使用同一 Release 的 `ly-route-gateway-*-upgrade-arm64.tar.zst`。
+ARM64 设备不得使用 x86 升级包。
+
+### 诊断
+
+```sh
+systemctl --failed
+systemctl status ly-route-control-api vpp nginx smartdns kea-dhcp4-server xray
+vppctl show interface
+cat /var/lib/ly-route/runtime-readiness.json
+```
+
+Web 证书默认为自签名证书，请确认管理地址后再在浏览器中接受。
+
+## English
+
+### Requirements And Installation
+
+Use an ARM64 device running Armbian Bookworm with root access, package-network
+access and at least two usable interfaces for a normal LAN/WAN deployment. The
+installer preserves the board kernel, DTB, bootloader and `/boot`. Run the
+commands shown above, then open `https://192.168.88.254/` and sign in as
+`admin` / `password`; the first login requires a password change.
+
+### Data Plane, Upgrade And Diagnostics
+
+Ly Route prefers a qualified VPP-native path and uses DPDK only as the
+controlled fallback. Forwarding remains locked if neither qualifies. Apply the
+matching ARM64 upgrade from the same release, never an x86 package. The commands
+above report failed services, core service state, VPP interfaces and readiness.
+The web certificate is self-signed by default.
+README
 
 (
   cd "$bundle"
