@@ -3,8 +3,7 @@
 ## 中文
 
 Ly Route 是面向 x86-64 路由设备和 Armbian Bookworm ARM64 设备的 VPP
-出口网关。本仓库只维护出口网关；流量编排器迁移到独立仓库，不再共享本仓库的
-产品边界、验收结论和发布产物。
+出口网关。
 
 主要能力包括 LAN/WAN、链路聚合、PPPoE、多 WAN、策略路由、Endpoint-dependent
 和全锥 NAT、端口映射、TCP/UDP 53 透明劫持、DNS 策略、DHCP、代理 WAN、用户限速、
