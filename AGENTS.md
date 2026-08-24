@@ -18,16 +18,16 @@ binaries as current evidence.
 
 ## Read Documents On Demand
 
-- Process or gate change: `docs/zh/development-workflow.md`
-- Product behavior or acceptance scope: `docs/zh/product-functional-boundary.md`
-  and `docs/zh/product-functional-qa.md`
-- UI task: `docs/zh/ui-design.md`
-- ISO/release task only: `docs/zh/iso-packaging-and-acceptance.md`
-- Hardware task only: `docs/zh/runtime-hardware-validation.md`
-- Architecture change only: `docs/zh/architecture.md`
+- Process or gate change: `docs/product-functional-qa.md`
+- Product behavior or acceptance scope: `docs/whitepaper.md`
+  and `docs/product-functional-qa.md`
+- ISO/release task only: `docs/release-and-installation.md` and
+  `docs/rootfs-image.md`
+- Hardware task only: `docs/implementation-status.md`
+- Architecture change only: `docs/architecture.md`
 
-Historical ledgers and `docs/archive/` are evidence, not default context.
-Search for the specific feature or error before opening a long document.
+Git history is the historical ledger. Search for the specific feature or error
+before opening a long document.
 
 ## Worktree And Artifacts
 
@@ -45,7 +45,7 @@ Global OMO defaults, model routing, and the five-request budget live in the
 user-level `~/.codex/AGENTS.md`; do not duplicate them here. This repository
 adds only its local constraints: the lead owns integration, child scopes must
 not overlap, and cross-layer work follows the two-batch workflow in
-`docs/zh/development-workflow.md`.
+`docs/product-functional-qa.md`.
 
 After compaction, reload this file, the current failure ledger, and only the
 matched workflow/source section. Do not preload the full `docs/` tree or old
