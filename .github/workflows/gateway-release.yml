@@ -300,23 +300,23 @@ jobs:
         run: |
           set -euo pipefail
           version=${VERSION#v}
-          mkdir -p release/assets
+          mkdir -p release/publish
           move_asset() {
             source=$(find release -type f -name "$1" -print -quit)
             test -f "$source"
-            mv "$source" "release/assets/$2"
+            mv "$source" "release/publish/$2"
           }
           move_asset ly-route-gateway-x86_64-installer.iso "ly-route-gateway-${version}-x86_64-installer.iso"
           move_asset ly-route-upgrade-gateway-bookworm-amd64.tar.zst "ly-route-gateway-${version}-upgrade-amd64.tar.zst"
           move_asset ly-route-gateway-armbian-bookworm-arm64-installer.tar.zst "ly-route-gateway-${version}-armbian-arm64-installer.tar.zst"
           move_asset ly-route-upgrade-gateway-bookworm-arm64.tar.zst "ly-route-gateway-${version}-upgrade-arm64.tar.zst"
-          (cd release/assets && sha256sum ly-route-gateway-* > SHA256SUMS)
+          (cd release/publish && sha256sum ly-route-gateway-* > SHA256SUMS)
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          mapfile -d '' assets < <(find release/assets -maxdepth 1 -type f -print0 | sort -z)
+          mapfile -d '' assets < <(find release/publish -maxdepth 1 -type f -print0 | sort -z)
           if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$VERSION" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
