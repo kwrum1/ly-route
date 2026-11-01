@@ -148,13 +148,15 @@ da580b164ad8de91e881ac6a34b30e2ae126e3fd0da9fa710a2c06cb85c43fe7  ly-route-gatew
 
 ## 打包与 CI
 
-本仓库的 CI **不编译产品源码**。它从已发布的二进制输入组装安装 ISO：
+本仓库的 CI **不编译产品源码**。它从已发布的二进制输入组装安装产物：
 
-1. 目标版本的升级包（发布资产或 `package_url`）；
-2. 上一版本的安装 ISO（作为启动骨架与基础 rootfs）。
+- **x86_64**：上一版本 ISO（启动骨架与基础 rootfs）+ 目标版本 x86 升级包 → 新 ISO；
+- **ARM64**：上一版本 ARM 安装包（overlay 与 packages）+ 目标版本 ARM 升级包 → 新 ARM 安装包。
 
-流程见 [docs/PACKAGING.md](docs/PACKAGING.md) 与
-[`packaging/build-gateway-iso-from-base.sh`](packaging/build-gateway-iso-from-base.sh)。
+流程见 [docs/PACKAGING.md](docs/PACKAGING.md)、
+[`packaging/build-gateway-iso-from-base.sh`](packaging/build-gateway-iso-from-base.sh)
+与
+[`packaging/build-arm64-installer-from-base.sh`](packaging/build-arm64-installer-from-base.sh)。
 
 ## 许可证与第三方组件
 
