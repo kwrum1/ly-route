@@ -78,10 +78,12 @@ xorriso -osirrox on -indev "$base_iso" \
 [ -s "$work/base-rootfs.tar.zst" ] || { echo "base ISO has no installer payload" >&2; exit 1; }
 
 mkdir -p "$work/rootfs"
-tar --zstd -xpf "$work/base-rootfs.tar.zst" -C "$work/rootfs"
+tar --zstd -xpf "$work/base-rootfs.tar.zst" -C "$work/rootfs" \
+  --no-same-owner --exclude='./dev/*'
 
 echo "== overlay release package =="
 tar --zstd -xpf "$package" -C "$work/rootfs" \
+  --no-same-owner --exclude='./dev/*' \
   --exclude='./manifest.json' --exclude='./checksums.sha256' --overwrite
 
 # Remove artifacts that are not part of the Gateway product and leftovers that
