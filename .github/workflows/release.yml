@@ -132,11 +132,22 @@ jobs:
           echo "payload and version verified: $VERSION"
 
       - name: Checksums
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          cd dist
-          sha256sum *.iso > SHA256SUMS
-          cat SHA256SUMS
+          tag="v$VERSION"
+          mkdir -p dist
+          if gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+               --pattern SHA256SUMS --dir dist --clobber 2>/dev/null; then
+            grep -v '  ly-route-gateway-gui-installer.iso$' dist/SHA256SUMS > dist/SHA256SUMS.tmp || true
+            mv dist/SHA256SUMS.tmp dist/SHA256SUMS
+          else
+            : > dist/SHA256SUMS
+          fi
+          ( cd dist && sha256sum ly-route-gateway-gui-installer.iso >> SHA256SUMS )
+          sort -k2 dist/SHA256SUMS -o dist/SHA256SUMS
+          cat dist/SHA256SUMS
 
       - name: Publish release
         env:
