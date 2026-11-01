@@ -4,8 +4,15 @@ Ly Route 网关是面向 **x86_64 / ARM64** 的出口网关发行版。数据面
 除管理口外，物理数据口默认由 VPP 以 **DPDK UIO** 接管，管理口保留在 Linux 内核；
 同时提供 AF_PACKET 兼容回退与受控 AF_XDP 能力。
 
+<p align="center">
+  <img src="docs/screenshots/gateway-overview.png" alt="Ly Route 总览" width="100%">
+</p>
+
 > **发布仓库说明**：本仓库只包含安装/升级产物、打包工程与第三方组件声明。
 > 产品源代码不公开，软件使用受 [EULA](EULA.md) 约束。
+>
+> **平台**：x86_64 提供 ISO 与升级包；ARM64 提供 Armbian Bookworm 一键安装包与升级包。
+> 二进制产物在 **Releases** 中，不在 git 文件树里。
 
 ## 下载
 
@@ -19,6 +26,9 @@ Ly Route 网关是面向 **x86_64 / ARM64** 的出口网关发行版。数据面
 | ARM64 | [`ly-route-upgrade-gateway-bookworm-arm64.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.1.3/ly-route-upgrade-gateway-bookworm-arm64.tar.zst) | ARM64 原地升级 |
 
 校验文件：[`SHA256SUMS`](https://github.com/kwrum1/ly-route/releases/download/v1.1.3/SHA256SUMS)
+
+> ARM64 产物（安装包与升级包）位于 **v1.1.3 Release 资产**中，不在 git 文件树里；
+> 直接点击上表链接即可下载。当前 ARM64 形态为 Armbian Bookworm 一键安装包，不提供 ARM ISO。
 
 ## 安装
 
@@ -87,6 +97,18 @@ curl -sk https://127.0.0.1/api/v1/health
 | QoS | policer + fq-codel 整形 |
 | 运维 | 配置依赖图、事务化 apply、证据回读、supersede 收敛、自愈 |
 | 可观测 | 链路双值（能力/实际）、健康探针、在线用户、连接与流量遥测 |
+
+## 界面
+
+<p align="center">
+  <img src="docs/screenshots/gateway-interfaces.png" alt="网卡设置" width="49%">
+  <img src="docs/screenshots/gateway-runtime.png" alt="系统状态" width="49%">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/gateway-login.png" alt="登录" width="49%">
+  <img src="docs/screenshots/gateway-overview.png" alt="总览" width="49%">
+</p>
 
 ## 系统要求
 
