@@ -4,9 +4,13 @@ Ly Route 网关是面向 **x86_64 / ARM64** 的出口网关发行版。数据面
 除管理口外，物理数据口默认由 VPP 以 **DPDK UIO** 接管，管理口保留在 Linux 内核；
 同时提供 AF_PACKET 兼容回退与受控 AF_XDP 能力。
 
-<p align="center">
-  <img src="docs/screenshots/gateway-overview.png" alt="Ly Route 总览" width="100%">
-</p>
+<img width="1911" height="920" alt="image" src="https://github.com/user-attachments/assets/978989b9-ac3d-42f1-af85-31b541d2815d" />
+<img width="1915" height="917" alt="image" src="https://github.com/user-attachments/assets/e49f850a-9e1a-42b5-ad94-37edc019ecaa" />
+<img width="1919" height="921" alt="image" src="https://github.com/user-attachments/assets/2427d5bc-5595-41e6-b434-04fcc0bdefb0" />
+<img width="1919" height="916" alt="image" src="https://github.com/user-attachments/assets/2a6e0043-efa1-481d-85a6-6022b5cc7e2f" />
+<img width="1909" height="919" alt="image" src="https://github.com/user-attachments/assets/5f108dec-5747-4c94-9cce-ef42c912aa37" />
+
+<img width="1914" height="912" alt="image" src="https://github.com/user-attachments/assets/e8606fd5-93e2-4ce0-a5ae-22117817d827" />
 
 > **发布仓库说明**：本仓库只包含安装/升级产物、打包工程与第三方组件声明。
 > 产品源代码不公开，软件使用受 [EULA](EULA.md) 约束。
