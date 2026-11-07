@@ -129,10 +129,10 @@ sha256sum -c SHA256SUMS
 v1.2 的 SHA256：
 
 ```text
-9a5990dfaabeb06f84eaef07e98e52c66a0f95d738842bff341212d835db9afe  ly-route-upgrade-gateway-bookworm-amd64.tar.zst
-fd428aa3c353ee29fc505bd0b41adcc4006de4d9ecb147cdff441d46a892a9f8  ly-route-gateway-gui-installer.iso
-74cab8c781fd42feca04b090ec82bf19cd3ae6f9a8913e7e0e92229b81df2200  ly-route-gateway-arm64-installer.tar.zst
-aad6f4868b10209d25c35d3981a02102a098686beb8772e7333911e52460c0b4  ly-route-upgrade-gateway-bookworm-arm64.tar.zst
+aa0bca9a762e35acccad60358b82c4af7a43c494f8b3ec42c187fb40f5d33819  ly-route-upgrade-gateway-bookworm-amd64.tar.zst
+97ca750e9ea641c3a15d12cb65891768d4649cdc16b168ee5a930af294889b50  ly-route-gateway-gui-installer.iso
+e19d31a2ca8b50dfb8b332914f34679d3a8c271fc0c9316940ce00afeff63675  ly-route-gateway-arm64-installer.tar.zst
+5d10a88eb34626109dd3e6bc2fd4fd96810841ed2045b48e22b30520ef8d1390  ly-route-upgrade-gateway-bookworm-arm64.tar.zst
 ```
 
 ## 仓库结构
