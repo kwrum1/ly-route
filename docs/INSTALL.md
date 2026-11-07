@@ -1,105 +1,114 @@
-# 安装
+# 安装与升级
 
-## x86_64：ISO 安装
+适用版本：**1.2**
 
-### 准备
+## 1. 支持平台
 
-- 4 GB 以上系统盘（建议 SSD）；
-- 至少 2 个网口：1 个管理口 + 1 个数据口；
-- 支持 UIO 的网卡（Intel igb/igc、部分 Broadcom/Mellanox 等，以实际探测为准）；
-- U 盘（≥ 2 GB）。
+| 平台 | 安装方式 |
+|---|---|
+| x86-64 | ISO 整机安装（安装镜像内置系统与全部组件） |
+| ARM64 | 在已安装的 Armbian Bookworm（arm64）系统上一键安装 |
 
-### 写入与启动
+设备至少需要两个网口：
 
-```bash
-# Linux / macOS，确认 /dev/sdX 是 U 盘后再执行
-sudo dd if=ly-route-gateway-gui-installer.iso of=/dev/sdX bs=4M status=progress conv=fsync
+- **管理口**：保留在系统内，用于登录 Web 控制台和日常维护，不参与转发。
+- **数据口**：其余网口由转发引擎自动接管，作为 WAN / LAN 使用。
+
+> ISO 安装会清空所选磁盘，请提前备份数据；升级包安装不会清空磁盘。
+
+## 2. x86-64：ISO 安装
+
+1. 下载 `ly-route-gateway-gui-installer.iso`。
+2. 用 Rufus、balenaEtcher 或 `dd` 制作 U 盘启动盘。
+3. 目标设备选择 U 盘启动（BIOS 或 UEFI 均可）。
+4. 在安装向导中依次完成：
+   - 选择安装磁盘（整盘，建议不小于 8 GiB，数据会被清空）；
+   - 选择管理网口；
+   - 设置管理地址：DHCP 自动获取，或填写静态 IP / 掩码 / 网关 / DNS；
+   - 设置管理员密码。
+5. 开始安装，完成后设备自动重启，此时可以拔出 U 盘。
+6. 将电脑接入管理口，浏览器访问：
+
+```text
+https://<管理地址>/
 ```
 
-也可以使用 balenaEtcher、Rufus（DD 模式）等工具。目标机选择 BIOS 或 UEFI 启动。
+## 3. ARM64：一键安装
 
-### 安装向导
-
-1. 选择目标磁盘（会清空该磁盘）；
-2. 选择管理网口；
-3. 设置管理地址、网关、DNS 与管理员密码；
-4. 确认后执行安装，等待写入与校验完成；
-5. 重启，拔出 U 盘。
-
-无 DHCP 时安装器回退到 `10.1.18.240/24`。安装完成后：
-
-- 管理口保留在 Linux 内核；
-- 数据口按规则库自动接管为 `dpdk_uio`；
-- `ly-route-control-api`、VPP 与业务服务自动启动。
-
-### 首次登录
-
-浏览器访问 `https://<管理地址>/`，使用安装时设置的管理员账号登录；首次登录强制
-修改密码。若使用 ARM64 安装包，初始密码在 `/root/ly-route-initial-admin-password`。
-
-### 安装后自检
+适用于已安装好的 Armbian Bookworm（arm64）系统，保留原有内核、DTB 与引导。
 
 ```bash
-/usr/lib/ly-route/ly-route-control --version
-curl -sk https://127.0.0.1/api/v1/health
-```
-
-数据口应显示 `takeover_mode=dpdk_uio`，管理口仍在 Linux。
-
-## ARM64：Armbian Bookworm 一键安装
-
-### 要求
-
-- 已安装 **Armbian Bookworm arm64**；
-- 保留板卡内核、DTB 与引导，安装器不修改 `/boot`；
-- root 权限；
-- 可访问 Debian 软件源（可用 `LY_ROUTE_MIRROR` 指定镜像）；
-- 建议至少 2 个网口。
-
-### 安装
-
-```bash
-curl -fL -o /tmp/ly-route-arm64.tar.zst \
-  https://github.com/kwrum1/ly-route/releases/latest/download/ly-route-gateway-arm64-installer.tar.zst
-mkdir -p /tmp/ly-route-installer
-tar --use-compress-program=unzstd -xf /tmp/ly-route-arm64.tar.zst -C /tmp/ly-route-installer
-cd /tmp/ly-route-installer/ly-route-gateway-arm64-installer
+tar --use-compress-program=unzstd -xf ly-route-gateway-arm64-installer.tar.zst
+cd ly-route-gateway-arm64-installer
 sha256sum -c checksums.sha256
 sudo ./install.sh
 ```
 
-安装脚本幂等，可重复执行。已有 `/etc/ly-route/runtime.env` 与
-`/etc/ly-route/appliance.env` 不会被覆盖。
+安装说明：
 
-安装完成后：
+- 需要临时联网安装系统依赖；安装脚本可重复执行，不会覆盖已有的
+  `/etc/ly-route/runtime.env` 与 `/etc/ly-route/appliance.env`。
+- 默认管理地址为 `https://192.168.88.254/`，可在安装后于「配置管理」中修改。
+- 初始管理员密码保存在 `/root/ly-route-initial-admin-password`，首次登录必须修改。
 
-- Web 控制台：`https://192.168.88.254/`（首次登录强制改密）；
-- 初始密码：`/root/ly-route-initial-admin-password`；
-- 健康检查：`curl -k https://127.0.0.1/api/v1/health`。
+## 4. 首次登录
 
-### 端口说明
+1. 浏览器打开 `https://<管理地址>/`。
+2. 控制台使用自签名证书，浏览器会提示“不安全”，选择继续访问即可。
+3. 使用账号 `admin` 和初始密码登录，并按提示设置新密码。
+4. 建议按以下顺序完成初始化配置：
+   - 网卡设置：确认管理口与数据口，设置接口方向；
+   - WAN 线路：创建拨号或静态线路；
+   - LAN 线路：设置内网地址与 IPv6；
+   - DHCP 服务：为 LAN 下发地址；
+   - 策略路由：至少添加一条默认上网策略；
+   - 点击「应用配置」，等待状态变为“已应用”。
 
-控制台与 API 由 `ly-route-edge`（`ly-route-pingora.service`）监听 80/443。
-安装包不安装、不启用、不改写、不重启 nginx；目标机已有 nginx 保持原样。
+## 5. 升级
+
+### 通过界面升级
+
+1. 进入「系统 → 固件升级」。
+2. 上传升级包（`.tar.zst` 或 `.zst`）。
+3. 等待校验通过后点击安装。
+4. 升级过程中控制服务会重启，页面显示“系统重启中”，稍后自动恢复。
+
+升级只替换系统与程序文件，**保留业务配置和管理地址**。
+
+### 通过 API 升级
 
 ```bash
-ss -lntp | grep -E ':(80|443)\b'   # 应为 ly-route-edge
-systemctl status ly-route-pingora
+# 登录并保存会话
+curl -k -c /tmp/ly.cookie -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"密码"}' \
+  https://管理地址/api/v1/auth/login
+
+# 上传并校验升级包
+curl -k -b /tmp/ly.cookie \
+  -F firmware=@ly-route-upgrade-gateway-bookworm-amd64.tar.zst \
+  https://管理地址/api/v1/firmware/update/stage
+
+# 开始安装
+curl -k -b /tmp/ly.cookie -H 'Content-Type: application/json' \
+  -d '{"confirm_install":true}' \
+  https://管理地址/api/v1/firmware/update/install
 ```
 
-### 可选组件
+### 升级后检查
 
-包内附带 `ly-route-smartdns`、`ly-route-xray` 两个 deb，安装后默认不启用，由控制面
-按 `LY_ROUTE_OPTIONAL_UNITS` 按需启停。需要开机自启时手动启用，或安装时设置
-`LY_ROUTE_ENABLE_OPTIONAL_SERVICES=1`。
+- 「系统状态」中组件健康为“全部正常”；
+- 「概览」中 WAN 线路在线、流量正常；
+- 管理员账号可以正常登录；
+- 如需命令行确认：
 
-## 故障排查
+```bash
+/usr/lib/ly-route/ly-route-control --version
+curl -ks https://127.0.0.1/api/v1/health
+```
 
-| 现象 | 处理 |
-| --- | --- |
-| 安装器找不到磁盘 | 检查 BIOS/UEFI 模式与 RAID 设置，改用 AHCI/JBOD |
-| 数据口未接管 | 查看 `ly-route-control` 日志与 `/etc/ly-route/inventory.json` |
-| Web 无法访问 | 确认管理口地址、`ly-route-pingora` 与防火墙规则 |
-| 升级后服务异常 | 等待 `ly-route-recovery.service` 回滚，或按升级文档回滚 |
+## 6. 备份、恢复与回滚
 
-更多问题请提交 GitHub Issue，并附上版本、架构、网卡型号与相关日志。
+- **日常备份**：「配置管理 → 导出配置」保存 JSON 文件；重要变更前创建快照。
+- **升级回滚**：升级时自动保留上一版本程序与配置备份，安装失败会自动恢复到升级前状态。
+- **恢复出厂**：「配置管理 → 配置初始化」，输入 `RESET` 确认；执行后需要重新配置并应用。
+- **整机重装**：使用 ISO 重新安装后，在「配置管理 → 导入配置」恢复备份并应用。

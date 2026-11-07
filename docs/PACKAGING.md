@@ -27,7 +27,7 @@ sudo apt-get install -y xorriso zstd
 packaging/build-gateway-iso-from-base.sh \
   --version 1.1.4 \
   --package ly-route-upgrade-gateway-bookworm-amd64.tar.zst \
-  --base-iso ly-route-gateway-gui-installer-1.1.3.iso \
+  --base-iso ly-route-gateway-gui-installer.iso \
   --out dist
 ```
 
@@ -53,7 +53,7 @@ dist/ly-route-gateway-gui-installer.iso.sha256
 packaging/build-arm64-installer-from-base.sh \
   --version 1.1.4 \
   --package ly-route-upgrade-gateway-bookworm-arm64.tar.zst \
-  --base-installer ly-route-gateway-arm64-installer-1.1.3.tar.zst \
+  --base-installer ly-route-gateway-arm64-installer.tar.zst \
   --out dist \
   --commit "$(git rev-parse HEAD)"
 ```
@@ -87,7 +87,7 @@ dist/ly-route-gateway-arm64-installer.tar.zst.sha256
 | 参数 | 说明 |
 | --- | --- |
 | `version` | 目标版本，例如 `1.1.4` |
-| `base_version` | 基础产物的 Release 标签，例如 `v1.1.3` |
+| `base_version` | 基础产物的 Release 标签，例如 `v1.2` |
 | `package_url` | x86 升级包直链；留空则从目标版本 Release 下载 |
 | `arm_package_url` | ARM64 升级包直链；留空则从目标版本 Release 下载 |
 
