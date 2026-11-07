@@ -83,14 +83,18 @@ Web 控制台：**系统 → 固件升级**，上传与架构匹配的升级包�
 ## 界面
 
 <p align="center">
-  <img src="docs/screenshots/gateway-interfaces.png" alt="网卡设置" width="49%">
-  <img src="docs/screenshots/gateway-runtime.png" alt="系统状态" width="49%">
+  <img src="docs/screenshots/gateway-overview.png" alt="总览" width="100%">
 </p>
 
-<p align="center">
-  <img src="docs/screenshots/gateway-login.png" alt="登录" width="49%">
-  <img src="docs/screenshots/gateway-overview.png" alt="总览" width="49%">
-</p>
+| 网卡设置 | 策略路由 |
+|---|---|
+| ![](docs/screenshots/gateway-interfaces.png) | ![](docs/screenshots/gateway-routing.png) |
+
+| DNS 策略 | 系统状态 |
+|---|---|
+| ![](docs/screenshots/gateway-dns.png) | ![](docs/screenshots/gateway-runtime.png) |
+
+更多界面见 [docs/](docs/)。
 
 ## 系统要求
 
