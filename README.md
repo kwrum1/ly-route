@@ -2,7 +2,7 @@
   <img src="docs/screenshots/gateway-overview.png" alt="Ly Route 总览" width="100%">
 </p>
 
-<h1 align="center">Ly Route 出口网关 1.4</h1>
+<h1 align="center">Ly Route 出口网关 1.4.1</h1>
 
 <p align="center">
 面向 x86-64 与 ARM64 设备的企业出口网关<br>
@@ -17,16 +17,16 @@
 
 ## 下载
 
-最新正式版：**[v1.4](https://github.com/kwrum1/ly-route/releases/tag/v1.4)**
+最新正式版：**[v1.4.1](https://github.com/kwrum1/ly-route/releases/tag/v1.4)**
 
 | 平台 | 产物 | 用途 |
 | --- | --- | --- |
-| x86_64 | [`ly-route-gateway-gui-installer.iso`](https://github.com/kwrum1/ly-route/releases/download/v1.4/ly-route-gateway-gui-installer.iso) | 整机安装（BIOS/UEFI 图形安装器） |
-| x86_64 | [`ly-route-upgrade-gateway-bookworm-amd64.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.4/ly-route-upgrade-gateway-bookworm-amd64.tar.zst) | 原地升级 |
-| ARM64 | [`ly-route-gateway-arm64-installer.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.4/ly-route-gateway-arm64-installer.tar.zst) | Armbian Bookworm 一键安装 |
-| ARM64 | [`ly-route-upgrade-gateway-bookworm-arm64.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.4/ly-route-upgrade-gateway-bookworm-arm64.tar.zst) | ARM64 原地升级 |
+| x86_64 | [`ly-route-gateway-gui-installer.iso`](https://github.com/kwrum1/ly-route/releases/download/v1.4.1/ly-route-gateway-gui-installer.iso) | 整机安装（BIOS/UEFI 图形安装器） |
+| x86_64 | [`ly-route-upgrade-gateway-bookworm-amd64.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.4.1/ly-route-upgrade-gateway-bookworm-amd64.tar.zst) | 原地升级 |
+| ARM64 | [`ly-route-gateway-arm64-installer.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.4.1/ly-route-gateway-arm64-installer.tar.zst) | Armbian Bookworm 一键安装 |
+| ARM64 | [`ly-route-upgrade-gateway-bookworm-arm64.tar.zst`](https://github.com/kwrum1/ly-route/releases/download/v1.4.1/ly-route-upgrade-gateway-bookworm-arm64.tar.zst) | ARM64 原地升级 |
 
-校验文件：[`SHA256SUMS`](https://github.com/kwrum1/ly-route/releases/download/v1.4/SHA256SUMS)
+校验文件：[`SHA256SUMS`](https://github.com/kwrum1/ly-route/releases/download/v1.4.1/SHA256SUMS)
 
 ## 功能
 
@@ -107,13 +107,13 @@ Web 控制台：**系统 → 固件升级**，上传与架构匹配的升级包�
 sha256sum -c SHA256SUMS
 ```
 
-v1.4 的 SHA256：
+v1.4.1 的 SHA256：
 
 ```text
-6fb93c27e9ac3ac3ef8892c293aa0267b540e5ec0aa90f76cfe34c733bd9fbe5  ly-route-upgrade-gateway-bookworm-amd64.tar.zst
-8d8b712a27dfadef10c158c93fc3e0052064ed5d0c8aecda7ed315078b019a99  ly-route-gateway-gui-installer.iso
-a699fcf665480150562cf38fd7a4fd5d923e95fac4e81aa3b95b8888536d95e5  ly-route-gateway-arm64-installer.tar.zst
-d5b6b68439cbf723dab6204c09b649c41c4a6e5d633f276925c4b82dfcfa6825  ly-route-upgrade-gateway-bookworm-arm64.tar.zst
+86bbfe3242499c8aead6e94a4454c2ad76324b25dfe5a136e65b38b6359f4039  ly-route-upgrade-gateway-bookworm-amd64.tar.zst
+cca6ee199fa357a0fb28d83c3d000cacb1ade350c7e80aab97fccf8b8ba6f91a  ly-route-gateway-gui-installer.iso
+13800f66d313f5d73bdf1da47619c4fbc804b87afc39d6a20f04baf8c39721b7  ly-route-gateway-arm64-installer.tar.zst
+39013af009c5df47d4d3ec00d13dc65081984c4dbb15a10097b11da503518678  ly-route-upgrade-gateway-bookworm-arm64.tar.zst
 ```
 
 ## 仓库结构
