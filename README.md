@@ -17,7 +17,7 @@
 
 ## 下载
 
-最新正式版：**[v1.5.0](https://github.com/kwrum1/ly-route/releases/tag/v1.4.1)**
+最新正式版：**[v1.5.0](https://github.com/kwrum1/ly-route/releases/tag/v1.5.0)**
 
 | 平台 | 产物 | 用途 |
 | --- | --- | --- |
